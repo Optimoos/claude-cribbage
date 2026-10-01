@@ -1,13 +1,16 @@
 package server
 
 import (
-	"math/rand/v2"
+	"context"
+	"fmt"
 	"sync"
+	"time"
 
 	"cribbage/internal/bots"
 	"cribbage/internal/engine"
 	"cribbage/internal/protocol"
 	"cribbage/internal/protocol/pb"
+	"cribbage/internal/store"
 )
 
 type seat struct {
@@ -19,6 +22,10 @@ type seat struct {
 
 // game is an actor. Fields below "owned by the actor" may only be touched
 // by commands running on its goroutine (see submit).
+//
+// Every command that changes the game commits the change to the GameStore
+// before publishing it (write-ahead), so a client never sees a state that a
+// restart would lose. If the commit fails the change is rolled back.
 type game struct {
 	id    string
 	srv   *Server
@@ -33,6 +40,9 @@ type game struct {
 	status   pb.GameStatus
 	winner   int
 	resigned bool
+	created  time.Time
+	unsaved  []store.Action // applied but not yet committed
+	dirty    bool           // header changed since the last commit
 	obs      engine.Observation
 	legal    []engine.Action
 
@@ -51,12 +61,18 @@ type summary struct {
 }
 
 func (g *game) run() {
-	for f := range g.inbox {
-		f()
-		if g.status == pb.GameStatus_GAME_STATUS_FINISHED {
-			g.srv.removeGame(g)
-			g.srv.stats.gamesFinished.Add(1)
-			close(g.done)
+	defer g.srv.actors.Done()
+	defer close(g.done)
+	for {
+		select {
+		case f := <-g.inbox:
+			f()
+			if g.status == pb.GameStatus_GAME_STATUS_FINISHED {
+				g.srv.removeGame(g)
+				g.srv.stats.gamesFinished.Add(1)
+				return
+			}
+		case <-g.srv.quit:
 			return
 		}
 	}
@@ -89,15 +105,106 @@ func (g *game) seatOf(userID int64) int {
 	return -1
 }
 
+func (g *game) record() store.Game {
+	r := store.Game{
+		ID: g.id, Seed: g.seed, Status: int(g.status), Winner: g.winner, Resigned: g.resigned,
+		Created: g.created, Updated: time.Now(),
+	}
+	for i, s := range g.seats {
+		r.Seats[i] = store.Seat{UserID: s.userID, Nickname: s.nickname, Bot: s.botName}
+	}
+	if g.eng != nil {
+		r.Scores = g.eng.Scores()
+	}
+	return r
+}
+
+// snapshot captures the mutable state so a failed commit can be undone.
+type snapshot struct {
+	eng      *engine.Game
+	seats    [2]seat
+	seq      uint32
+	status   pb.GameStatus
+	winner   int
+	resigned bool
+	dirty    bool
+}
+
+func (g *game) snapshot() snapshot {
+	s := snapshot{seats: g.seats, seq: g.seq, status: g.status, winner: g.winner, resigned: g.resigned, dirty: g.dirty}
+	if g.eng != nil {
+		s.eng = g.eng.Clone()
+	}
+	return s
+}
+
+func (g *game) rollback(s snapshot) {
+	g.eng, g.seats, g.seq, g.status, g.winner, g.resigned, g.dirty = s.eng, s.seats, s.seq, s.status, s.winner, s.resigned, s.dirty
+	g.unsaved = g.unsaved[:0]
+}
+
+// save commits unsaved actions and header changes.
+func (g *game) save() error {
+	var hdr *store.Game
+	if g.dirty {
+		r := g.record()
+		hdr = &r
+	}
+	if hdr == nil && len(g.unsaved) == 0 {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := g.srv.gameStore.CommitGame(ctx, g.id, hdr, g.unsaved); err != nil {
+		return err
+	}
+	g.unsaved = g.unsaved[:0]
+	g.dirty = false
+	return nil
+}
+
+// commit saves and publishes, or rolls back to snap and reports an error to
+// the requesters. It reports whether the change was kept.
+func (g *game) commit(snap snapshot, events []*pb.Event, replies ...reply) bool {
+	if err := g.save(); err != nil {
+		g.srv.log.Error("commit failed", "game", g.id, "err", err)
+		g.rollback(snap)
+		for _, r := range replies {
+			r.conn.sendError(r.id, pb.ErrorCode_ERROR_CODE_INTERNAL, g.id, "could not save game")
+		}
+		return false
+	}
+	g.publish(events, replies...)
+	return true
+}
+
+// apply performs an action and records it for the next commit.
+func (g *game) apply(p int, a engine.Action) error {
+	if err := g.eng.Apply(p, a); err != nil {
+		return err
+	}
+	g.seq++
+	g.unsaved = append(g.unsaved, store.Action{Seq: g.seq, Seat: p, Action: a})
+	g.srv.stats.actions.Add(1)
+	return nil
+}
+
 // start deals the first hand and lets bots act.
 func (g *game) start(replies ...reply) {
-	g.seed = rand.Uint64()
+	snap := g.snapshot()
 	g.eng = engine.NewGame(g.seed)
-	g.status = pb.GameStatus_GAME_STATUS_ACTIVE
-	g.srv.stats.gamesStarted.Add(1)
+	if g.status != pb.GameStatus_GAME_STATUS_ACTIVE {
+		g.status = pb.GameStatus_GAME_STATUS_ACTIVE
+		g.dirty = true
+	}
 	events := protocol.AppendEvents(nil, g.eng.Events())
 	events = g.driveBots(events)
-	g.publish(events, replies...)
+	if !g.commit(snap, events, replies...) {
+		// A game that cannot be saved cannot be played; drop it.
+		g.status = pb.GameStatus_GAME_STATUS_FINISHED
+		return
+	}
+	g.srv.stats.gamesStarted.Add(1)
 }
 
 func (g *game) join(c *Conn, id uint32) {
@@ -109,9 +216,20 @@ func (g *game) join(c *Conn, id uint32) {
 		c.sendError(id, pb.ErrorCode_ERROR_CODE_BAD_REQUEST, g.id, "cannot join your own game")
 		return
 	}
+	snap := g.snapshot()
 	g.seats[1] = seat{userID: c.user.ID, nickname: c.user.Nickname}
+	g.dirty = true
+	g.eng = engine.NewGame(g.seed)
+	g.status = pb.GameStatus_GAME_STATUS_ACTIVE
+	if err := g.save(); err != nil {
+		g.srv.log.Error("commit failed", "game", g.id, "err", err)
+		g.rollback(snap)
+		c.sendError(id, pb.ErrorCode_ERROR_CODE_INTERNAL, g.id, "could not save game")
+		return
+	}
 	g.srv.gameJoined(g, c.user.ID)
-	g.start(reply{c, id})
+	g.srv.stats.gamesStarted.Add(1)
+	g.publish(protocol.AppendEvents(nil, g.eng.Events()), reply{c, id})
 }
 
 func (g *game) act(c *Conn, id uint32, a *pb.Action) {
@@ -129,15 +247,14 @@ func (g *game) act(c *Conn, id uint32, a *pb.Action) {
 		c.sendError(id, pb.ErrorCode_ERROR_CODE_BAD_REQUEST, g.id, err.Error())
 		return
 	}
-	if err := g.eng.Apply(p, action); err != nil {
+	snap := g.snapshot()
+	if err := g.apply(p, action); err != nil {
 		c.sendError(id, pb.ErrorCode_ERROR_CODE_ILLEGAL_ACTION, g.id, err.Error())
 		return
 	}
-	g.seq++
-	g.srv.stats.actions.Add(1)
 	events := protocol.AppendEvents(nil, g.eng.Events())
 	events = g.driveBots(events)
-	g.publish(events, reply{c, id})
+	g.commit(snap, events, reply{c, id})
 }
 
 // driveBots lets bot seats act until a human must move or the game ends.
@@ -152,13 +269,11 @@ func (g *game) driveBots(events []*pb.Event) []*pb.Event {
 			g.eng.ObserveInto(p, &g.obs)
 			g.legal = g.eng.AppendLegal(p, g.legal[:0])
 			a := b.Choose(&g.obs, g.legal)
-			if err := g.eng.Apply(p, a); err != nil {
+			if err := g.apply(p, a); err != nil {
 				// A bot bug must not wedge the game: resign on its behalf.
 				g.srv.log.Error("bot chose illegal action", "game", g.id, "bot", g.seats[p].botName, "action", a, "err", err)
 				return append(events, g.resignSeat(p))
 			}
-			g.seq++
-			g.srv.stats.actions.Add(1)
 			events = protocol.AppendEvents(events, g.eng.Events())
 			acted = true
 		}
@@ -166,11 +281,24 @@ func (g *game) driveBots(events []*pb.Event) []*pb.Event {
 			break
 		}
 	}
-	if g.eng.Over() {
+	if g.eng.Over() && g.status != pb.GameStatus_GAME_STATUS_FINISHED {
 		g.status = pb.GameStatus_GAME_STATUS_FINISHED
 		g.winner = g.eng.Winner()
+		g.dirty = true
 	}
 	return events
+}
+
+// resume runs after a restart: bots may owe a move that was never made.
+func (g *game) resume() {
+	if g.status != pb.GameStatus_GAME_STATUS_ACTIVE {
+		return
+	}
+	snap := g.snapshot()
+	events := g.driveBots(nil)
+	if len(g.unsaved) > 0 || g.dirty {
+		g.commit(snap, events)
+	}
 }
 
 func (g *game) resign(c *Conn, id uint32) {
@@ -179,12 +307,14 @@ func (g *game) resign(c *Conn, id uint32) {
 		c.sendError(id, pb.ErrorCode_ERROR_CODE_NOT_IN_GAME, g.id, "not a player in this game")
 		return
 	}
+	snap := g.snapshot()
 	switch g.status {
 	case pb.GameStatus_GAME_STATUS_WAITING: // cancel an open game
 		g.status = pb.GameStatus_GAME_STATUS_FINISHED
-		g.publish(nil, reply{c, id})
+		g.dirty = true
+		g.commit(snap, nil, reply{c, id})
 	case pb.GameStatus_GAME_STATUS_ACTIVE:
-		g.publish([]*pb.Event{g.resignSeat(p)}, reply{c, id})
+		g.commit(snap, []*pb.Event{g.resignSeat(p)}, reply{c, id})
 	default:
 		c.sendError(id, pb.ErrorCode_ERROR_CODE_GAME_UNAVAILABLE, g.id, "game is over")
 	}
@@ -194,6 +324,7 @@ func (g *game) resignSeat(p int) *pb.Event {
 	g.status = pb.GameStatus_GAME_STATUS_FINISHED
 	g.resigned = true
 	g.winner = 1 - p
+	g.dirty = true
 	s := g.eng.Scores()
 	return &pb.Event{Kind: pb.EventKind_EVENT_KIND_RESIGN, Seat: int32(p), Scores: []int32{int32(s[0]), int32(s[1])}}
 }
@@ -205,6 +336,18 @@ func (g *game) sync(c *Conn, id uint32) {
 		return
 	}
 	c.send(&pb.ServerMessage{RequestId: id, Body: &pb.ServerMessage_GameUpdate{GameUpdate: g.updateFor(p, nil, true)}})
+}
+
+// presenceChanged tells the other players that userID connected or left.
+func (g *game) presenceChanged(userID int64) {
+	g.updateSummary()
+	for p, s := range g.seats {
+		if s.userID == 0 || s.userID == userID {
+			continue
+		}
+		m := &pb.ServerMessage{Body: &pb.ServerMessage_GameUpdate{GameUpdate: g.updateFor(p, nil, false)}}
+		g.srv.pushUser(s.userID, m, nil)
+	}
 }
 
 // publish sends each human player an update with their own observation.
@@ -272,4 +415,45 @@ func (g *game) summaryFor(userID int64) *pb.GameSummary {
 		}
 	}
 	return out
+}
+
+// restoreGame rebuilds a game from its stored record by replaying actions.
+func (s *Server) restoreGame(rec store.GameWithActions) (*game, error) {
+	r := rec.Game
+	g := &game{
+		id:       r.ID,
+		srv:      s,
+		inbox:    make(chan func(), 64),
+		done:     make(chan struct{}),
+		seed:     r.Seed,
+		status:   pb.GameStatus(r.Status),
+		winner:   r.Winner,
+		resigned: r.Resigned,
+		created:  r.Created,
+	}
+	for i, st := range r.Seats {
+		g.seats[i] = seat{userID: st.UserID, nickname: st.Nickname, botName: st.Bot}
+		if st.Bot != "" {
+			b, err := bots.New(st.Bot, newSeed())
+			if err != nil {
+				return nil, err
+			}
+			g.seats[i].bot = b
+		}
+	}
+	if g.status == pb.GameStatus_GAME_STATUS_ACTIVE {
+		g.eng = engine.NewGame(r.Seed)
+		g.eng.SetQuiet(true)
+		for _, a := range rec.Actions {
+			if err := g.eng.Apply(a.Seat, a.Action); err != nil {
+				return nil, fmt.Errorf("replaying action %d (%v by seat %d): %w", a.Seq, a.Action, a.Seat, err)
+			}
+		}
+		g.eng.SetQuiet(false)
+		g.seq = uint32(len(rec.Actions))
+	} else if len(rec.Actions) > 0 {
+		return nil, fmt.Errorf("waiting game has %d actions", len(rec.Actions))
+	}
+	g.updateSummary()
+	return g, nil
 }

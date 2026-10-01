@@ -167,8 +167,11 @@ message GameSummary {
 }
 
 message GameList {
-  repeated GameSummary mine = 1;
+  repeated GameSummary mine = 1; // the user's waiting and active games
   repeated GameSummary open = 2; // other users' games waiting for a player
+  // The user's most recently finished games, newest first. Lets a client
+  // that was disconnected learn how a game ended.
+  repeated GameSummary recent = 3;
 }
 
 // GameUpdate is sent to each player after every change to a game.

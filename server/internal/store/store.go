@@ -1,13 +1,13 @@
-// Package store defines persistence for users and sessions. Game
-// persistence is added in milestone 4.
+// Package store persists users, sessions and games. Memory is for tests and
+// throwaway servers; SQLite survives restarts.
 package store
 
 import (
 	"context"
 	"errors"
-	"strings"
-	"sync"
 	"time"
+
+	"cribbage/internal/engine"
 )
 
 var (
@@ -37,74 +37,57 @@ type Store interface {
 	SessionUser(ctx context.Context, token string) (int64, error)
 }
 
-// Memory is an in-memory Store.
-type Memory struct {
-	mu       sync.RWMutex
-	nextID   int64
-	byID     map[int64]*User
-	byName   map[string]*User
-	sessions map[string]session
+// Game status values; they match the wire protocol's GameStatus.
+const (
+	StatusWaiting  = 1
+	StatusActive   = 2
+	StatusFinished = 3
+)
+
+// Seat describes who sits in one seat of a game.
+type Seat struct {
+	UserID   int64 // 0 for bots and empty seats
+	Nickname string
+	Bot      string // server-side bot name, if any
 }
 
-type session struct {
-	userID  int64
-	expires time.Time
+// Game is the persistent header of a game. Its state is rebuilt by
+// replaying its actions from Seed.
+type Game struct {
+	ID       string
+	Seed     uint64
+	Status   int
+	Seats    [2]Seat
+	Winner   int    // -1 if none
+	Scores   [2]int // final scores once finished
+	Resigned bool
+	Created  time.Time
+	Updated  time.Time
 }
 
-func NewMemory() *Memory {
-	return &Memory{byID: map[int64]*User{}, byName: map[string]*User{}, sessions: map[string]session{}}
+// Action is one applied action. Seq starts at 1 and has no gaps.
+type Action struct {
+	Seq    uint32
+	Seat   int
+	Action engine.Action
 }
 
-func (m *Memory) CreateUser(_ context.Context, u *User) error {
-	key := strings.ToLower(u.Username)
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if _, ok := m.byName[key]; ok {
-		return ErrUsernameTaken
-	}
-	m.nextID++
-	u.ID = m.nextID
-	c := *u
-	m.byID[c.ID] = &c
-	m.byName[key] = &c
-	return nil
+// GameWithActions is a game and its full action log.
+type GameWithActions struct {
+	Game    Game
+	Actions []Action
 }
 
-func (m *Memory) UserByUsername(_ context.Context, username string) (*User, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	u, ok := m.byName[strings.ToLower(username)]
-	if !ok {
-		return nil, ErrNotFound
-	}
-	c := *u
-	return &c, nil
-}
-
-func (m *Memory) UserByID(_ context.Context, id int64) (*User, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	u, ok := m.byID[id]
-	if !ok {
-		return nil, ErrNotFound
-	}
-	c := *u
-	return &c, nil
-}
-
-func (m *Memory) CreateSession(_ context.Context, token string, userID int64, expires time.Time) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.sessions[token] = session{userID: userID, expires: expires}
-	return nil
-}
-
-func (m *Memory) SessionUser(_ context.Context, token string) (int64, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	s, ok := m.sessions[token]
-	if !ok || time.Now().After(s.expires) {
-		return 0, ErrNotFound
-	}
-	return s.userID, nil
+// GameStore persists games. Writes for one game are issued sequentially by
+// that game's owner.
+type GameStore interface {
+	CreateGame(ctx context.Context, g *Game) error
+	// CommitGame atomically appends acts and, if g is non-nil, updates the
+	// game header. It returns once the write is durable.
+	CommitGame(ctx context.Context, gameID string, g *Game, acts []Action) error
+	// LoadUnfinished returns every waiting or active game with its actions.
+	LoadUnfinished(ctx context.Context) ([]GameWithActions, error)
+	// RecentGames returns a user's most recently finished games, newest
+	// first.
+	RecentGames(ctx context.Context, userID int64, limit int) ([]Game, error)
 }

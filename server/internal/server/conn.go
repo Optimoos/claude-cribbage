@@ -11,11 +11,13 @@ import (
 // writer goroutine drains the outbound queue so that slow clients never
 // block game actors.
 type Conn struct {
-	srv  *Server
-	t    Transport
-	out  chan *pb.ServerMessage
-	done chan struct{}
-	once sync.Once
+	srv       *Server
+	t         Transport
+	out       chan *pb.ServerMessage
+	done      chan struct{}
+	once      sync.Once
+	drain     chan struct{} // closed to make the writer flush and close
+	drainOnce sync.Once
 
 	// user is set once by the reader goroutine during authentication, before
 	// the connection is registered or used in any game command.
@@ -57,10 +59,29 @@ func (c *Conn) writeLoop() {
 					return
 				}
 			}
+		case <-c.drain:
+			for {
+				select {
+				case m := <-c.out:
+					if c.t.Write(m) != nil {
+						c.close()
+						return
+					}
+				default:
+					_ = c.t.Flush()
+					c.close()
+					return
+				}
+			}
 		case <-c.done:
 			return
 		}
 	}
+}
+
+// drainAndClose closes the connection once queued messages are sent.
+func (c *Conn) drainAndClose() {
+	c.drainOnce.Do(func() { close(c.drain) })
 }
 
 func (c *Conn) close() {

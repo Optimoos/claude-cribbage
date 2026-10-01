@@ -1717,9 +1717,12 @@ func (x *GameSummary) GetResigned() bool {
 }
 
 type GameList struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Mine          []*GameSummary         `protobuf:"bytes,1,rep,name=mine,proto3" json:"mine,omitempty"`
-	Open          []*GameSummary         `protobuf:"bytes,2,rep,name=open,proto3" json:"open,omitempty"` // other users' games waiting for a player
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Mine  []*GameSummary         `protobuf:"bytes,1,rep,name=mine,proto3" json:"mine,omitempty"` // the user's waiting and active games
+	Open  []*GameSummary         `protobuf:"bytes,2,rep,name=open,proto3" json:"open,omitempty"` // other users' games waiting for a player
+	// The user's most recently finished games, newest first. Lets a client
+	// that was disconnected learn how a game ended.
+	Recent        []*GameSummary `protobuf:"bytes,3,rep,name=recent,proto3" json:"recent,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1764,6 +1767,13 @@ func (x *GameList) GetMine() []*GameSummary {
 func (x *GameList) GetOpen() []*GameSummary {
 	if x != nil {
 		return x.Open
+	}
+	return nil
+}
+
+func (x *GameList) GetRecent() []*GameSummary {
+	if x != nil {
+		return x.Recent
 	}
 	return nil
 }
@@ -2497,10 +2507,11 @@ const file_cribbage_v1_cribbage_proto_rawDesc = "" +
 	"\x06scores\x18\x05 \x03(\x05R\x06scores\x12\x16\n" +
 	"\x06winner\x18\x06 \x01(\x05R\x06winner\x12\x1b\n" +
 	"\tyour_turn\x18\a \x01(\bR\byourTurn\x12\x1a\n" +
-	"\bresigned\x18\b \x01(\bR\bresigned\"f\n" +
+	"\bresigned\x18\b \x01(\bR\bresigned\"\x98\x01\n" +
 	"\bGameList\x12,\n" +
 	"\x04mine\x18\x01 \x03(\v2\x18.cribbage.v1.GameSummaryR\x04mine\x12,\n" +
-	"\x04open\x18\x02 \x03(\v2\x18.cribbage.v1.GameSummaryR\x04open\"\xf3\x01\n" +
+	"\x04open\x18\x02 \x03(\v2\x18.cribbage.v1.GameSummaryR\x04open\x120\n" +
+	"\x06recent\x18\x03 \x03(\v2\x18.cribbage.v1.GameSummaryR\x06recent\"\xf3\x01\n" +
 	"\n" +
 	"GameUpdate\x12,\n" +
 	"\x04game\x18\x01 \x01(\v2\x18.cribbage.v1.GameSummaryR\x04game\x12\x10\n" +
@@ -2686,21 +2697,22 @@ var file_cribbage_v1_cribbage_proto_depIdxs = []int32{
 	24, // 22: cribbage.v1.GameSummary.players:type_name -> cribbage.v1.PlayerInfo
 	25, // 23: cribbage.v1.GameList.mine:type_name -> cribbage.v1.GameSummary
 	25, // 24: cribbage.v1.GameList.open:type_name -> cribbage.v1.GameSummary
-	25, // 25: cribbage.v1.GameUpdate.game:type_name -> cribbage.v1.GameSummary
-	29, // 26: cribbage.v1.GameUpdate.observation:type_name -> cribbage.v1.Observation
-	33, // 27: cribbage.v1.GameUpdate.events:type_name -> cribbage.v1.Event
-	30, // 28: cribbage.v1.GameUpdate.legal:type_name -> cribbage.v1.Action
-	2,  // 29: cribbage.v1.Observation.phase:type_name -> cribbage.v1.Phase
-	28, // 30: cribbage.v1.Observation.played:type_name -> cribbage.v1.PlayedCard
-	3,  // 31: cribbage.v1.Action.kind:type_name -> cribbage.v1.ActionKind
-	4,  // 32: cribbage.v1.Event.kind:type_name -> cribbage.v1.EventKind
-	31, // 33: cribbage.v1.Event.peg:type_name -> cribbage.v1.PegScore
-	32, // 34: cribbage.v1.Event.show:type_name -> cribbage.v1.ShowScore
-	35, // [35:35] is the sub-list for method output_type
-	35, // [35:35] is the sub-list for method input_type
-	35, // [35:35] is the sub-list for extension type_name
-	35, // [35:35] is the sub-list for extension extendee
-	0,  // [0:35] is the sub-list for field type_name
+	25, // 25: cribbage.v1.GameList.recent:type_name -> cribbage.v1.GameSummary
+	25, // 26: cribbage.v1.GameUpdate.game:type_name -> cribbage.v1.GameSummary
+	29, // 27: cribbage.v1.GameUpdate.observation:type_name -> cribbage.v1.Observation
+	33, // 28: cribbage.v1.GameUpdate.events:type_name -> cribbage.v1.Event
+	30, // 29: cribbage.v1.GameUpdate.legal:type_name -> cribbage.v1.Action
+	2,  // 30: cribbage.v1.Observation.phase:type_name -> cribbage.v1.Phase
+	28, // 31: cribbage.v1.Observation.played:type_name -> cribbage.v1.PlayedCard
+	3,  // 32: cribbage.v1.Action.kind:type_name -> cribbage.v1.ActionKind
+	4,  // 33: cribbage.v1.Event.kind:type_name -> cribbage.v1.EventKind
+	31, // 34: cribbage.v1.Event.peg:type_name -> cribbage.v1.PegScore
+	32, // 35: cribbage.v1.Event.show:type_name -> cribbage.v1.ShowScore
+	36, // [36:36] is the sub-list for method output_type
+	36, // [36:36] is the sub-list for method input_type
+	36, // [36:36] is the sub-list for extension type_name
+	36, // [36:36] is the sub-list for extension extendee
+	0,  // [0:36] is the sub-list for field type_name
 }
 
 func init() { file_cribbage_v1_cribbage_proto_init() }

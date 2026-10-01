@@ -6,6 +6,7 @@ package server
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"math/rand/v2"
 	"net"
@@ -35,15 +36,21 @@ type Transport interface {
 // Config configures a Server.
 type Config struct {
 	Auth       *auth.Service
+	Games      store.GameStore // defaults to an in-memory store
 	Logger     *slog.Logger
 	OutboxSize int // per-connection outbound queue; default 4096
 }
 
 // Server routes client requests to game actors.
 type Server struct {
-	auth   *auth.Service
-	log    *slog.Logger
-	outbox int
+	auth      *auth.Service
+	gameStore store.GameStore
+	log       *slog.Logger
+	outbox    int
+
+	quit     chan struct{} // closed by Shutdown
+	quitOnce sync.Once
+	actors   sync.WaitGroup
 
 	// Lock order: gmu, then game.smu, then cmu. Never hold any of these
 	// while submitting to a game inbox.
@@ -52,8 +59,9 @@ type Server struct {
 	userGames map[int64]map[string]*game
 	open      map[string]*game // waiting for a second player
 
-	cmu   sync.RWMutex
-	conns map[int64]map[*Conn]struct{}
+	cmu      sync.RWMutex
+	conns    map[int64]map[*Conn]struct{} // authenticated, by user
+	allConns map[*Conn]struct{}
 
 	qmu   sync.Mutex
 	queue []matchRequest
@@ -76,10 +84,16 @@ func New(cfg Config) *Server {
 	if cfg.OutboxSize == 0 {
 		cfg.OutboxSize = 4096
 	}
+	if cfg.Games == nil {
+		cfg.Games = store.NewMemory()
+	}
 	return &Server{
 		auth:      cfg.Auth,
+		gameStore: cfg.Games,
 		log:       cfg.Logger,
 		outbox:    cfg.OutboxSize,
+		quit:      make(chan struct{}),
+		allConns:  map[*Conn]struct{}{},
 		games:     map[string]*game{},
 		userGames: map[int64]map[string]*game{},
 		open:      map[string]*game{},
@@ -125,7 +139,15 @@ func (s *Server) ServeTCP(ln net.Listener) error {
 
 // ServeConn handles one client until its transport fails or is closed.
 func (s *Server) ServeConn(t Transport) {
-	c := &Conn{srv: s, t: t, out: make(chan *pb.ServerMessage, s.outbox), done: make(chan struct{})}
+	c := &Conn{srv: s, t: t, out: make(chan *pb.ServerMessage, s.outbox), done: make(chan struct{}), drain: make(chan struct{})}
+	s.cmu.Lock()
+	if s.shuttingDown() {
+		s.cmu.Unlock()
+		t.Close()
+		return
+	}
+	s.allConns[c] = struct{}{}
+	s.cmu.Unlock()
 	s.stats.conns.Add(1)
 	go c.writeLoop()
 	defer func() {
@@ -238,6 +260,9 @@ func (s *Server) withGame(c *Conn, id uint32, gameID string, fn func(*game)) {
 	g := s.games[gameID]
 	s.gmu.RUnlock()
 	if g == nil || !g.submit(func() { fn(g) }) {
+		if s.shuttingDown() {
+			return // the connection is about to close; the client will resync
+		}
 		c.sendError(id, pb.ErrorCode_ERROR_CODE_NOT_FOUND, gameID, "no such active game")
 	}
 }
@@ -245,16 +270,30 @@ func (s *Server) withGame(c *Conn, id uint32, gameID string, fn func(*game)) {
 func (s *Server) createGame(c *Conn, id uint32, botName string) {
 	creator := seat{userID: c.user.ID, nickname: c.user.Nickname}
 	if botName == "" {
-		g := s.newGame([2]seat{creator, {}}, false)
+		g, err := s.newGame([2]seat{creator, {}}, false)
+		if err != nil {
+			if s.shuttingDown() {
+				return
+			}
+			c.sendError(id, pb.ErrorCode_ERROR_CODE_INTERNAL, "", "could not create game")
+			return
+		}
 		g.submit(func() { g.publish(nil, reply{c, id}) })
 		return
 	}
-	b, err := bots.New(botName, rand.Uint64())
+	b, err := bots.New(botName, newSeed())
 	if err != nil {
 		c.sendError(id, pb.ErrorCode_ERROR_CODE_BAD_REQUEST, "", err.Error())
 		return
 	}
-	g := s.newGame([2]seat{creator, {nickname: botName + " bot", botName: botName, bot: b}}, true)
+	g, err := s.newGame([2]seat{creator, {nickname: botName + " bot", botName: botName, bot: b}}, true)
+	if err != nil {
+		if s.shuttingDown() {
+			return
+		}
+		c.sendError(id, pb.ErrorCode_ERROR_CODE_INTERNAL, "", "could not create game")
+		return
+	}
 	g.submit(func() { g.start(reply{c, id}) })
 }
 
@@ -266,7 +305,15 @@ func (s *Server) findMatch(c *Conn, id uint32) {
 			s.qmu.Unlock()
 			a := seat{userID: q.conn.user.ID, nickname: q.conn.user.Nickname}
 			b := seat{userID: c.user.ID, nickname: c.user.Nickname}
-			g := s.newGame([2]seat{a, b}, true)
+			g, err := s.newGame([2]seat{a, b}, true)
+			if err != nil {
+				if s.shuttingDown() {
+					return
+				}
+				q.conn.sendError(q.reqID, pb.ErrorCode_ERROR_CODE_INTERNAL, "", "could not create game")
+				c.sendError(id, pb.ErrorCode_ERROR_CODE_INTERNAL, "", "could not create game")
+				return
+			}
 			g.submit(func() { g.start(reply{q.conn, q.reqID}, reply{c, id}) })
 			return
 		}
@@ -291,6 +338,19 @@ func (s *Server) cancelMatch(userID int64) {
 func (s *Server) listGames(c *Conn, id uint32) {
 	const maxOpen = 100
 	list := &pb.GameList{}
+	// Query the database first so the in-memory snapshot below is as fresh
+	// as possible when sent. Clients must still tolerate a list that lags
+	// behind game updates: they are produced on different goroutines.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	recent, err := s.gameStore.RecentGames(ctx, c.user.ID, 20)
+	if err != nil {
+		s.log.Error("recent games", "user", c.user.ID, "err", err)
+	}
+	for _, g := range recent {
+		list.Recent = append(list.Recent, finishedSummary(g, c.user.ID))
+	}
+
 	s.gmu.RLock()
 	for _, g := range s.userGames[c.user.ID] {
 		list.Mine = append(list.Mine, g.summaryFor(c.user.ID))
@@ -307,32 +367,155 @@ func (s *Server) listGames(c *Conn, id uint32) {
 	c.send(&pb.ServerMessage{RequestId: id, Body: &pb.ServerMessage_GameList{GameList: list}})
 }
 
-// newGame registers a game and starts its actor. A game that is not ready
-// waits for a second player to join.
-func (s *Server) newGame(seats [2]seat, ready bool) *game {
+// finishedSummary describes a finished game from its stored record.
+func finishedSummary(g store.Game, userID int64) *pb.GameSummary {
+	out := &pb.GameSummary{
+		GameId:   g.ID,
+		Status:   pb.GameStatus_GAME_STATUS_FINISHED,
+		Seat:     -1,
+		Scores:   []int32{int32(g.Scores[0]), int32(g.Scores[1])},
+		Winner:   int32(g.Winner),
+		Resigned: g.Resigned,
+	}
+	for i, st := range g.Seats {
+		out.Players = append(out.Players, &pb.PlayerInfo{UserId: st.UserID, Nickname: st.Nickname, Bot: st.Bot})
+		if st.UserID == userID && userID != 0 {
+			out.Seat = int32(i)
+		}
+	}
+	return out
+}
+
+// newGame persists and registers a game and starts its actor. A game that
+// is not ready waits for a second player to join.
+func (s *Server) newGame(seats [2]seat, ready bool) (*game, error) {
+	if s.shuttingDown() {
+		return nil, errShuttingDown
+	}
 	g := &game{
-		id:     auth.RandomID(8),
-		srv:    s,
-		seats:  seats,
-		inbox:  make(chan func(), 64),
-		done:   make(chan struct{}),
-		status: pb.GameStatus_GAME_STATUS_WAITING,
-		winner: -1,
+		id:      newGameID(),
+		srv:     s,
+		seats:   seats,
+		inbox:   make(chan func(), 64),
+		done:    make(chan struct{}),
+		seed:    newSeed(),
+		status:  pb.GameStatus_GAME_STATUS_WAITING,
+		winner:  -1,
+		created: time.Now(),
+	}
+	if ready {
+		g.status = pb.GameStatus_GAME_STATUS_ACTIVE
+	}
+	rec := g.record()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := s.gameStore.CreateGame(ctx, &rec); err != nil {
+		s.log.Error("create game", "err", err)
+		return nil, err
 	}
 	g.updateSummary()
+	if err := s.register(g); err != nil {
+		return nil, err
+	}
+	return g, nil
+}
+
+var errShuttingDown = errors.New("server is shutting down")
+
+func (s *Server) register(g *game) error {
 	s.gmu.Lock()
+	if s.shuttingDown() {
+		s.gmu.Unlock()
+		return errShuttingDown
+	}
 	s.games[g.id] = g
-	for _, st := range seats {
+	for _, st := range g.seats {
 		if st.userID != 0 {
 			s.addUserGame(st.userID, g)
 		}
 	}
-	if !ready {
+	if g.status == pb.GameStatus_GAME_STATUS_WAITING {
 		s.open[g.id] = g
 	}
+	s.actors.Add(1) // under gmu, so never concurrent with Shutdown's Wait
 	s.gmu.Unlock()
 	go g.run()
-	return g
+	return nil
+}
+
+// Restore loads unfinished games from the store and resumes them. Call it
+// once, before serving connections.
+func (s *Server) Restore(ctx context.Context) (int, error) {
+	recs, err := s.gameStore.LoadUnfinished(ctx)
+	if err != nil {
+		return 0, err
+	}
+	n := 0
+	for _, rec := range recs {
+		g, err := s.restoreGame(rec)
+		if err != nil {
+			s.log.Error("cannot restore game; leaving it untouched", "game", rec.Game.ID, "err", err)
+			continue
+		}
+		if err := s.register(g); err != nil {
+			return n, err
+		}
+		g.submit(g.resume)
+		n++
+	}
+	return n, nil
+}
+
+// Shutdown stops the server in order: refuse new work, let every game
+// finish the command it is running (its changes are already persisted),
+// then deliver queued messages and disconnect clients. Games resume when a
+// new server calls Restore. Close listeners first.
+func (s *Server) Shutdown() {
+	s.quitOnce.Do(func() {
+		s.gmu.Lock()
+		s.cmu.Lock()
+		close(s.quit)
+		s.cmu.Unlock()
+		s.gmu.Unlock()
+
+		s.actors.Wait()
+
+		s.cmu.RLock()
+		conns := make([]*Conn, 0, len(s.allConns))
+		for c := range s.allConns {
+			conns = append(conns, c)
+		}
+		s.cmu.RUnlock()
+		timeout := time.After(5 * time.Second)
+		for _, c := range conns {
+			c.drainAndClose()
+		}
+		for _, c := range conns {
+			select {
+			case <-c.done:
+			case <-timeout:
+				c.close()
+			}
+		}
+	})
+}
+
+func (s *Server) shuttingDown() bool {
+	select {
+	case <-s.quit:
+		return true
+	default:
+		return false
+	}
+}
+
+func newSeed() uint64 { return rand.Uint64() }
+
+// newGameID returns a unique ID that sorts by creation time, so new games
+// are appended to the end of the database's games table instead of
+// scattered across it.
+func newGameID() string {
+	return fmt.Sprintf("%012x%08x", time.Now().UnixMilli(), rand.Uint32())
 }
 
 // addUserGame must be called with gmu held.
@@ -385,21 +568,43 @@ func (s *Server) registerConn(c *Conn) {
 		s.conns[c.user.ID] = m
 	}
 	m[c] = struct{}{}
+	first := len(m) == 1
 	s.cmu.Unlock()
+	if first {
+		s.notifyPresence(c.user.ID)
+	}
+}
+
+// notifyPresence tells a user's opponents that they connected or left.
+func (s *Server) notifyPresence(userID int64) {
+	if s.shuttingDown() {
+		return
+	}
+	for _, g := range s.gamesOf(userID) {
+		g.submit(func() { g.presenceChanged(userID) })
+	}
 }
 
 func (s *Server) unregisterConn(c *Conn) {
-	if c.user == nil {
-		return
-	}
 	s.cmu.Lock()
-	if m := s.conns[c.user.ID]; m != nil {
-		delete(m, c)
-		if len(m) == 0 {
-			delete(s.conns, c.user.ID)
+	delete(s.allConns, c)
+	last := false
+	if c.user != nil {
+		if m := s.conns[c.user.ID]; m != nil {
+			delete(m, c)
+			if len(m) == 0 {
+				delete(s.conns, c.user.ID)
+				last = true
+			}
 		}
 	}
 	s.cmu.Unlock()
+	if c.user == nil {
+		return
+	}
+	if last {
+		s.notifyPresence(c.user.ID)
+	}
 
 	s.qmu.Lock()
 	q := s.queue[:0]
