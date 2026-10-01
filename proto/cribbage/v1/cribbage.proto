@@ -1,0 +1,276 @@
+syntax = "proto3";
+
+package cribbage.v1;
+
+option csharp_namespace = "Cribbage.Protocol";
+option go_package = "cribbage/internal/protocol/pb";
+
+// Cards are encoded as suit*13 + (rank-1), giving 0..51.
+// Suits: 0 clubs, 1 diamonds, 2 hearts, 3 spades. Ranks: 1 ace .. 13 king.
+// Seats are 0 or 1; -1 means "none".
+
+// ---------------------------------------------------------------------------
+// Client -> server
+// ---------------------------------------------------------------------------
+
+message ClientMessage {
+  // Optional client-chosen id, echoed on the direct response or error.
+  uint32 request_id = 1;
+  oneof body {
+    Register register = 10;
+    Login login = 11;
+    Resume resume = 12;
+    CreateGame create_game = 20;
+    JoinGame join_game = 21;
+    ListGames list_games = 22;
+    FindMatch find_match = 23;
+    CancelMatch cancel_match = 24;
+    SyncGame sync_game = 25;
+    Act act = 30;
+    Resign resign = 31;
+    Ping ping = 40;
+  }
+}
+
+message Register {
+  string username = 1;
+  string password = 2;
+  string nickname = 3;
+}
+
+message Login {
+  string username = 1;
+  string password = 2;
+}
+
+// Resume authenticates with a token from a previous AuthOk.
+message Resume {
+  string token = 1;
+}
+
+message CreateGame {
+  // Name of a server-side bot opponent ("random", "heuristic"). Empty
+  // creates an open game that another player can join.
+  string bot = 1;
+}
+
+message JoinGame {
+  string game_id = 1;
+}
+
+message ListGames {}
+
+// FindMatch queues for a game against any other user who is also queued.
+// Each request yields one game, so a client may queue several at once.
+message FindMatch {}
+
+// CancelMatch removes all of this user's queued FindMatch requests.
+message CancelMatch {}
+
+// SyncGame requests a full GameUpdate for one game.
+message SyncGame {
+  string game_id = 1;
+}
+
+message Act {
+  string game_id = 1;
+  Action action = 2;
+}
+
+message Resign {
+  string game_id = 1;
+}
+
+message Ping {
+  uint64 client_time = 1;
+}
+
+// ---------------------------------------------------------------------------
+// Server -> client
+// ---------------------------------------------------------------------------
+
+message ServerMessage {
+  // The request_id of the client message this answers, or 0 if unsolicited.
+  uint32 request_id = 1;
+  oneof body {
+    Error error = 10;
+    AuthOk auth_ok = 11;
+    GameList game_list = 20;
+    GameUpdate game_update = 21;
+    MatchQueued match_queued = 22;
+    Ack ack = 23;
+    Pong pong = 40;
+  }
+}
+
+enum ErrorCode {
+  ERROR_CODE_UNSPECIFIED = 0;
+  ERROR_CODE_BAD_REQUEST = 1;
+  ERROR_CODE_UNAUTHENTICATED = 2;
+  ERROR_CODE_ALREADY_AUTHENTICATED = 3;
+  ERROR_CODE_USERNAME_TAKEN = 4;
+  ERROR_CODE_INVALID_CREDENTIALS = 5;
+  ERROR_CODE_NOT_FOUND = 6;
+  ERROR_CODE_NOT_IN_GAME = 7;
+  ERROR_CODE_ILLEGAL_ACTION = 8;
+  ERROR_CODE_GAME_UNAVAILABLE = 9;
+  ERROR_CODE_INTERNAL = 10;
+}
+
+message Error {
+  ErrorCode code = 1;
+  string message = 2;
+  string game_id = 3;
+}
+
+message AuthOk {
+  int64 user_id = 1;
+  string username = 2;
+  string nickname = 3;
+  // Token for Resume on a later connection.
+  string token = 4;
+}
+
+message MatchQueued {}
+
+// Ack confirms a request that has no more specific reply (CancelMatch).
+message Ack {}
+
+message Pong {
+  uint64 client_time = 1;
+  uint64 server_time = 2;
+}
+
+enum GameStatus {
+  GAME_STATUS_UNSPECIFIED = 0;
+  GAME_STATUS_WAITING = 1; // open game waiting for a second player
+  GAME_STATUS_ACTIVE = 2;
+  GAME_STATUS_FINISHED = 3;
+}
+
+message PlayerInfo {
+  int64 user_id = 1; // 0 for bots
+  string nickname = 2;
+  string bot = 3; // bot name for server-side bots, otherwise empty
+  bool connected = 4;
+}
+
+message GameSummary {
+  string game_id = 1;
+  GameStatus status = 2;
+  repeated PlayerInfo players = 3; // indexed by seat
+  int32 seat = 4; // the receiving user's seat, or -1
+  repeated int32 scores = 5;
+  int32 winner = 6;
+  bool your_turn = 7;
+  bool resigned = 8; // the game ended by resignation
+}
+
+message GameList {
+  repeated GameSummary mine = 1;
+  repeated GameSummary open = 2; // other users' games waiting for a player
+}
+
+// GameUpdate is sent to each player after every change to a game.
+message GameUpdate {
+  GameSummary game = 1;
+  // Number of actions applied so far.
+  uint32 seq = 2;
+  // Absent while the game is waiting for a second player.
+  Observation observation = 3;
+  // Events since the previous update. Empty on a full sync.
+  repeated Event events = 4;
+  // Legal actions for the receiving player; empty if it is not their turn.
+  repeated Action legal = 5;
+  // True when sent in response to a sync or reconnect rather than a change.
+  bool full = 6;
+}
+
+enum Phase {
+  PHASE_UNSPECIFIED = 0;
+  PHASE_DISCARD = 1;
+  PHASE_PEGGING = 2;
+  PHASE_GAME_OVER = 3;
+}
+
+message PlayedCard {
+  uint32 card = 1;
+  int32 seat = 2;
+}
+
+message Observation {
+  int32 seat = 1;
+  Phase phase = 2;
+  int32 dealer = 3;
+  int32 turn = 4; // -1 outside pegging
+  bool must_act = 5;
+  int32 hand_number = 6;
+  repeated int32 scores = 7;
+  int32 winner = 8;
+  repeated uint32 hand = 9; // cards still held
+  bool discarded = 10;
+  bool opp_discarded = 11;
+  repeated uint32 kept = 12; // the four kept cards, once discarded
+  repeated uint32 discards = 13; // this player's two crib cards, once discarded
+  optional uint32 starter = 14;
+  int32 count = 15;
+  repeated PlayedCard played = 16; // all cards played this hand
+  int32 seq_start = 17; // played[seq_start:] is the current count
+  int32 opp_hand_size = 18;
+}
+
+enum ActionKind {
+  ACTION_KIND_UNSPECIFIED = 0;
+  ACTION_KIND_DISCARD = 1;
+  ACTION_KIND_PLAY = 2;
+}
+
+message Action {
+  ActionKind kind = 1;
+  repeated uint32 cards = 2; // two cards for discard, one for play
+}
+
+enum EventKind {
+  EVENT_KIND_UNSPECIFIED = 0;
+  EVENT_KIND_CUT_FOR_DEAL = 1; // cards[0] cut by seat 0, cards[1] by seat 1
+  EVENT_KIND_DEAL = 2; // seat deals
+  EVENT_KIND_DISCARD = 3; // seat discarded (cards hidden)
+  EVENT_KIND_STARTER = 4; // card is the starter; seat (dealer) scored points for his heels
+  EVENT_KIND_PLAY = 5; // seat played card, count is the new count
+  EVENT_KIND_GO = 6; // seat could not play
+  EVENT_KIND_GO_POINT = 7;
+  EVENT_KIND_LAST_CARD = 8;
+  EVENT_KIND_COUNT_RESET = 9;
+  EVENT_KIND_SHOW_HAND = 10; // cards is the hand, card the starter
+  EVENT_KIND_SHOW_CRIB = 11;
+  EVENT_KIND_GAME_OVER = 12; // seat won
+  EVENT_KIND_RESIGN = 13; // seat resigned
+}
+
+message PegScore {
+  int32 fifteen = 1;
+  int32 thirty_one = 2;
+  int32 pairs = 3;
+  int32 run = 4;
+}
+
+message ShowScore {
+  int32 fifteens = 1;
+  int32 pairs = 2;
+  int32 runs = 3;
+  int32 flush = 4;
+  int32 nobs = 5;
+}
+
+message Event {
+  EventKind kind = 1;
+  int32 seat = 2;
+  optional uint32 card = 3;
+  repeated uint32 cards = 4;
+  int32 count = 5;
+  int32 points = 6;
+  PegScore peg = 7;
+  ShowScore show = 8;
+  repeated int32 scores = 9; // scores after the event
+  int32 skunk = 10;
+}

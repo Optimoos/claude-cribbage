@@ -12,7 +12,7 @@ Decisions confirmed with you:
 - The server auto-counts all scores.
 - The network is a hand-rolled MLP running on CPU in pure Go.
 
-**Environment notes:** Go 1.23.4 is installed. The .NET SDK is **not** installed. You'll need the .NET 8 SDK and Godot 4.x .NET before milestone 8.
+**Environment notes:** Go 1.27 is installed (upgraded from 1.23.4 during M3). The .NET SDK is **not** installed. You'll need the .NET 8 SDK and Godot 4.x .NET before milestone 8.
 
 ## Architecture
 
