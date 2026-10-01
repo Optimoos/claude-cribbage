@@ -1,6 +1,6 @@
 server/*.test
 *.out
 server/data/
-models/
+models*/
 .godot/
 Godot_*/

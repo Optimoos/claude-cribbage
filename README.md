@@ -14,6 +14,8 @@ go run ./cmd/botclient -user alice -opponent heuristic -games 1000 -concurrent 1
 go run ./cmd/botclient -user bob -games 1000      # matchmaking: run two of these
 go run ./cmd/botclient -addr ws://localhost:8080/rtc -user carol -opponent random   # over WebRTC
 go run ./cmd/sim -a heuristic -b random -n 100000 # in-process bot matches
+go run ./cmd/train run -out models                # train the neural network (Ctrl-C to stop)
+go run ./cmd/train eval -model models/best.bin -vs heuristic -n 10000
 ```
 
 | Path | Purpose |
@@ -23,10 +25,57 @@ go run ./cmd/sim -a heuristic -b random -n 100000 # in-process bot matches
 | `internal/protocol` | Engine to protobuf conversions; `pb/` is generated |
 | `internal/server` | Connections, auth, lobby, matchmaking, game actors |
 | `internal/store` | Users, sessions and games: in-memory or SQLite |
+| `internal/ai` | Neural network player (`Agent`) and `Arena` matches |
+| `internal/ai/nn` | MLP with sparse inputs, Adam, and the model file format |
+| `internal/ai/encode` | Observation to features; afterstates |
+| `internal/ai/train` | Self-play TD(λ) training |
 | `internal/transport/tcp` | Length-prefixed protobuf framing |
 | `internal/transport/rtc` | WebRTC data channel transport and WebSocket signaling |
 | `web/static` | HTML test client, embedded in the server binary |
 | `internal/client`, `internal/botclient` | Go client and headless bot runner |
+
+## Neural network AI
+
+The network estimates the probability of winning from what one player can
+see:
+- the cards they hold and kept, their crib discards, and the starter
+- cards played this hand by each side, and the current count and sequence
+- both scores, plus dealer and phase flags
+- a few hand-crafted features (more under Training):
+  - their show value: exact once the starter is cut, otherwise averaged over possible starters
+  - the expected crib value of their discards
+  - the points their last play pegged
+  - the opponent's expected points in reply
+
+**Choosing a move.** The agent looks at the state each legal action leads to
+(TD-Gammon style) and picks the one the network values most. That means 15
+discard choices, or up to 4 pegging plays. Those states are computed only from
+the player's own observation.
+
+**Training** (`cmd/train run`):
+- **Self-play:** actors play games against each other, with 10% against the
+  heuristic bot by default. They use ε-greedy exploration, with ε decaying from
+  0.1 to 0.02.
+- **Targets:** every decision becomes a sample whose target is its TD(λ)
+  return, with λ = 0.7.
+- **Learning:** a learner draws minibatches from a replay buffer and trains
+  with Adam, computing gradients in parallel.
+- **Evaluation and checkpoints:** every 25k games, the current weights play
+  the heuristic and random bots. The run then writes `ckpt-<games>.bin` and
+  `latest.bin`, plus `best.bin` when the score against the heuristic
+  improves, and appends a row to `train.csv`.
+- **Resuming:** `-init models/latest.bin` continues an earlier run.
+
+**Results so far** (win rate against the heuristic bot):
+- Raw card features only: leveled off at about 40%.
+- With the hand-crafted features (feature encoding v2): passed 40% within
+  25k games and reached 48.3% ± 0.7% after about 1M games.
+- Fine-tuned from that model for 1M more games at `-lr 3e-4`: 50.3% ± 0.7%
+  over 20k games, level with the heuristic. It wins 99% against the random bot.
+
+**Model files** start with a JSON header recording layer sizes, encoding
+version, games, steps and evaluation metrics, followed by float32 weights.
+A model trained with a different encoding version is rejected when loaded.
 
 ## Web client and WebRTC
 
