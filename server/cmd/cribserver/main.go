@@ -17,7 +17,9 @@ import (
 
 	"golang.org/x/crypto/bcrypt"
 
+	"cribbage/internal/ai"
 	"cribbage/internal/auth"
+	"cribbage/internal/bots"
 	"cribbage/internal/server"
 	"cribbage/internal/store"
 	"cribbage/internal/transport/rtc"
@@ -35,12 +37,22 @@ func main() {
 	statsEvery := flag.Duration("stats", 10*time.Second, "log statistics at this interval (0 disables)")
 	bcryptCost := flag.Int("bcrypt-cost", bcrypt.DefaultCost, "bcrypt cost for password hashes")
 	pprofAddr := flag.String("pprof", "", "serve net/http/pprof on this address (e.g. localhost:6060)")
+	model := flag.String("model", "", "neural network model to offer as the \"nn\" bot (e.g. models/best.bin)")
 	flag.Parse()
 
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	fail := func(msg string, err error) {
 		log.Error(msg, "err", err)
 		os.Exit(1)
+	}
+
+	if *model != "" {
+		meta, err := ai.Register(*model)
+		if err != nil {
+			fail("load model", err)
+		}
+		log.Info("loaded model", "path", *model, "bot", ai.BotName, "sizes", meta.Sizes, "games", meta.Games,
+			"vs_heuristic", meta.Metrics["vs_heuristic"])
 	}
 
 	var users store.Store
@@ -98,6 +110,10 @@ func main() {
 		mux.HandleFunc("/api/config", func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(rtcAPI.ClientConfig())
+		})
+		mux.HandleFunc("/api/bots", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(bots.Names())
 		})
 		mux.Handle("/", web.Handler(*webDir))
 		httpSrv = &http.Server{Addr: *httpAddr, Handler: mux, ReadHeaderTimeout: 10 * time.Second}

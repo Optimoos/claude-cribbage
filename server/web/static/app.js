@@ -465,6 +465,10 @@ $('logout').onclick = () => {
 for (const b of document.querySelectorAll('[data-create]')) {
   b.onclick = () => conn.send({ createGame: { bot: b.dataset.create } });
 }
+// Show buttons only for bots this server offers (nn needs a model).
+fetch('api/bots').then(r => r.json()).then(names => {
+  for (const b of document.querySelectorAll('[data-create]')) b.hidden = !names.includes(b.dataset.create);
+}).catch(() => { /* keep the defaults */ });
 $('create-open').onclick = () => conn.send({ createGame: { bot: '' } });
 $('find-match').onclick = () => conn.send({ findMatch: {} });
 $('refresh').onclick = () => conn.send({ listGames: {} });

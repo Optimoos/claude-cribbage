@@ -3,6 +3,7 @@
 //
 //	go run ./cmd/botclient -user alice -opponent heuristic -games 1000 -concurrent 100
 //	go run ./cmd/botclient -user bob -games 1000 -concurrent 100    # matchmaking
+//	go run ./cmd/botclient -user carol -bot nn -model models/best.bin -opponent heuristic
 package main
 
 import (
@@ -13,6 +14,7 @@ import (
 	"os/signal"
 	"time"
 
+	"cribbage/internal/ai"
 	"cribbage/internal/botclient"
 )
 
@@ -28,7 +30,15 @@ func main() {
 	flag.IntVar(&cfg.Games, "games", 100, "games to finish (0 = until interrupted)")
 	flag.Uint64Var(&cfg.Seed, "seed", 1, "seed for the local bot")
 	flag.DurationVar(&cfg.Reconnect, "reconnect", 30*time.Second, "how long to keep retrying a lost connection (negative disables)")
+	model := flag.String("model", "", "neural network model, playable locally with -bot nn")
 	flag.Parse()
+
+	if *model != "" {
+		if _, err := ai.Register(*model); err != nil {
+			fmt.Fprintln(os.Stderr, "error: load model:", err)
+			os.Exit(1)
+		}
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()

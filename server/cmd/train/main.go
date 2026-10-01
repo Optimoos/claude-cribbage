@@ -93,11 +93,8 @@ func runCmd(ctx context.Context, args []string) error {
 }
 
 func loadAgent(path string) (func(int) bots.Bot, nn.Meta, error) {
-	net, meta, err := nn.Load(path)
+	net, meta, err := ai.Load(path)
 	if err != nil {
-		return nil, meta, err
-	}
-	if err := ai.CheckNet(net, meta); err != nil {
 		return nil, meta, err
 	}
 	return func(w int) bots.Bot { return ai.NewAgent(net, 0, uint64(w)) }, meta, nil

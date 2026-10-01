@@ -23,6 +23,10 @@ var factories = map[string]func(seed uint64) Bot{
 	"heuristic": func(uint64) Bot { return NewHeuristic() },
 }
 
+// Register adds a bot factory under name, replacing any existing one. Call
+// it during startup, before bots are created concurrently.
+func Register(name string, f func(seed uint64) Bot) { factories[name] = f }
+
 // New creates a bot by name. The seed drives any randomness in the bot.
 func New(name string, seed uint64) (Bot, error) {
 	f, ok := factories[name]

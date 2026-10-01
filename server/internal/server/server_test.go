@@ -7,12 +7,16 @@ import (
 	"log/slog"
 	"math/rand/v2"
 	"net"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
 
 	"golang.org/x/crypto/bcrypt"
 
+	"cribbage/internal/ai"
+	"cribbage/internal/ai/encode"
+	"cribbage/internal/ai/nn"
 	"cribbage/internal/auth"
 	"cribbage/internal/botclient"
 	"cribbage/internal/client"
@@ -399,5 +403,30 @@ func TestResumeOnNewConnection(t *testing.T) {
 	e := connect(t, addr)
 	if _, err := e.Resume("nope"); !errors.As(err, &se) {
 		t.Fatalf("bad token accepted: %v", err)
+	}
+}
+
+func TestNNBotOpponent(t *testing.T) {
+	net, err := nn.New([]int{encode.Size, 16, 1}, rand.New(rand.NewPCG(1, 2)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "model.bin")
+	if err := nn.Save(path, net, nn.Meta{EncodingVersion: encode.Version}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ai.Register(path); err != nil {
+		t.Fatal(err)
+	}
+	_, addr := startServer(t)
+	st, err := botclient.Run(context.Background(), botclient.Config{
+		Addr: addr, Username: "nnfan", Password: "password123", Bot: "random",
+		Opponent: ai.BotName, Concurrent: 20, Games: 200,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Finished != 200 || st.Errors != 0 || st.Resigned != 0 {
+		t.Fatalf("unexpected stats %+v", st)
 	}
 }

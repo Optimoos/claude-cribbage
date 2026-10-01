@@ -10,9 +10,11 @@ cd server
 go test ./...                       # all tests
 go run ./cmd/cribserver             # web client on http://localhost:8080, TCP for bots on :7777
 go run ./cmd/cribserver -db ""      # in-memory only (nothing survives a restart)
+go run ./cmd/cribserver -model models-ft/best.bin   # also offer the "nn" bot
 go run ./cmd/botclient -user alice -opponent heuristic -games 1000 -concurrent 100
 go run ./cmd/botclient -user bob -games 1000      # matchmaking: run two of these
 go run ./cmd/botclient -addr ws://localhost:8080/rtc -user carol -opponent random   # over WebRTC
+go run ./cmd/botclient -user dave -bot nn -model models-ft/best.bin -opponent heuristic   # NN plays as the client
 go run ./cmd/sim -a heuristic -b random -n 100000 # in-process bot matches
 go run ./cmd/train run -out models                # train the neural network (Ctrl-C to stop)
 go run ./cmd/train eval -model models/best.bin -vs heuristic -n 10000
@@ -72,6 +74,16 @@ the player's own observation.
   25k games and reached 48.3% ± 0.7% after about 1M games.
 - Fine-tuned from that model for 1M more games at `-lr 3e-4`: 50.3% ± 0.7%
   over 20k games, level with the heuristic. It wins 99% against the random bot.
+
+**In the server.** `cribserver -model <file>` registers the network as the
+`nn` bot, which the web lobby then offers as "vs neural network bot".
+`GET /api/bots` lists the bots a server offers. Every game creates its own
+`Agent`, and all of them share one read-only copy of the weights. A move
+takes well under a millisecond. Saved games against `nn` resume after a
+restart only if the server is started with a model again. Otherwise they
+are skipped and left in the database. Over 10k games through the server,
+the `nn` bot won 50.3% against a heuristic botclient, matching the
+arena result.
 
 **Model files** start with a JSON header recording layer sizes, encoding
 version, games, steps and evaluation metrics, followed by float32 weights.

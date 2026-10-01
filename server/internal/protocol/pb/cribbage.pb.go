@@ -739,7 +739,8 @@ func (x *Resume) GetToken() string {
 
 type CreateGame struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// Name of a server-side bot opponent ("random", "heuristic"). Empty
+	// Name of a server-side bot opponent ("random", "heuristic", or "nn" when
+	// the server was started with a model). Empty
 	// creates an open game that another player can join.
 	Bot           string `protobuf:"bytes,1,opt,name=bot,proto3" json:"bot,omitempty"`
 	unknownFields protoimpl.UnknownFields

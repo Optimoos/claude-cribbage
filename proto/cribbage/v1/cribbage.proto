@@ -49,7 +49,8 @@ message Resume {
 }
 
 message CreateGame {
-  // Name of a server-side bot opponent ("random", "heuristic"). Empty
+  // Name of a server-side bot opponent ("random", "heuristic", or "nn" when
+  // the server was started with a model). Empty
   // creates an open game that another player can join.
   string bot = 1;
 }
