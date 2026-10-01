@@ -30,7 +30,14 @@ type Observation struct {
 
 // Observation returns player p's view of the game.
 func (g *Game) Observation(p int) Observation {
-	o := Observation{
+	var o Observation
+	g.ObserveInto(p, &o)
+	return o
+}
+
+// ObserveInto fills o with player p's view of the game, avoiding a copy.
+func (g *Game) ObserveInto(p int, o *Observation) {
+	*o = Observation{
 		Player:       p,
 		Phase:        g.phase,
 		Dealer:       g.dealer,
@@ -59,7 +66,6 @@ func (g *Game) Observation(p int) Observation {
 	for i := o.PlayedN; i < len(o.Played); i++ {
 		o.Played[i] = PlayedCard{Card: NoCard, Player: -1}
 	}
-	return o
 }
 
 // HandCards returns the cards the observing player still holds.
