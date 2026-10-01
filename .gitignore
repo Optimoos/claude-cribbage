@@ -1,0 +1,5 @@
+server/*.test
+*.out
+server/data/
+models/
+.godot/
