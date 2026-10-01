@@ -18,7 +18,7 @@ import (
 
 func main() {
 	var cfg botclient.Config
-	flag.StringVar(&cfg.Addr, "addr", "localhost:7777", "server TCP address")
+	flag.StringVar(&cfg.Addr, "addr", "localhost:7777", "server address: TCP host:port, or ws://host:port/rtc for WebRTC")
 	flag.StringVar(&cfg.Username, "user", "bot1", "username (registered on first use)")
 	flag.StringVar(&cfg.Password, "pass", "botpassword", "password")
 	flag.StringVar(&cfg.Nickname, "nick", "", "nickname (defaults to username)")

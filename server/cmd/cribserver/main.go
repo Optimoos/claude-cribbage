@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"log/slog"
 	"net"
@@ -11,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"runtime"
+	"strings"
 	"time"
 
 	"golang.org/x/crypto/bcrypt"
@@ -18,10 +20,17 @@ import (
 	"cribbage/internal/auth"
 	"cribbage/internal/server"
 	"cribbage/internal/store"
+	"cribbage/internal/transport/rtc"
+	"cribbage/web"
 )
 
 func main() {
 	tcpAddr := flag.String("tcp", ":7777", "TCP listen address for headless clients")
+	httpAddr := flag.String("http", ":8080", "HTTP address for the web client and WebRTC signaling (empty disables)")
+	webDir := flag.String("web-dir", "", "serve the web client from this directory instead of the embedded copy")
+	rtcPort := flag.Int("rtc-port", 7778, "UDP port for all WebRTC traffic (0 picks a port per connection)")
+	publicIPs := flag.String("public-ip", "", "comma-separated public IPs to advertise for WebRTC (servers behind 1:1 NAT)")
+	iceServers := flag.String("ice-servers", "", "comma-separated STUN/TURN URLs for WebRTC, e.g. stun:stun.l.google.com:19302")
 	dbPath := flag.String("db", "cribbage.db", "SQLite database file; empty keeps everything in memory")
 	statsEvery := flag.Duration("stats", 10*time.Second, "log statistics at this interval (0 disables)")
 	bcryptCost := flag.Int("bcrypt-cost", bcrypt.DefaultCost, "bcrypt cost for password hashes")
@@ -72,6 +81,38 @@ func main() {
 		}
 	}()
 
+	var httpSrv *http.Server
+	var rtcAPI *rtc.API
+	if *httpAddr != "" {
+		rtcAPI, err = rtc.NewAPI(rtc.Options{
+			UDPPort:    *rtcPort,
+			PublicIPs:  splitList(*publicIPs),
+			ICEServers: splitList(*iceServers),
+			Logger:     log,
+		})
+		if err != nil {
+			fail("webrtc", err)
+		}
+		mux := http.NewServeMux()
+		mux.Handle("/rtc", rtcAPI.Handler(func(c *rtc.Conn) { srv.ServeConn(c) }))
+		mux.HandleFunc("/api/config", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(rtcAPI.ClientConfig())
+		})
+		mux.Handle("/", web.Handler(*webDir))
+		httpSrv = &http.Server{Addr: *httpAddr, Handler: mux, ReadHeaderTimeout: 10 * time.Second}
+		hl, err := net.Listen("tcp", *httpAddr)
+		if err != nil {
+			fail("listen http", err)
+		}
+		log.Info("web client", "url", "http://"+displayAddr(hl.Addr()), "webrtc_udp", *rtcPort)
+		go func() {
+			if err := httpSrv.Serve(hl); err != nil && err != http.ErrServerClosed {
+				fail("serve http", err)
+			}
+		}()
+	}
+
 	if *pprofAddr != "" {
 		go func() { log.Error("pprof", "err", http.ListenAndServe(*pprofAddr, nil)) }()
 	}
@@ -84,7 +125,13 @@ func main() {
 	<-sig
 	log.Info("shutting down")
 	ln.Close()
+	if httpSrv != nil {
+		httpSrv.Close()
+	}
 	srv.Shutdown()
+	if rtcAPI != nil {
+		rtcAPI.Close()
+	}
 	if sq != nil {
 		if err := sq.Close(); err != nil {
 			fail("close database", err)
@@ -120,4 +167,23 @@ func logStats(log *slog.Logger, srv *server.Server, sq *store.SQLite, every time
 		log.Info("stats", attrs...)
 		prev = s
 	}
+}
+
+func splitList(s string) []string {
+	var out []string
+	for _, f := range strings.Split(s, ",") {
+		if f = strings.TrimSpace(f); f != "" {
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
+// displayAddr turns ":8080" style listen addresses into a usable URL host.
+func displayAddr(a net.Addr) string {
+	host, port, err := net.SplitHostPort(a.String())
+	if err != nil || host == "" || host == "::" || host == "0.0.0.0" {
+		return "localhost:" + port
+	}
+	return a.String()
 }

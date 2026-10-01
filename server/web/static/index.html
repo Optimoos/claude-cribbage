@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cribbage test client</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <h1>Cribbage</h1>
+  <span id="status" class="status">offline</span>
+  <span id="who"></span>
+  <button id="logout" hidden>Log out</button>
+</header>
+
+<main>
+  <section id="login" class="panel" hidden>
+    <h2>Log in or register</h2>
+    <form id="login-form">
+      <label>Username <input name="username" autocomplete="username" required></label>
+      <label>Password <input name="password" type="password" autocomplete="current-password" required></label>
+      <label>Nickname <input name="nickname" placeholder="for new accounts (optional)"></label>
+      <div class="row">
+        <button type="submit" name="action" value="login">Log in</button>
+        <button type="submit" name="action" value="register">Register</button>
+      </div>
+      <p id="login-error" class="error"></p>
+    </form>
+  </section>
+
+  <section id="lobby" class="panel" hidden>
+    <h2>Play</h2>
+    <div class="row wrap">
+      <button data-create="heuristic">vs heuristic bot</button>
+      <button data-create="random">vs random bot</button>
+      <button id="find-match">Find a match</button>
+      <button id="create-open">Create open game</button>
+      <button id="refresh">Refresh</button>
+    </div>
+    <p id="notice" class="notice"></p>
+    <h3>My games</h3>
+    <ul id="my-games" class="games"></ul>
+    <h3>Open games</h3>
+    <ul id="open-games" class="games"></ul>
+    <h3>Recently finished</h3>
+    <ul id="recent-games" class="games"></ul>
+  </section>
+
+  <section id="table" class="panel" hidden>
+    <div class="row between">
+      <h2 id="table-title">Game</h2>
+      <button id="resign">Resign</button>
+    </div>
+    <div id="scoreboard"></div>
+    <div class="area">
+      <div class="label">Opponent</div>
+      <div id="opp-hand" class="cards"></div>
+    </div>
+    <div class="area row wrap">
+      <div>
+        <div class="label">Starter</div>
+        <div id="starter" class="cards"></div>
+      </div>
+      <div>
+        <div class="label">Crib (<span id="crib-owner"></span>)</div>
+        <div id="crib" class="cards"></div>
+      </div>
+      <div class="grow">
+        <div class="label">Pegging — count <b id="count">0</b></div>
+        <div id="sequence" class="cards"></div>
+        <div id="earlier" class="cards small"></div>
+      </div>
+    </div>
+    <div class="area">
+      <div class="label">Your hand</div>
+      <div id="hand" class="cards"></div>
+      <div class="row">
+        <span id="prompt" class="prompt"></span>
+        <button id="discard" hidden>Discard to crib</button>
+      </div>
+    </div>
+    <h3>Log</h3>
+    <ol id="log" class="log"></ol>
+  </section>
+</main>
+<script src="app.js"></script>
+</body>
+</html>

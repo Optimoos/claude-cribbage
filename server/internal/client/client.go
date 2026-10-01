@@ -1,20 +1,33 @@
-// Package client is a Go client for the cribbage server's TCP transport.
+// Package client is a Go client for the cribbage server, over TCP or WebRTC.
 package client
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 
+	"google.golang.org/protobuf/proto"
+
 	"cribbage/internal/protocol/pb"
+	"cribbage/internal/transport/rtc"
 	"cribbage/internal/transport/tcp"
 )
+
+// Transport carries messages; see server.Transport.
+type Transport interface {
+	Read(proto.Message) error
+	Write(proto.Message) error
+	Flush() error
+	Close() error
+}
 
 // Client is a connection to the server. Send may be called from any
 // goroutine; Recv must be called from a single goroutine.
 type Client struct {
-	conn   *tcp.Conn
+	conn   Transport
 	nextID atomic.Uint32
 	out    chan *pb.ClientMessage
 	done   chan struct{}
@@ -23,15 +36,48 @@ type Client struct {
 	err    error
 }
 
-// Dial connects to addr.
+// Dial connects using the address's scheme: "ws://host:port/rtc" (or wss)
+// uses WebRTC with binary messages; anything else is a TCP host:port.
 func Dial(addr string) (*Client, error) {
+	if strings.HasPrefix(addr, "ws://") || strings.HasPrefix(addr, "wss://") {
+		return DialWebRTC(context.Background(), addr, rtc.Binary)
+	}
+	return DialTCP(addr)
+}
+
+// DialTCP connects over the TCP transport.
+func DialTCP(addr string) (*Client, error) {
 	conn, err := tcp.Dial(addr)
 	if err != nil {
 		return nil, err
 	}
-	c := &Client{conn: conn, out: make(chan *pb.ClientMessage, 4096), done: make(chan struct{})}
+	return New(conn), nil
+}
+
+var (
+	rtcOnce sync.Once
+	rtcAPI  *rtc.API
+	rtcErr  error
+)
+
+// DialWebRTC connects over a WebRTC data channel, signaling via url.
+func DialWebRTC(ctx context.Context, url string, codec rtc.Codec) (*Client, error) {
+	rtcOnce.Do(func() { rtcAPI, rtcErr = rtc.NewAPI(rtc.Options{}) })
+	if rtcErr != nil {
+		return nil, rtcErr
+	}
+	conn, err := rtcAPI.Dial(ctx, url, codec)
+	if err != nil {
+		return nil, err
+	}
+	return New(conn), nil
+}
+
+// New wraps a connected transport.
+func New(t Transport) *Client {
+	c := &Client{conn: t, out: make(chan *pb.ClientMessage, 4096), done: make(chan struct{})}
 	go c.writeLoop()
-	return c, nil
+	return c
 }
 
 func (c *Client) writeLoop() {

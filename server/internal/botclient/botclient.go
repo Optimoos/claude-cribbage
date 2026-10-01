@@ -22,7 +22,7 @@ import (
 
 // Config for Run.
 type Config struct {
-	Addr     string
+	Addr     string // TCP host:port, or ws://host:port/rtc for WebRTC
 	Username string
 	Password string
 	Nickname string

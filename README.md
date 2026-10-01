@@ -8,10 +8,11 @@ client. See [docs/PLAN.md](docs/PLAN.md) for the milestone plan.
 ```sh
 cd server
 go test ./...                       # all tests
-go run ./cmd/cribserver             # server; TCP for bots on :7777, data in cribbage.db
+go run ./cmd/cribserver             # web client on http://localhost:8080, TCP for bots on :7777
 go run ./cmd/cribserver -db ""      # in-memory only (nothing survives a restart)
 go run ./cmd/botclient -user alice -opponent heuristic -games 1000 -concurrent 100
 go run ./cmd/botclient -user bob -games 1000      # matchmaking: run two of these
+go run ./cmd/botclient -addr ws://localhost:8080/rtc -user carol -opponent random   # over WebRTC
 go run ./cmd/sim -a heuristic -b random -n 100000 # in-process bot matches
 ```
 
@@ -23,7 +24,27 @@ go run ./cmd/sim -a heuristic -b random -n 100000 # in-process bot matches
 | `internal/server` | Connections, auth, lobby, matchmaking, game actors |
 | `internal/store` | Users, sessions and games: in-memory or SQLite |
 | `internal/transport/tcp` | Length-prefixed protobuf framing |
+| `internal/transport/rtc` | WebRTC data channel transport and WebSocket signaling |
+| `web/static` | HTML test client, embedded in the server binary |
 | `internal/client`, `internal/botclient` | Go client and headless bot runner |
+
+## Web client and WebRTC
+
+Browse to `http://localhost:8080`, register, and play against a bot or another
+browser tab. The page uses WebRTC. A WebSocket at `/rtc` exchanges the SDP
+offer, answer and ICE candidates. After that, all traffic uses one reliable,
+ordered data channel labelled `cribbage`.
+
+- **Encoding:** text messages are protobuf JSON, as used by the browser; binary
+  messages are protobuf, for Godot and Go clients. The server replies in the
+  encoding the client used first.
+- **UDP port:** all WebRTC traffic uses UDP port 7778 (`-rtc-port`). Open it in
+  the firewall for remote players.
+- **NAT:** behind a 1:1 NAT, such as a cloud VM, pass `-public-ip`.
+  `-ice-servers` sets STUN/TURN servers, which are also given to browsers via
+  `/api/config`.
+- **Development:** `-web-dir web/static` serves the client from disk, so edits
+  show up on reload without rebuilding.
 
 ## Persistence
 
