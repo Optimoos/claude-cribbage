@@ -96,6 +96,26 @@ browser tab. The page uses WebRTC. A WebSocket at `/rtc` exchanges the SDP
 offer, answer and ICE candidates. After that, all traffic uses one reliable,
 ordered data channel labelled `cribbage`.
 
+The client is plain HTML, CSS and JavaScript in `web/static`, with no build
+step:
+- **Board:** a continuous 121-hole board drawn in SVG. Four runs of 30
+  snake across it with both players' lanes side by side, and each player
+  has their own game hole. Skunk lines are marked at 61 (SS) and 91 (S).
+  Each player has a trailing peg. The trailing peg is tracked in the browser, so after a
+  reload it starts out level with the front peg.
+- **Animation:** each update's events are replayed one at a time. Pegs hop,
+  cards slide in, points float up and the log scrolls, and then the table
+  settles on the server's state. Tap the table to skip ahead.
+- **Settings menu:**
+  - Theme: card room, parchment or midnight.
+  - **Enable rapid play:** apply updates instantly, with no animation or
+    sound.
+- **Sound:** effects are synthesized with Web Audio. The speaker button in
+  the header mutes them.
+- **Saved settings:** theme, rapid play and mute are kept in `localStorage`.
+- **Phones:** the layout is responsive, and the lobby becomes a drawer
+  behind the ☰ button.
+
 - **Encoding:** text messages are protobuf JSON, as used by the browser; binary
   messages are protobuf, for Godot and Go clients. The server replies in the
   encoding the client used first.

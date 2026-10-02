@@ -1,88 +1,139 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="felt">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Cribbage test client</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#123826">
+<title>Cribbage</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%23123826'/><text x='16' y='23' font-size='20' text-anchor='middle' fill='%23e8c547'>♣</text></svg>">
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
-<header>
-  <h1>Cribbage</h1>
-  <span id="status" class="status">offline</span>
-  <span id="who"></span>
-  <button id="logout" hidden>Log out</button>
+<header class="topbar">
+  <button id="menu" class="icon-btn only-narrow" aria-label="Show games" title="Games"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 6h16M4 12h16M4 18h16"/></svg></button>
+  <h1 class="brand"><span class="brand-mark">♣</span>Cribbage</h1>
+  <span id="status" class="status" title="Connection">offline</span>
+  <span class="spacer"></span>
+  <button id="mute" class="icon-btn" aria-pressed="false" title="Mute sounds"></button>
+  <div class="settings">
+    <button id="settings-btn" class="icon-btn" aria-haspopup="true" aria-expanded="false" title="Settings"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg></button>
+    <div id="settings" class="menu" hidden>
+      <label class="field">Theme
+        <select id="theme">
+          <option value="felt">Card room</option>
+          <option value="parchment">Parchment</option>
+          <option value="midnight">Midnight</option>
+        </select>
+      </label>
+      <label class="switch"><input type="checkbox" id="rapid"><span class="track"></span>Enable rapid play</label>
+      <p class="hint">Rapid play skips animations and sounds.</p>
+      <div id="account" hidden>
+        <p class="who" id="who"></p>
+        <button id="logout" class="btn btn-ghost">Log out</button>
+      </div>
+    </div>
+  </div>
 </header>
 
-<main>
-  <section id="login" class="panel" hidden>
-    <h2>Log in or register</h2>
+<div id="scrim" class="scrim" hidden></div>
+<div id="toasts" class="toasts" aria-live="polite"></div>
+
+<main id="main">
+  <section id="login" class="panel login" hidden>
+    <div class="login-hero"><span class="suits"><b>♠</b><b class="r">♥</b><b>♣</b><b class="r">♦</b></span>
+      <h2>Fifteen two, fifteen four…</h2>
+      <p class="muted">Log in, or pick a username and password to register.</p>
+    </div>
     <form id="login-form">
-      <label>Username <input name="username" autocomplete="username" required></label>
-      <label>Password <input name="password" type="password" autocomplete="current-password" required></label>
-      <label>Nickname <input name="nickname" placeholder="for new accounts (optional)"></label>
+      <label class="field">Username <input name="username" autocomplete="username" required></label>
+      <label class="field">Password <input name="password" type="password" autocomplete="current-password" required></label>
+      <label class="field">Nickname <input name="nickname" placeholder="for new accounts (optional)"></label>
       <div class="row">
-        <button type="submit" name="action" value="login">Log in</button>
-        <button type="submit" name="action" value="register">Register</button>
+        <button type="submit" name="action" value="login" class="btn btn-primary">Log in</button>
+        <button type="submit" name="action" value="register" class="btn">Register</button>
       </div>
       <p id="login-error" class="error"></p>
     </form>
   </section>
 
-  <section id="lobby" class="panel" hidden>
-    <h2>Play</h2>
-    <div class="row wrap">
-      <button data-create="nn" hidden>vs neural network bot</button>
-      <button data-create="heuristic">vs heuristic bot</button>
-      <button data-create="random">vs random bot</button>
-      <button id="find-match">Find a match</button>
-      <button id="create-open">Create open game</button>
-      <button id="refresh">Refresh</button>
+  <aside id="lobby" class="panel lobby" hidden>
+    <h2>New game</h2>
+    <div class="bot-picks">
+      <button class="pick" data-create="nn" hidden><span class="pick-icon">◆</span><span><b>Neural network</b><small>Learned by self-play</small></span></button>
+      <button class="pick" data-create="heuristic"><span class="pick-icon">♞</span><span><b>Heuristic bot</b><small>Plays the expected value</small></span></button>
+      <button class="pick" data-create="random"><span class="pick-icon">⚄</span><span><b>Random bot</b><small>For practice</small></span></button>
+    </div>
+    <div class="row wrap people">
+      <button id="find-match" class="btn">Find a match</button>
+      <button id="create-open" class="btn">Create open game</button>
+      <button id="refresh" class="icon-btn" title="Refresh"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.6-6.4L21 8"/><path d="M21 3v5h-5"/></svg></button>
     </div>
     <p id="notice" class="notice"></p>
-    <h3>My games</h3>
+    <h3>Your games</h3>
     <ul id="my-games" class="games"></ul>
     <h3>Open games</h3>
     <ul id="open-games" class="games"></ul>
     <h3>Recently finished</h3>
     <ul id="recent-games" class="games"></ul>
+  </aside>
+
+  <section id="empty" class="panel empty" hidden>
+    <span class="suits big"><b>♠</b><b class="r">♥</b><b>♣</b><b class="r">♦</b></span>
+    <p>Pick an opponent to start a game.</p>
   </section>
 
-  <section id="table" class="panel" hidden>
-    <div class="row between">
+  <section id="table" class="table" hidden>
+    <div class="table-head">
       <h2 id="table-title">Game</h2>
-      <button id="resign">Resign</button>
+      <span id="phase" class="chip"></span>
+      <span class="spacer"></span>
+      <button id="resign" class="btn btn-danger btn-small">Resign</button>
     </div>
-    <div id="scoreboard"></div>
-    <div class="area">
-      <div class="label">Opponent</div>
-      <div id="opp-hand" class="cards"></div>
+
+    <div id="board" class="board"></div>
+
+    <div class="felt">
+      <div class="seat seat-opp">
+        <div id="opp-plate" class="plate"></div>
+        <div id="opp-hand" class="cards hand-opp"></div>
+      </div>
+
+      <div class="center">
+        <div class="zone zone-deck">
+          <div class="zone-label">Starter</div>
+          <div id="deck" class="deck"></div>
+        </div>
+        <div class="zone zone-play">
+          <div class="zone-label"><span id="play-title">Pegging</span><span id="count" class="count">0</span></div>
+          <div id="sequence" class="cards seq"></div>
+          <div id="earlier" class="cards seq small"></div>
+          <div id="show" class="show" hidden></div>
+        </div>
+        <div id="crib-zone" class="zone zone-crib">
+          <div class="zone-label">Crib</div>
+          <div id="crib" class="pile"></div>
+          <div id="crib-owner" class="owner"></div>
+        </div>
+      </div>
+
+      <div class="seat seat-me">
+        <div class="me-head">
+          <div id="me-plate" class="plate"></div>
+          <div class="actions">
+            <span id="prompt" class="prompt"></span>
+            <button id="discard" class="btn btn-primary" hidden>Discard to crib</button>
+          </div>
+        </div>
+        <div id="hand" class="cards hand"></div>
+      </div>
+      <div id="fx" class="fx"></div>
+      <div id="banner" class="banner" hidden></div>
     </div>
-    <div class="area row wrap">
-      <div>
-        <div class="label">Starter</div>
-        <div id="starter" class="cards"></div>
-      </div>
-      <div>
-        <div class="label">Crib (<span id="crib-owner"></span>)</div>
-        <div id="crib" class="cards"></div>
-      </div>
-      <div class="grow">
-        <div class="label">Pegging — count <b id="count">0</b></div>
-        <div id="sequence" class="cards"></div>
-        <div id="earlier" class="cards small"></div>
-      </div>
-    </div>
-    <div class="area">
-      <div class="label">Your hand</div>
-      <div id="hand" class="cards"></div>
-      <div class="row">
-        <span id="prompt" class="prompt"></span>
-        <button id="discard" hidden>Discard to crib</button>
-      </div>
-    </div>
-    <h3>Log</h3>
-    <ol id="log" class="log"></ol>
+
+    <details id="log-panel" class="log-panel" open>
+      <summary>Game log</summary>
+      <ol id="log" class="log"></ol>
+    </details>
   </section>
 </main>
 <script src="app.js"></script>

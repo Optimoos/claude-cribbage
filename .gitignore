@@ -4,3 +4,5 @@ server/data/
 models*/
 .godot/
 Godot_*/
+server/*.db
+server/*.db-*
