@@ -12,7 +12,8 @@ type Result struct {
 	Winner int
 	Scores [2]int
 	Hands  int
-	Skunk  int // 0 none, 1 skunk (loser < 91), 2 double skunk (loser < 61)
+	Skunk  int    // 0 none, 1 skunk (loser < 91), 2 double skunk (loser < 61)
+	Pegged [2]int // pegging points
 }
 
 // PlayGame plays one game between players[0] and players[1] using the rules
@@ -46,7 +47,7 @@ func PlayGame(seed uint64, players [2]Bot, trace io.Writer) (Result, error) {
 			}
 		}
 	}
-	r := Result{Winner: g.Winner(), Scores: g.Scores(), Hands: g.HandNumber()}
+	r := Result{Winner: g.Winner(), Scores: g.Scores(), Hands: g.HandNumber(), Pegged: g.Pegged()}
 	switch loser := r.Scores[1-r.Winner]; {
 	case loser < 61:
 		r.Skunk = 2

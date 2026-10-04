@@ -22,6 +22,7 @@ go run ./cmd/gauntlet -bot models-ft/best.bin -vs random,heuristic -n 100000   #
 go run ./cmd/expert build -bot models-big/best.bin -games 500000   # expert bundle (win table) from self-play
 go run ./cmd/expert inspect models-expert/expert.bin
 go run ./cmd/expert eval -bundle models-expert/expert.bin -seed 2       # calibration against fresh self-play
+go run ./cmd/gauntlet -bot models-expert/expert.bin@100 -vs heuristic -n 20000   # expert bot; @N = opponent hands searched (0 = all)
 ```
 
 | Path | Purpose |
@@ -35,7 +36,8 @@ go run ./cmd/expert eval -bundle models-expert/expert.bin -seed 2       # calibr
 | `internal/ai/nn` | MLP with sparse inputs, Adam, and the model file format |
 | `internal/ai/encode` | Observation to features; afterstates |
 | `internal/ai/train` | Self-play TD(λ) training |
-| `internal/expert` | Expert AI: learned tables (win probability) and the bundle file format |
+| `internal/expert` | Expert AI: learned tables (win probability), the bundle file format, pegging search and the `expert` bot |
+| `internal/players` | Player specs for commands: bot names, model files, bundles |
 | `internal/transport/tcp` | Length-prefixed protobuf framing |
 | `internal/transport/rtc` | WebRTC data channel transport and WebSocket signaling |
 | `web/static` | HTML test client, embedded in the server binary |

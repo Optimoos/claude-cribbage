@@ -103,6 +103,7 @@ type Game struct {
 	seqStart  int // index in played where the current count began
 	last      int // last player to play a card in the current count
 	goSaid    [2]bool
+	pegged    [2]int // pegging points over the whole game
 
 	quiet  bool
 	events []Event
@@ -135,6 +136,9 @@ func (g *Game) Phase() Phase       { return g.phase }
 func (g *Game) Dealer() int        { return g.dealer }
 func (g *Game) Turn() int          { return g.turn }
 func (g *Game) Scores() [2]int     { return g.scores }
+
+// Pegged returns each player's pegging points over the game so far.
+func (g *Game) Pegged() [2]int { return g.pegged }
 func (g *Game) Winner() int        { return g.winner }
 func (g *Game) HandNumber() int    { return g.handNum }
 func (g *Game) Count() int         { return g.count }
@@ -378,6 +382,7 @@ func (g *Game) play(p, i int) {
 		n++
 	}
 	ps := ScorePeg(seq[:n])
+	g.pegged[p] += ps.Total()
 	won := g.addScore(p, ps.Total())
 	g.emit(Event{Kind: EvPlay, Player: p, Card: c, Count: g.count, Points: ps.Total(), Peg: ps})
 	if won {
@@ -410,6 +415,7 @@ func (g *Game) advance(next int) {
 	for {
 		if g.handN[0] == 0 && g.handN[1] == 0 {
 			if g.count > 0 {
+				g.pegged[g.last]++
 				won := g.addScore(g.last, 1)
 				g.emit(Event{Kind: EvLastCard, Player: g.last, Card: NoCard, Points: 1, Count: g.count})
 				if won {
@@ -430,6 +436,7 @@ func (g *Game) advance(next int) {
 			return
 		}
 		// Neither player can play: the last player to play scores the go.
+		g.pegged[g.last]++
 		won := g.addScore(g.last, 1)
 		g.emit(Event{Kind: EvGoPoint, Player: g.last, Card: NoCard, Points: 1, Count: g.count})
 		if won {

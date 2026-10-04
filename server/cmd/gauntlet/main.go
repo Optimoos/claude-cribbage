@@ -81,13 +81,14 @@ func run(ctx context.Context, bot string, opponents []string, n, workers int, se
 	}
 
 	fmt.Println("\n± is the paired 95% interval; (± ...) is what independent deals would give.")
-	fmt.Printf("%-24s %8s  %-24s  %-24s  %8s\n", "opponent", "games", "win %", "margin per game", "games/s")
+	fmt.Printf("%-24s %8s  %-24s  %-24s  %-15s  %8s\n", "opponent", "games", "win %", "margin per game", "pegging/hand", "games/s")
 	for _, x := range rows {
 		rate, ci := x.r.WinRate()
 		m, mci := x.r.Margin()
-		fmt.Printf("%-24s %8d  %6.2f ± %-5.2f %-9s  %+6.2f ± %-5.2f %-9s  %8.0f\n",
+		p, pci := x.r.PegMargin()
+		fmt.Printf("%-24s %8d  %6.2f ± %-5.2f %-9s  %+6.2f ± %-5.2f %-9s  %+6.3f ± %-5.3f  %8.0f\n",
 			x.name, x.r.Games, 100*rate, 100*ci, fmt.Sprintf("(± %.2f)", 100*x.r.UnpairedCI()),
-			m, mci, fmt.Sprintf("(± %.2f)", x.r.UnpairedMarginCI()),
+			m, mci, fmt.Sprintf("(± %.2f)", x.r.UnpairedMarginCI()), p, pci,
 			float64(x.r.Games)/x.elapsed.Seconds())
 	}
 	fmt.Printf("\n%s decision latency (under %d-way load):\n", bot, workers)

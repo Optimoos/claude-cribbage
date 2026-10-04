@@ -318,6 +318,30 @@ frequencies within their intervals.
 overall win rate rises, and latency per decision is reported at each
 effort level.
 
+**Built (2026-10-04):** `internal/expert` (`peg.go`, `search.go`, `bot.go`);
+players are specs like `models-expert/expert.bin@400` (effort = most
+opponent hands searched per pegging decision, 0 = all).
+- A rank-only pegging model, checked move by move against the engine.
+- Worlds are the opponent's possible rank multisets, weighted by card
+  combinations; above the effort limit a deterministic systematic sample.
+  Gos are hard evidence (two plays running by me, or a reset below 31,
+  means the opponent held nothing that fit), tested never to exclude the
+  real hand. Minimax per world with alpha-beta; terminals run the shows in
+  order (crib as a distribution over the unseen cards) and then W.
+- Opponent model: minimax beat a greedy opponent model (53.9% vs 52.7%).
+
+| Effort | vs heuristic | pegging/hand | latency mean / p99 (1 thread) |
+|---|---|---|---|
+| 25 | 52.88% ± 0.39 | +0.033 ± 0.010 | 0.3 / 1.8 ms |
+| 100 | 53.94% ± 0.39 | +0.074 ± 0.010 | 0.7 / 5.9 ms |
+| 400 (default) | 54.05% ± 0.39 | +0.085 ± 0.010 | 2.0 / 20 ms |
+| all | 54.04% ± 0.54 | +0.089 ± 0.014 | 5.7 / 67 ms |
+
+Against `models-big` (effort 400, 20k games): 52.28% ± 0.45, margin +0.77,
+but pegging -0.013 ± 0.010 per hand: the nn pegs at least as well, so the
+gain is from playing for the win near 121. The minimax opponent (who sees
+my hand in each world) is the suspect; revisit in M13.
+
 ### M12: Discard engine
 - Exact hand distributions over starters; crib and pegging-shape tables
   built from self-play of the M11 bot; convolution and end-of-hand ordering

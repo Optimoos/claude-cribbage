@@ -16,10 +16,14 @@ import (
 type ArenaResult struct {
 	Pairs, Games, WinsA int
 	PointsA, PointsB    int // sums of final scores
+	PegA, PegB          int // sums of pegging points
+	Hands               int // hands dealt, including each game's last
 
 	// Per-pair sums for the paired intervals: w is A's wins in the pair
 	// (0, 1 or 2) and d is A's total margin over the pair's two games.
 	sumW2, sumD, sumD2 float64
+	// Per-pair pegging margin and its square, for the paired interval.
+	sumP, sumP2 float64
 	// Per-game sums for the unpaired interval of the margin.
 	sumG2 float64
 }
@@ -30,6 +34,11 @@ func (r *ArenaResult) add(o ArenaResult) {
 	r.WinsA += o.WinsA
 	r.PointsA += o.PointsA
 	r.PointsB += o.PointsB
+	r.PegA += o.PegA
+	r.PegB += o.PegB
+	r.Hands += o.Hands
+	r.sumP += o.sumP
+	r.sumP2 += o.sumP2
 	r.sumW2 += o.sumW2
 	r.sumD += o.sumD
 	r.sumD2 += o.sumD2
@@ -68,6 +77,18 @@ func (r ArenaResult) Margin() (mean, ci float64) {
 	// Per-pair margin per game x = d/2.
 	mean = r.sumD / 2 / n
 	return mean, ci95(r.sumD2/4, mean, n)
+}
+
+// PegMargin returns A's pegging margin per hand and the half-width of its
+// paired 95% confidence interval (treating hands per pair as fixed).
+func (r ArenaResult) PegMargin() (mean, ci float64) {
+	if r.Pairs == 0 || r.Hands == 0 {
+		return 0, 0
+	}
+	n := float64(r.Pairs)
+	perPair := r.sumP / n
+	hpp := float64(r.Hands) / n // hands per pair
+	return perPair / hpp, ci95(r.sumP2, perPair, n) / hpp
 }
 
 // UnpairedMarginCI is the margin's interval half-width as if the games had
@@ -131,7 +152,7 @@ func Arena(ctx context.Context, newA, newB func(worker int) bots.Bot, games, wor
 				}
 				s := DealSeed(seed, i)
 				var pr ArenaResult
-				var wins, margin float64
+				var wins, margin, peg float64
 				for aSeat := 0; aSeat < 2; aSeat++ {
 					seats := [2]bots.Bot{a, b}
 					if aSeat == 1 {
@@ -154,6 +175,10 @@ func Arena(ctx context.Context, newA, newB func(worker int) bots.Bot, games, wor
 					pa, pb := r.Scores[aSeat], r.Scores[1-aSeat]
 					pr.PointsA += pa
 					pr.PointsB += pb
+					pr.PegA += r.Pegged[aSeat]
+					pr.PegB += r.Pegged[1-aSeat]
+					pr.Hands += r.Hands
+					peg += float64(r.Pegged[aSeat] - r.Pegged[1-aSeat])
 					g := float64(pa - pb)
 					margin += g
 					pr.sumG2 += g * g
@@ -162,6 +187,8 @@ func Arena(ctx context.Context, newA, newB func(worker int) bots.Bot, games, wor
 				pr.sumW2 = wins * wins
 				pr.sumD = margin
 				pr.sumD2 = margin * margin
+				pr.sumP = peg
+				pr.sumP2 = peg * peg
 				local.add(pr)
 			}
 		}(w)

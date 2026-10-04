@@ -26,6 +26,9 @@ func TestArenaPairsMirror(t *testing.T) {
 	if m, ci := r.Margin(); m != 0 || ci != 0 {
 		t.Errorf("margin %v ± %v, want 0 ± 0", m, ci)
 	}
+	if p, ci := r.PegMargin(); p != 0 || ci != 0 || r.PegA == 0 {
+		t.Errorf("pegging margin %v ± %v (%d points), want 0 ± 0", p, ci, r.PegA)
+	}
 	if r.UnpairedCI() == 0 || r.UnpairedMarginCI() == 0 {
 		t.Error("unpaired intervals should be positive")
 	}
