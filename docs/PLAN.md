@@ -169,3 +169,160 @@ Decisions confirmed with you:
 - Matchmaking and ratings.
 - TURN deployment.
 - Manual counting with muggins.
+
+---
+
+# Phase 2: Expert AI (M9 to M16)
+
+Added 2026-10-04. M8 (Godot client) is paused while this phase runs. The
+heuristic and `nn` bots stay as they are; this phase adds a third bot.
+
+## Where the network got to
+
+The longest run (`models-big`, 463 → 256 → 128 → 1) played 17M games in
+about 22 hours and peaked at 52.9% ± 1.5% against the heuristic. It was
+flat from roughly 5M games on. Three things cap it:
+- The target is win or loss, nine hands and about 90 decisions later, in a
+  game dominated by deal luck. Most of the network's capacity learns noise.
+- Evaluations of 2000 games (±1.5%) cannot see a two-point gain, so
+  `best.bin` partly tracks lucky evaluations.
+- The heuristic already does the most valuable thing right: expected-value
+  discards with a crib table. Its weaknesses are one-ply pegging with a
+  uniform opponent model, treating the opponent's crib discards as random
+  cards, ignoring the pegging value of the kept hand, and ignoring the
+  score when choosing between points and winning chances.
+
+Cribbage is luck-heavy, so the ceiling is modest: the best possible player
+probably beats this heuristic by 56 to 60%.
+
+## Decisions
+
+- **Design:** search plus learned tables (an expert system), not a bigger
+  network. Hands are independent except through the score, pegging is a
+  tiny imperfect-information subgame, and the show is exact once cards are
+  known. Learned components fill only the gaps enumeration cannot.
+- **Tooling:** everything stays in Go. The bottleneck is game simulation,
+  not gradient computation. A GPU/PyTorch path is deferred unless M16
+  wants a large distilled network.
+- **Search effort is one knob.** Self-play generation fixes it low and
+  equal on both seats so games finish quickly. Against humans and other
+  bots it is configurable. Latency only matters when a human is waiting;
+  a few hundred milliseconds is acceptable there.
+- **Lobby:** a third bot, `expert`, with difficulty levels. Effort alone
+  gives a narrow spread because the tables carry most of the skill, so
+  weaker levels also drop components (opponent inference first, then the
+  crib and pegging tables). Every level is deterministic and plays its
+  single best move; ties break in a fixed order.
+- **Hardware:** overnight runs on the i7-9750H laptop (6 cores) now; a
+  Ryzen 5900X desktop is available in a few days for policy iteration.
+- **Rules:** standard two-player cribbage as the engine implements today.
+  Rule changes later are accepted as rework.
+- **Success metric:** paired (duplicate-deal) win rate of at least 57%
+  against the heuristic with a confidence interval of ±0.5% or better, a
+  clear points-per-game edge, and a win over the `nn` bot of similar size.
+
+## The model
+
+A bundle file (header plus tables, in the same magic-and-JSON style as the
+network files) containing:
+1. **Win-probability table** W(my score, their score, who deals next):
+   the chance of winning at the start of a hand. Estimated from self-play
+   outcomes and smoothed by dynamic programming over hand-outcome
+   distributions. Every decision maximizes expected W, so the endgame
+   (points versus winning chances, pone counts first) is handled uniformly.
+2. **Crib tables:** the distribution of crib points from a pair of discard
+   ranks, conditioned on whose crib it is, learned from self-play rather
+   than assuming random opponent discards.
+3. **Pegging tables:** the distribution of pegging point differential by
+   kept-hand rank shape and dealer, learned from self-play of the search
+   pegger. Used only when choosing discards.
+4. **Opponent discard model:** for a six-card rank shape, which four a
+   sensible player keeps. Used to weight sampled opponent hands.
+
+Decisions:
+- **Discard:** for each of the 15 options, the hand-score distribution over
+  starters is exact; crib and pegging distributions come from the tables.
+  Convolve, apply the end-of-hand ordering (pegging, pone's hand, dealer's
+  hand, crib), and map through W.
+- **Pegging:** enumerate or sample opponent hands consistent with
+  everything seen, weighted by the opponent model. Suits do not matter in
+  pegging, so an unknown hand is a rank multiset and the expectation is
+  nearly exact. Solve each world's remaining pegging exactly and value the
+  end of the hand through W.
+- **Policy iteration:** regenerate every table from self-play of the
+  expert against itself and repeat until a paired evaluation shows no gain.
+
+## Milestones
+
+### M9: Evaluation harness
+- Duplicate-deal arena: each deck is played twice with seats swapped, so
+  deal luck cancels. Report paired win rate and points-per-game
+  differential, each with a 95% confidence interval.
+- A gauntlet command that runs one bot against random, heuristic, nn and
+  a named earlier bundle in one table, with decision latency per phase.
+- Re-measure the `nn` bot at 100k paired games for a precise baseline.
+
+**Verify:** confidence intervals shrink measurably at equal game counts
+against the current arena; the baseline nn figure is reproducible across
+seeds within its interval.
+
+### M10: Win-probability table and bundle format
+- Collect (scores, dealer, outcome) at every hand start from self-play of
+  the best current bot. Smooth with DP over empirical hand-outcome
+  distributions binned by score region.
+- Bundle file format with a versioned header, a loader, and a `cmd/expert`
+  tool with `build`, `inspect` and `eval` subcommands.
+
+**Verify:** W is monotone in both scores, swapping seats and dealer gives
+complementary probabilities, and spot checks match raw empirical
+frequencies within their intervals.
+
+### M11: Pegging search
+- Opponent-hand enumeration by rank multiset over unseen cards (uniform
+  weighting for now), an exact pegging solver per world, W-valued
+  terminals, and an effort parameter controlling the number of worlds.
+- New `expert` bot: pegging by search, discards still via the heuristic.
+
+**Verify:** pegging points per hand beat the heuristic in a paired match,
+overall win rate rises, and latency per decision is reported at each
+effort level.
+
+### M12: Discard engine
+- Exact hand distributions over starters; crib and pegging-shape tables
+  built from self-play of the M11 bot; convolution and end-of-hand ordering
+  through W.
+
+**Verify:** paired win rate and points edge over heuristic and nn improve
+on M11. Spot-check a sample of discards against published expert tables.
+
+### M13: Opponent modelling
+- Weight each sampled opponent hand by the probability the discard model
+  keeps it, and by consistency with their pegging plays so far.
+- Crib tables conditioned on whose crib it is.
+
+**Verify:** paired gain over the M12 bot.
+
+### M14: Policy iteration and long runs
+- Regenerate all tables from expert self-play (low, equal effort), repeat
+  for several rounds, tune effort levels. Long runs on the 5900X.
+
+**Verify:** each round is evaluated paired against the previous round and
+accepted only if it does not regress. Final run against the M9 baseline.
+
+### M15: Server integration and difficulty levels
+- `cribserver -expert models/expert.bin` registers the `expert` bot and its
+  difficulty levels; the lobby offers them; `GET /api/bots` lists them.
+- Shared read-only tables, per-game scratch; resume after restart.
+- Define the difficulty levels from measured strength (effort plus
+  dropped components), all deterministic.
+
+**Verify:** 10k games through the server match the arena result, a
+browser game against each level plays well, and a saved game against
+`expert` resumes after a restart.
+
+### M16 (optional): Distillation
+- Train a policy and value network in Go from millions of expert
+  decisions, as a fast approximation and as the search's opponent model.
+
+**Verify:** the distilled network beats `nn` and approaches the expert at
+a fraction of the latency.
