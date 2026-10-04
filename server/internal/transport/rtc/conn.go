@@ -51,13 +51,15 @@ type Conn struct {
 	in     chan inbound
 	closed chan struct{}
 	once   sync.Once
+	// release, if set, is called once the peer connection has closed.
+	release func()
 
 	mu    sync.Mutex
 	codec Codec
 }
 
-func newConn(pc *webrtc.PeerConnection, dc *webrtc.DataChannel, codec Codec) *Conn {
-	c := &Conn{pc: pc, dc: dc, in: make(chan inbound, 256), closed: make(chan struct{}), codec: codec}
+func newConn(pc *webrtc.PeerConnection, dc *webrtc.DataChannel, codec Codec, release func()) *Conn {
+	c := &Conn{pc: pc, dc: dc, in: make(chan inbound, 256), closed: make(chan struct{}), codec: codec, release: release}
 	dc.OnMessage(func(m webrtc.DataChannelMessage) {
 		select {
 		case c.in <- inbound{data: m.Data, text: m.IsString}:
@@ -128,7 +130,13 @@ func (c *Conn) Flush() error { return nil }
 func (c *Conn) Close() error {
 	c.once.Do(func() {
 		close(c.closed)
-		go c.pc.Close() // may block briefly; never from a pion callback
+		// Closing may block briefly, so never do it from a pion callback.
+		go func() {
+			c.pc.Close()
+			if c.release != nil {
+				c.release()
+			}
+		}()
 	})
 	return nil
 }

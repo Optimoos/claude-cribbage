@@ -132,6 +132,12 @@ type API struct {
 	config webrtc.Configuration
 	log    *slog.Logger
 	mux    *ice.MultiUDPMuxDefault
+
+	// live counts accepted connections whose peer connection has not yet
+	// finished closing, so Close can let peers hear that we are going.
+	mu      sync.Mutex
+	closing bool
+	live    sync.WaitGroup
 }
 
 // NewAPI prepares WebRTC networking.
@@ -164,8 +170,22 @@ func NewAPI(o Options) (*API, error) {
 	return a, nil
 }
 
-// Close releases the shared UDP port.
+// closeWait bounds how long Close waits for connections to finish closing.
+const closeWait = 2 * time.Second
+
+// Close waits briefly for accepted connections that are already closing
+// (e.g. by Server.Shutdown) to tell their peers, so browsers reconnect at
+// once instead of waiting ~15s to notice, then releases the shared UDP port.
 func (a *API) Close() error {
+	a.mu.Lock()
+	a.closing = true
+	a.mu.Unlock()
+	done := make(chan struct{})
+	go func() { a.live.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(closeWait):
+	}
 	if a.mux != nil {
 		return a.mux.Close()
 	}
@@ -217,8 +237,18 @@ func (a *API) answer(ctx context.Context, ws *websocket.Conn, onConn func(*Conn)
 			return
 		}
 		dc.OnOpen(func() {
+			a.mu.Lock()
+			closing := a.closing
+			if !closing {
+				a.live.Add(1)
+			}
+			a.mu.Unlock()
+			if closing {
+				go pc.Close()
+				return
+			}
 			select {
-			case opened <- newConn(pc, dc, Auto):
+			case opened <- newConn(pc, dc, Auto, a.live.Done):
 			default:
 			}
 		})
@@ -309,7 +339,7 @@ func (a *API) Dial(ctx context.Context, url string, codec Codec) (*Conn, error) 
 	opened := make(chan struct{})
 	var openOnce sync.Once
 	dc.OnOpen(func() { openOnce.Do(func() { close(opened) }) })
-	conn := newConn(pc, dc, codec)
+	conn := newConn(pc, dc, codec, nil)
 
 	sig := &signaler{ws: ws}
 	pc.OnICECandidate(func(c *webrtc.ICECandidate) { sig.candidate(ctx, c) })

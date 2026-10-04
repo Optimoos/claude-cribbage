@@ -49,7 +49,7 @@ class Connection {
       this.dc = null;
       this.onClose();
       setTimeout(() => this.connect(), this.retry);
-      this.retry = Math.min(this.retry * 2, 5000);
+      this.retry = Math.min(this.retry * 2, 2000);
     };
 
     pc.onicecandidate = e => {
@@ -57,8 +57,14 @@ class Connection {
       const m = JSON.stringify({ type: 'candidate', candidate: e.candidate.toJSON() });
       if (described && ws.readyState === WebSocket.OPEN) ws.send(m); else localPending.push(m);
     };
+    // "failed" takes ~15s to follow "disconnected", which itself comes ~5s
+    // after the server goes away (e.g. a restart), so give up on a brief
+    // disconnect rather than waiting it out.
     pc.onconnectionstatechange = () => {
       if (['failed', 'closed'].includes(pc.connectionState)) fail();
+      else if (pc.connectionState === 'disconnected') {
+        setTimeout(() => { if (pc.connectionState === 'disconnected') fail(); }, 1500);
+      }
     };
     ws.onopen = async () => {
       const offer = await pc.createOffer();
@@ -784,7 +790,7 @@ function applyEvent(v, e, u) {
       if (crib) v.cribOpen = e.cards || [];
       else if (!mine) v.oppReveal = e.cards || [];
       fx.label = crib ? 'crib' : 'hand';
-      fx.ms = 2400;
+      fx.ms = 330;
       break;
     }
     case 'EVENT_KIND_GAME_OVER':
@@ -824,9 +830,12 @@ function floatAt(at, seat, html, cls) {
   const f = document.createElement('div');
   f.className = `float ${cls}`;
   f.innerHTML = html;
-  f.style.left = `${x}px`;
-  f.style.top = `${y}px`;
+  f.dataset.key = `${at}:${seat}`;
+  // Stack above labels still rising from the same spot (e.g. hand then crib).
+  const stacked = [...layer.children].filter(o => o.dataset.key === f.dataset.key).length;
   layer.appendChild(f);
+  f.style.left = `${x}px`;
+  f.style.top = `${y - stacked * (f.offsetHeight + 6)}px`;
   setTimeout(() => f.remove(), 1700);
 }
 
