@@ -132,9 +132,10 @@ func evalCmd(ctx context.Context, args []string) error {
 		return err
 	}
 	rate, ci := r.WinRate()
-	fmt.Printf("vs %s: won %d of %d (%.2f%% ± %.2f%%), avg score %.1f to %.1f, %.0f games/s\n",
+	m, mci := r.Margin()
+	fmt.Printf("vs %s: won %d of %d paired games (%.2f%% ± %.2f%%), avg score %.1f to %.1f (margin %+.2f ± %.2f), %.0f games/s\n",
 		*vs, r.WinsA, r.Games, 100*rate, 100*ci,
-		float64(r.PointsA)/float64(max(1, r.Games)), float64(r.PointsB)/float64(max(1, r.Games)),
+		float64(r.PointsA)/float64(max(1, r.Games)), float64(r.PointsB)/float64(max(1, r.Games)), m, mci,
 		float64(r.Games)/time.Since(start).Seconds())
 	return nil
 }

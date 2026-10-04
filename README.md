@@ -18,6 +18,7 @@ go run ./cmd/botclient -user dave -bot nn -model models-ft/best.bin -opponent he
 go run ./cmd/sim -a heuristic -b random -n 100000 # in-process bot matches
 go run ./cmd/train run -out models                # train the neural network (Ctrl-C to stop)
 go run ./cmd/train eval -model models/best.bin -vs heuristic -n 10000
+go run ./cmd/gauntlet -bot models-ft/best.bin -vs random,heuristic -n 100000   # duplicate-deal table
 ```
 
 | Path | Purpose |
@@ -27,7 +28,7 @@ go run ./cmd/train eval -model models/best.bin -vs heuristic -n 10000
 | `internal/protocol` | Engine to protobuf conversions; `pb/` is generated |
 | `internal/server` | Connections, auth, lobby, matchmaking, game actors |
 | `internal/store` | Users, sessions and games: in-memory or SQLite |
-| `internal/ai` | Neural network player (`Agent`) and `Arena` matches |
+| `internal/ai` | Neural network player (`Agent`), duplicate-deal `Arena` matches, decision timing |
 | `internal/ai/nn` | MLP with sparse inputs, Adam, and the model file format |
 | `internal/ai/encode` | Observation to features; afterstates |
 | `internal/ai/train` | Self-play TD(λ) training |

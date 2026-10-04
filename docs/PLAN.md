@@ -266,6 +266,19 @@ Decisions:
 against the current arena; the baseline nn figure is reproducible across
 seeds within its interval.
 
+**Baseline (2026-10-04, `cmd/gauntlet`, 100k paired games, 95% intervals):**
+
+| Bot | vs heuristic, seed 1 | seed 2 | margin/game |
+|---|---|---|---|
+| `models-ft/best.bin` (served as `nn`) | 50.04% ± 0.20 | 50.18% ± 0.20 | -0.29 ± 0.06 |
+| `models-big/best.bin` | 50.89% ± 0.20 | 51.14% ± 0.20 | 0.00 ± 0.06 |
+
+`models-big` beats `models-ft` head to head 51.08% ± 0.20. Pairing cuts the
+win-rate interval from ±0.31 to ±0.20 (about 2.4x fewer games for equal
+precision) and the margin interval by half. The training-time figures
+(50.3%, 52.9%) were inflated by picking the best of many noisy evaluations.
+M9+ comparisons use `models-big/best.bin` as the `nn` reference.
+
 ### M10: Win-probability table and bundle format
 - Collect (scores, dealer, outcome) at every hand start from self-play of
   the best current bot. Smooth with DP over empirical hand-outcome
