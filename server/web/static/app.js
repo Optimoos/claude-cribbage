@@ -616,7 +616,7 @@ function onUpdate(u) {
 // Replaying events
 // ---------------------------------------------------------------------------
 
-const anim = { queue: [], running: false, skip: false, waiters: new Set() };
+const anim = { queue: [], running: false, skip: false, waiters: new Set(), tails: new Set() };
 
 function enqueue(u) {
   anim.queue.push(u);
@@ -632,12 +632,14 @@ async function drain() {
   anim.skip = false;
 }
 
-function wait(ms) {
+// wait pauses the replay; a tail wait is one the player may end by acting.
+function wait(ms, tail = false) {
   if (anim.skip || prefs.rapid) return Promise.resolve();
   return new Promise(resolve => {
-    const done = () => { clearTimeout(t); anim.waiters.delete(done); resolve(); };
+    const done = () => { clearTimeout(t); anim.waiters.delete(done); anim.tails.delete(done); resolve(); };
     const t = setTimeout(done, ms);
     anim.waiters.add(done);
+    if (tail) anim.tails.add(done);
   });
 }
 
@@ -659,12 +661,21 @@ async function replay(u) {
     const events = u.events || [];
     let oppActed = false;
     v.busy = events.length > 0;
-    for (const e of events) {
+    for (const [i, e] of events.entries()) {
       const fx = applyEvent(v, e, u);
       if (e.seat !== u.game.seat) oppActed = true;
       if (animated()) {
+        // When the last event leaves us to act, unlock the hand now rather
+        // than after the score bubbles fade; acting cuts the pause short.
+        const unlock = i === events.length - 1 && u.observation && u.observation.mustAct;
+        if (unlock) { syncView(v, u); v.busy = false; }
         renderTable(true);
         effects(v, fx);
+        if (unlock) {
+          if (oppActed) sfx.turn();
+          await wait(fx.ms, true);
+          return;
+        }
         await wait(fx.ms);
       }
     }
@@ -1206,6 +1217,7 @@ function confetti(parent) {
 
 function act(action) {
   conn.send({ act: { gameId: state.selected, action } });
+  for (const w of [...anim.tails]) w();
   state.picked.clear();
   const v = view(state.selected);
   if (v) { v.legal = []; v.mustAct = false; renderTable(); }
