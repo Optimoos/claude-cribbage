@@ -108,10 +108,11 @@ class Connection {
 
 const THEMES = { felt: '#123826', parchment: '#2f6d41', midnight: '#0b0e14' };
 const prefs = Object.assign(
-  { theme: 'felt', rapid: matchMedia('(prefers-reduced-motion: reduce)').matches, muted: false },
+  { theme: 'felt', board: 'serpentine', rapid: matchMedia('(prefers-reduced-motion: reduce)').matches, muted: false },
   (() => { try { return JSON.parse(localStorage.getItem('prefs')) || {}; } catch (e) { return {}; } })(),
 );
 if (!(prefs.theme in THEMES)) prefs.theme = 'felt';
+if (!['serpentine', 'long'].includes(prefs.board)) prefs.board = 'serpentine';
 
 function savePrefs() {
   try { localStorage.setItem('prefs', JSON.stringify(prefs)); } catch (e) { /* private mode */ }
@@ -121,6 +122,7 @@ function applyPrefs() {
   document.documentElement.dataset.theme = prefs.theme;
   document.querySelector('meta[name=theme-color]').content = THEMES[prefs.theme];
   $('theme').value = prefs.theme;
+  $('board-style').value = prefs.board;
   $('rapid').checked = prefs.rapid;
   $('mute').innerHTML = `<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5 6 9H2v6h4l5 4z"/>${prefs.muted ? '<path d="m22 9-6 6M16 9l6 6"/>' : '<path d="M15.5 8.5a5 5 0 0 1 0 7M19 5a10 10 0 0 1 0 14"/>'}</svg>`;
   $('mute').title = prefs.muted ? 'Unmute sounds' : 'Mute sounds';
@@ -191,29 +193,14 @@ const sfx = (() => {
 })();
 
 // ---------------------------------------------------------------------------
-// The cribbage board: a continuous 121-hole board drawn in SVG. Four runs of
-// 30 holes snake across it (1-30 out, 31-60 back, 61-90 out, 91-120 back),
-// with the two players' lanes side by side all the way; each player then
-// finishes in their own 121 game hole. The lanes swap sides at every turn so
-// the turns nest, as on a real board. Pegs persist between renders so they can
-// hop from hole to hole.
+// The cribbage board, drawn in SVG in one of two styles (prefs.board). Each
+// style supplies the static drawing and xy(), which places a peg; the pegs
+// themselves are shared, and persist between renders so they can hop from
+// hole to hole.
 // ---------------------------------------------------------------------------
 
 const Board = (() => {
   const NS = 'http://www.w3.org/2000/svg';
-  const X0 = 132, STEP = 25, GAP = 11, W = 1000, H = 232;
-  const LANE = 22, RUN = 50, TOP = 30; // lane spacing, run spacing, first lane
-  const holeX = i => X0 + i * STEP + Math.floor(i / 5) * GAP;
-  const LAST = holeX(29);
-  const XL = X0 - 14, XR = LAST + 14; // where straight runs meet the turns
-  // laneY is the y of seat k's lane in run r (0-3). Even runs put the
-  // opponent above; odd runs swap.
-  const laneY = (r, k) => TOP + r * RUN + ((k === 'opp') === (r % 2 === 0) ? 0 : LANE);
-  let svg = null, gameId = null;
-  const pegs = { me: [], opp: [] };
-  let pos = { me: null, opp: null };
-  const names = {};
-
   const el = (tag, attrs, parent) => {
     const e = document.createElementNS(NS, tag);
     for (const k in attrs) e.setAttribute(k, attrs[k]);
@@ -221,66 +208,194 @@ const Board = (() => {
     return e;
   };
 
-  function xy(k, s, pegIdx) {
-    if (s <= 0) return [pegIdx ? 98 : 74, laneY(0, k)];
-    if (s >= 121) return [98, laneY(3, k)];
-    const r = Math.floor((s - 1) / 30), i = (s - 1) % 30;
-    return [holeX(r % 2 ? 29 - i : i), laneY(r, k)];
-  }
+  // Serpentine: the classic board cut in the shape of its track, lying on its
+  // side. Holes 1-35 run out along the top arm, 37-44 fan round the far end,
+  // 46-80 come back along the bottom arm, 82-84 turn at the near end, and
+  // 86-120 run out along the middle to the single 121 game hole. Holes are
+  // grouped in fives with a number between groups. The geometry is worked in
+  // portrait, as the board stands in the picture (start at the bottom left),
+  // and turned a quarter clockwise when drawn: portrait (px, py) is drawn at
+  // (X0 - py, Y0 + px).
+  const serpentine = (() => {
+    const P = 18;        // distance between rows of holes
+    const S = 70;        // distance between arms; the far turn's radius
+    const HW = 10;       // half the distance between the two lanes
+    const BW = 23;       // half the board's width
+    const CYT = -6, YB = 44 * P, CYB = YB + 6; // centers of the far and near turns
+    const X0 = 910, Y0 = 100;
+    const pt = (px, py) => `${X0 - py} ${Y0 + px}`;
+    const lane = { me: 0, opp: 1 }; // lane 1 runs on the outside of both turns
 
-  // lanePath traces seat k's whole track, from the start holes, through the
-  // four runs and three turns, to the game hole.
-  function lanePath(k) {
-    let d = `M 60 ${laneY(0, k)} H ${XR}`;
-    for (let r = 1; r < 4; r++) {
-      const y0 = laneY(r - 1, k), y1 = laneY(r, k), right = r % 2 === 1;
-      d += ` A ${(y1 - y0) / 2} ${(y1 - y0) / 2} 0 0 ${right ? 1 : 0} ${right ? XR : XL} ${y1}`;
-      d += ` H ${r === 3 ? 86 : right ? XL : XR}`;
+    // hole gives the portrait position of hole n (1-121, or 0 for the start
+    // holes) in lane j; pegIdx picks between the two start holes.
+    function hole(j, n, pegIdx) {
+      const sg = j ? -1 : 1, A = -S + sg * HW, B = sg * HW, C = S - sg * HW;
+      if (n <= 0) return [A, (pegIdx ? 45 : 44) * P];
+      if (n <= 35) return [A, (2 + 6 * (6 - Math.floor((n - 1) / 5)) + 4 - (n - 1) % 5) * P];
+      if (n === 36) return [A, 0];
+      if (n <= 44) {
+        const r = S - sg * HW, t = -Math.PI + (n - 36.5) * Math.PI / 8;
+        return [r * Math.cos(t), CYT + r * Math.sin(t)];
+      }
+      if (n === 45) return [C, 0];
+      if (n <= 80) { const k = n - 46; return [C, (2 + 6 * Math.floor(k / 5) + k % 5) * P]; }
+      if (n === 81) return [C, YB];
+      if (n <= 84) {
+        const r = S / 2 - sg * HW, t = (n - 81.5) * Math.PI / 3;
+        return [S / 2 + r * Math.cos(t), CYB + r * Math.sin(t)];
+      }
+      if (n === 85) return [B, YB];
+      if (n <= 120) { const k = n - 86; return [B, (2 + 6 * (6 - Math.floor(k / 5)) + 4 - k % 5) * P]; }
+      return [0, 0];
     }
-    return d;
-  }
 
-  // skunkLine marks the turn between runs r-1 and r: a dashed line across
-  // both lanes at the apex of the turn.
-  function skunkLine(r, label) {
-    const right = r % 2 === 1;
-    const cy = (TOP + (r - 1) * RUN + TOP + r * RUN + LANE) / 2;
-    const x = right ? XR : XL, dir = right ? 1 : -1;
-    el('line', { class: 'skunk', x1: x + dir * 6, y1: cy, x2: x + dir * 44, y2: cy }, svg);
-    el('text', { class: 'skunk-text', x: x + dir * 50, y: cy + 4, 'text-anchor': right ? 'start' : 'end' }, svg).textContent = label;
-  }
+    // track traces the board's whole length at offset off from its center
+    // line: off 0 is the center, ±HW the lanes.
+    function track(off, end) {
+      const rT = S - off, rB = S / 2 - off;
+      return `M ${pt(-S + off, 45 * P)} L ${pt(-S + off, CYT)}` +
+        ` A ${rT} ${rT} 0 0 1 ${pt(S - off, CYT)} L ${pt(S - off, CYB)}` +
+        ` A ${rB} ${rB} 0 0 1 ${pt(off, CYB)} L ${pt(off, end)}`;
+    }
 
-  function build(container) {
-    svg = el('svg', { viewBox: `0 0 ${W} ${H}`, role: 'img', 'aria-label': 'Cribbage board' }, container);
-    for (const k of ['opp', 'me']) el('path', { class: `lane ${k}`, d: lanePath(k) }, svg);
-    for (const k of ['opp', 'me']) el('path', { class: 'groove', d: lanePath(k) }, svg);
-    for (let r = 0; r < 4; r++) {
+    function draw(svg, names) {
+      const defs = el('defs', {}, svg);
+      const wood = el('linearGradient', { id: 'board-wood', x1: 0, y1: 0, x2: 0, y2: 1 }, defs);
+      el('stop', { class: 'wood-1', offset: 0 }, wood);
+      el('stop', { class: 'wood-2', offset: 1 }, wood);
+      el('path', { class: 'track-edge', d: track(0, 0) }, svg);
+      el('path', { class: 'track', d: track(0, 0), stroke: 'url(#board-wood)' }, svg);
+      for (const k of ['opp', 'me']) el('path', { class: `lane ${k}`, d: track(lane[k] ? -HW : HW, 2 * P) }, svg);
+
+      // Numbers between the groups of five; the skunk lines fall at 60/61 and
+      // 90/91, where the 60 and 90 sit.
+      const num = (px, slot, text) => {
+        const x = X0 - slot * P, y = Y0 + px;
+        const skunk = text === 60 || text === 90;
+        if (skunk) {
+          const g = el('g', {}, svg);
+          el('title', {}, g).textContent = text === 60 ? 'Double skunk line' : 'Skunk line';
+          el('line', { class: 'skunk', x1: x, y1: y - BW + 3, x2: x, y2: y + BW - 3 }, g);
+        }
+        el('text', { class: 'num' + (skunk ? ' skunk-num' : '') + (text === 'Start' ? ' start' : ''), x, y: y + 3.5, 'text-anchor': 'middle' }, svg).textContent = text;
+      };
+      num(-S, 1, 35); num(0, 1, 120); num(S, 1, 45);
+      for (let g = 0; g < 6; g++) { num(-S, 7 + 6 * g, 30 - 5 * g); num(0, 7 + 6 * g, 115 - 5 * g); num(S, 7 + 6 * g, 50 + 5 * g); }
+      num(-S, 43, 'Start'); num(0, 43, 85); num(S, 43, 80);
+
+      const at = ([px, py]) => ({ cx: X0 - py, cy: Y0 + px });
+      for (const j of [0, 1]) {
+        for (let n = 1; n <= 120; n++) el('circle', { class: 'hole', ...at(hole(j, n)), r: 4.2 }, svg);
+        for (const i of [0, 1]) el('circle', { class: 'hole', ...at(hole(j, 0, i)), r: 4.2 }, svg);
+      }
+      el('circle', { class: 'game-hole', ...at(hole(0, 121)), r: 6.5 }, svg);
       for (const k of ['opp', 'me']) {
-        for (let i = 0; i < 30; i++) el('circle', { class: 'hole' + (i % 5 === 4 ? ' tick' : ''), cx: holeX(i), cy: laneY(r, k), r: 4.6 }, svg);
+        const { cy } = at(hole(lane[k], 0, 1));
+        names[k] = el('text', { class: `name lbl-${k}`, x: X0 - 45 * P - BW - 6, y: cy + 3.5, 'text-anchor': 'end' }, svg);
       }
     }
-    for (const k of ['opp', 'me']) {
-      for (const x of [74, 98]) el('circle', { class: 'hole', cx: x, cy: laneY(0, k), r: 4.6 }, svg);
-      el('circle', { class: 'game-hole', cx: 98, cy: laneY(3, k), r: 7 }, svg);
-      names[k] = el('text', { class: `name lbl-${k}`, x: 12, y: laneY(0, k) + 4 }, svg);
+
+    return {
+      viewBox: `0 0 1020 200`, pegR: 7, draw,
+      xy(k, s, pegIdx) { const [px, py] = hole(lane[k], Math.min(s, 121), pegIdx); return [X0 - py, Y0 + px]; },
+    };
+  })();
+
+  // Long track: a continuous 121-hole board. Four runs of 30 holes snake
+  // across it (1-30 out, 31-60 back, 61-90 out, 91-120 back), with the two
+  // players' lanes side by side all the way; each player then finishes in
+  // their own 121 game hole. The lanes swap sides at every turn so the turns
+  // nest, as on a real board.
+  const long = (() => {
+    const X0 = 132, STEP = 25, GAP = 11;
+    const LANE = 22, RUN = 50, TOP = 30; // lane spacing, run spacing, first lane
+    const holeX = i => X0 + i * STEP + Math.floor(i / 5) * GAP;
+    const LAST = holeX(29);
+    const XL = X0 - 14, XR = LAST + 14; // where straight runs meet the turns
+    // laneY is the y of seat k's lane in run r (0-3). Even runs put the
+    // opponent above; odd runs swap.
+    const laneY = (r, k) => TOP + r * RUN + ((k === 'opp') === (r % 2 === 0) ? 0 : LANE);
+
+    function xy(k, s, pegIdx) {
+      if (s <= 0) return [pegIdx ? 98 : 74, laneY(0, k)];
+      if (s >= 121) return [98, laneY(3, k)];
+      const r = Math.floor((s - 1) / 30), i = (s - 1) % 30;
+      return [holeX(r % 2 ? 29 - i : i), laneY(r, k)];
     }
-    el('text', { class: 'goal', x: 82, y: (laneY(3, 'me') + laneY(3, 'opp')) / 2 + 4, 'text-anchor': 'end' }, svg).textContent = '121';
-    // A player who loses without passing 61 is double-skunked; without
-    // passing 91, skunked.
-    skunkLine(2, 'SS');
-    skunkLine(3, 'S');
+
+    // lanePath traces seat k's whole track, from the start holes, through the
+    // four runs and three turns, to the game hole.
+    function lanePath(k) {
+      let d = `M 60 ${laneY(0, k)} H ${XR}`;
+      for (let r = 1; r < 4; r++) {
+        const y0 = laneY(r - 1, k), y1 = laneY(r, k), right = r % 2 === 1;
+        d += ` A ${(y1 - y0) / 2} ${(y1 - y0) / 2} 0 0 ${right ? 1 : 0} ${right ? XR : XL} ${y1}`;
+        d += ` H ${r === 3 ? 86 : right ? XL : XR}`;
+      }
+      return d;
+    }
+
+    // skunkLine marks the turn between runs r-1 and r: a dashed line across
+    // both lanes at the apex of the turn.
+    function skunkLine(svg, r, label) {
+      const right = r % 2 === 1;
+      const cy = (TOP + (r - 1) * RUN + TOP + r * RUN + LANE) / 2;
+      const x = right ? XR : XL, dir = right ? 1 : -1;
+      el('line', { class: 'skunk', x1: x + dir * 6, y1: cy, x2: x + dir * 44, y2: cy }, svg);
+      el('text', { class: 'skunk-text', x: x + dir * 50, y: cy + 4, 'text-anchor': right ? 'start' : 'end' }, svg).textContent = label;
+    }
+
+    function draw(svg, names) {
+      for (const k of ['opp', 'me']) el('path', { class: `lane ${k}`, d: lanePath(k) }, svg);
+      for (const k of ['opp', 'me']) el('path', { class: 'groove', d: lanePath(k) }, svg);
+      for (let r = 0; r < 4; r++) {
+        for (const k of ['opp', 'me']) {
+          for (let i = 0; i < 30; i++) el('circle', { class: 'hole' + (i % 5 === 4 ? ' tick' : ''), cx: holeX(i), cy: laneY(r, k), r: 4.6 }, svg);
+        }
+      }
+      for (const k of ['opp', 'me']) {
+        for (const x of [74, 98]) el('circle', { class: 'hole', cx: x, cy: laneY(0, k), r: 4.6 }, svg);
+        el('circle', { class: 'game-hole', cx: 98, cy: laneY(3, k), r: 7 }, svg);
+        names[k] = el('text', { class: `name lbl-${k}`, x: 12, y: laneY(0, k) + 4 }, svg);
+      }
+      el('text', { class: 'goal', x: 82, y: (laneY(3, 'me') + laneY(3, 'opp')) / 2 + 4, 'text-anchor': 'end' }, svg).textContent = '121';
+      // A player who loses without passing 61 is double-skunked; without
+      // passing 91, skunked.
+      skunkLine(svg, 2, 'SS');
+      skunkLine(svg, 3, 'S');
+    }
+
+    return { viewBox: '0 0 1000 232', pegR: 9, draw, xy };
+  })();
+
+  const STYLES = { serpentine, long };
+  let svg = null, style = serpentine, gameId = null, last = null;
+  let pegs = { me: [], opp: [] }, pos = { me: null, opp: null };
+  const names = {};
+
+  // build draws the board in container in the named style, replacing any
+  // board already there, and puts the pegs back where they were.
+  function build(container, styleName) {
+    style = STYLES[styleName] || serpentine;
+    container.replaceChildren();
+    container.dataset.style = styleName in STYLES ? styleName : 'serpentine';
+    svg = el('svg', { viewBox: style.viewBox, role: 'img', 'aria-label': 'Cribbage board' }, container);
+    style.draw(svg, names);
+    pegs = { me: [], opp: [] };
+    pos = { me: null, opp: null };
     for (const k of ['opp', 'me']) {
       for (let i = 0; i < 2; i++) {
         const g = el('g', { class: `peg ${k}` }, svg);
-        el('circle', { class: 'body', r: 9 }, g);
-        el('circle', { class: 'shine', r: 2.6, cx: -3, cy: -3 }, g);
+        el('circle', { class: 'body', r: style.pegR }, g);
+        el('circle', { class: 'shine', r: style.pegR * .29, cx: -style.pegR / 3, cy: -style.pegR / 3 }, g);
         pegs[k].push(g);
       }
     }
+    if (last) show(...last, false);
   }
 
   function place(k, i, s, animate) {
-    const [x, y] = xy(k, s, i);
+    const [x, y] = style.xy(k, s, i);
     const g = pegs[k][i];
     const to = `translate(${x}px, ${y}px)`;
     if (animate && g._xy && g.animate) {
@@ -315,17 +430,17 @@ const Board = (() => {
     });
   }
 
-  return {
-    build,
-    show(id, meName, oppName, v, animate) {
-      if (id !== gameId) { gameId = id; pos = { me: null, opp: null }; animate = false; }
-      names.me.textContent = meName.toUpperCase().slice(0, 7);
-      names.opp.textContent = oppName.toUpperCase().slice(0, 7);
-      const me = v.g.seat < 0 ? 0 : v.g.seat;
-      update('me', v.scores[me], v.trail[me], animate);
-      update('opp', v.scores[1 - me], v.trail[1 - me], animate);
-    },
-  };
+  function show(id, meName, oppName, v, animate) {
+    last = [id, meName, oppName, v];
+    if (id !== gameId) { gameId = id; pos = { me: null, opp: null }; animate = false; }
+    names.me.textContent = meName.toUpperCase().slice(0, 7);
+    names.opp.textContent = oppName.toUpperCase().slice(0, 7);
+    const me = v.g.seat < 0 ? 0 : v.g.seat;
+    update('me', v.scores[me], v.trail[me], animate);
+    update('opp', v.scores[1 - me], v.trail[1 - me], animate);
+  }
+
+  return { build, show };
 })();
 
 // ---------------------------------------------------------------------------
@@ -1140,6 +1255,7 @@ document.addEventListener('keydown', e => {
   if (e.key === 'Escape') { $('settings').hidden = true; setDrawer(false); }
 });
 $('theme').onchange = () => { prefs.theme = $('theme').value; savePrefs(); applyPrefs(); };
+$('board-style').onchange = () => { prefs.board = $('board-style').value; savePrefs(); Board.build($('board'), prefs.board); };
 $('rapid').onchange = () => {
   prefs.rapid = $('rapid').checked;
   savePrefs();
@@ -1157,5 +1273,5 @@ document.addEventListener('visibilitychange', () => { if (document.hidden) skipA
 
 if (narrow()) $('log-panel').open = false;
 applyPrefs();
-Board.build($('board'));
+Board.build($('board'), prefs.board);
 conn.connect();

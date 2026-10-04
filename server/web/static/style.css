@@ -277,6 +277,17 @@ main {
 .board .skunk { stroke: var(--skunk); stroke-width: 3; stroke-dasharray: 5 3; }
 .board .skunk-text { fill: var(--skunk); font-weight: 800; }
 .board .game-hole { fill: var(--hole); stroke: var(--board-ink); stroke-width: 1.5; }
+/* Serpentine: the board is cut in the shape of its track and sits on the table. */
+.board[data-style="serpentine"] { background: none; box-shadow: none; padding: 0; }
+.board[data-style="serpentine"] .wood-1 { stop-color: var(--wood-1); }
+.board[data-style="serpentine"] .wood-2 { stop-color: var(--wood-2); }
+.board[data-style="serpentine"] .track, .board[data-style="serpentine"] .track-edge { fill: none; stroke-linecap: round; stroke-linejoin: round; }
+.board[data-style="serpentine"] .track { stroke-width: 46; }
+.board[data-style="serpentine"] .track-edge { stroke-width: 49; stroke: color-mix(in srgb, var(--board-ink) 45%, var(--wood-2)); filter: drop-shadow(0 4px 5px #0006); }
+.board[data-style="serpentine"] .lane { stroke-width: 13; opacity: .3; }
+.board[data-style="serpentine"] .name { font-size: 10px; }
+.board .num { font: italic 700 10px ui-sans-serif, system-ui, sans-serif; letter-spacing: 0; }
+.board .num.skunk-num { fill: var(--skunk); paint-order: stroke; stroke: color-mix(in srgb, var(--wood-1) 50%, var(--wood-2)); stroke-width: 4px; }
 .peg { transition: none; }
 .peg circle.body { stroke: #0007; stroke-width: 1.2; }
 .peg.me circle.body { fill: var(--me); }
@@ -481,6 +492,8 @@ button.card:disabled { cursor: default; }
   .board { padding: .2rem; border-radius: 10px; }
   .board .name { display: none; }
   .board .goal, .board .skunk-text { font-size: 22px; }
+  .board .num { font-size: 14px; }
+  .board .num.start { display: none; }
   #empty { display: none !important; }
   .log { max-height: 11rem; }
   .show.compact .mini { display: none; }
