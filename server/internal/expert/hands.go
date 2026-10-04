@@ -85,8 +85,25 @@ func (o *Outcomes) add(p *Outcomes) {
 // SelfPlay is the data from a run of self-play games.
 type SelfPlay struct {
 	Games    int
-	Hands    Hands    // every hand played
-	Outcomes Outcomes // every hand start, with the game's result
+	Hands    Hands      // every hand played
+	Outcomes Outcomes   // every hand start, with the game's result
+	Details  []HandStat // complete hands that started with both scores below DetailMaxStart
+}
+
+// DetailMaxStart bounds the scores a hand may start from to be kept in
+// SelfPlay.Details. No hand gains a player 52 points, so these hands all run
+// to completion and the details are not biased by games ending part way.
+const DetailMaxStart = 70
+
+// HandStat is one complete hand in detail. Index 0 is the dealer, 1 the
+// pone.
+type HandStat struct {
+	Starter  engine.Card
+	Kept     [2][4]engine.Card
+	Discards [2][2]engine.Card
+	Show     [2]int8
+	Peg      [2]int8
+	Crib     int8
 }
 
 // Collect plays games between two bots made by newBot (one per seat, per
@@ -98,7 +115,11 @@ func Collect(ctx context.Context, newBot func(worker int) bots.Bot, games, worke
 	var mu sync.Mutex
 	var firstErr error
 	// Hands are gathered per game index so their order is reproducible.
-	perGame := make([]Hands, games)
+	type gameData struct {
+		hands   Hands
+		details []HandStat
+	}
+	perGame := make([]gameData, games)
 	total := &SelfPlay{}
 	var wg sync.WaitGroup
 	for w := 0; w < workers; w++ {
@@ -113,7 +134,8 @@ func Collect(ctx context.Context, newBot func(worker int) bots.Bot, games, worke
 				if i >= int64(games) {
 					break
 				}
-				if err := playRecorded(ai.DealSeed(seed, i), players, &perGame[i], local); err != nil {
+				d := &perGame[i]
+				if err := playRecorded(ai.DealSeed(seed, i), players, &d.hands, &d.details, local); err != nil {
 					mu.Lock()
 					if firstErr == nil {
 						firstErr = err
@@ -131,7 +153,8 @@ func Collect(ctx context.Context, newBot func(worker int) bots.Bot, games, worke
 	}
 	wg.Wait()
 	for i := range perGame {
-		total.Hands.addAll(&perGame[i])
+		total.Hands.addAll(&perGame[i].hands)
+		total.Details = append(total.Details, perGame[i].details...)
 	}
 	if firstErr == nil {
 		firstErr = ctx.Err()
@@ -139,14 +162,21 @@ func Collect(ctx context.Context, newBot func(worker int) bots.Bot, games, worke
 	return total, firstErr
 }
 
-// playRecorded plays one game, appending its hands to hands and its hand
-// starts to out.
-func playRecorded(seed uint64, players [2]bots.Bot, hands *Hands, out *Outcomes) error {
+// playRecorded plays one game, appending its hands to hands, its complete
+// early hands to details and its hand starts to out.
+func playRecorded(seed uint64, players [2]bots.Bot, hands *Hands, details *[]HandStat, out *Outcomes) error {
 	g := engine.NewGame(seed)
 	var starts [][3]int // dealer, dealer's score, pone's score at each hand start
 	var steps []int8
 	prev := [2]int{}
 	dealer := -1
+	var hs HandStat
+	side := func(p int) int { // 0 for the dealer, 1 for the pone
+		if p == dealer {
+			return 0
+		}
+		return 1
+	}
 	finish := func() {
 		if dealer >= 0 {
 			s := starts[len(starts)-1]
@@ -156,9 +186,24 @@ func playRecorded(seed uint64, players [2]bots.Bot, hands *Hands, out *Outcomes)
 	}
 	handle := func(evs []engine.Event) {
 		for _, e := range evs {
+			switch e.Kind {
+			case engine.EvStarter:
+				hs.Starter = e.Card
+			case engine.EvPlay, engine.EvGoPoint, engine.EvLastCard:
+				hs.Peg[side(e.Player)] += int8(e.Points)
+			case engine.EvShowHand:
+				hs.Show[side(e.Player)] = int8(e.Points)
+				hs.Kept[side(e.Player)] = e.Cards
+			case engine.EvShowCrib:
+				hs.Crib = int8(e.Points)
+				if s := starts[len(starts)-1]; s[1] < DetailMaxStart && s[2] < DetailMaxStart {
+					*details = append(*details, hs)
+				}
+			}
 			if e.Kind == engine.EvDeal {
 				finish()
 				dealer = e.Player
+				hs = HandStat{}
 				starts = append(starts, [3]int{dealer, e.Scores[dealer], e.Scores[1-dealer]})
 				prev = e.Scores
 				continue
@@ -192,6 +237,9 @@ func playRecorded(seed uint64, players [2]bots.Bot, hands *Hands, out *Outcomes)
 			a := players[p].Choose(o, buf)
 			if err := g.Apply(p, a); err != nil {
 				return fmt.Errorf("seed %d: %s (P%d) chose %v: %w", seed, players[p].Name(), p, a, err)
+			}
+			if a.Kind == engine.ActDiscard {
+				hs.Discards[side(p)] = a.Cards
 			}
 			handle(g.Events())
 		}

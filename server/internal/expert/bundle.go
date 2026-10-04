@@ -15,9 +15,9 @@ import (
 
 const (
 	bundleMagic = "CRIBEX01"
-	// BundleVersion changes whenever a table's meaning or layout changes;
-	// older bundles are rejected.
-	BundleVersion = 1
+	// BundleVersion changes whenever a table's meaning or layout changes.
+	// Version 1 bundles (a win table only) are still read.
+	BundleVersion = 2
 )
 
 // Table describes one table stored in a bundle: little-endian float32
@@ -44,14 +44,33 @@ type Meta struct {
 	Hands   int                `json:"hands"`
 	Seed    uint64             `json:"seed"`
 	Tables  []Table            `json:"tables"`
+	Sources map[string]string  `json:"sources,omitempty"` // table name -> the bot whose self-play built it
 	Metrics map[string]float64 `json:"metrics,omitempty"`
 	Notes   string             `json:"notes,omitempty"`
 }
 
 // Bundle is the expert's model: every learned table plus its metadata.
+// Discard is nil in bundles built before M12; the bot then discards as the
+// heuristic does.
 type Bundle struct {
-	Meta Meta
-	Win  *WinTable
+	Meta    Meta
+	Win     *WinTable
+	Discard *DiscardTables
+}
+
+// tables lists the bundle's tables in file order with their data.
+func (b *Bundle) tables() ([]Table, [][]float32) {
+	win := make([]float32, 0, Scores*Scores)
+	for x := range b.Win.V {
+		win = append(win, b.Win.V[x][:]...)
+	}
+	ts := []Table{{Name: "win", Shape: winShape}}
+	data := [][]float32{win}
+	if d := b.Discard; d != nil {
+		ts = append(ts, Table{"crib", cribShape}, Table{"peg", pegShape}, Table{"show", showShape})
+		data = append(data, d.Crib, d.Peg, d.Show)
+	}
+	return ts, data
 }
 
 var winShape = []int{Scores, Scores}
@@ -61,7 +80,8 @@ var winShape = []int{Scores, Scores}
 func (b *Bundle) Write(w io.Writer) error {
 	meta := b.Meta
 	meta.Version = BundleVersion
-	meta.Tables = []Table{{Name: "win", Shape: winShape}}
+	var data [][]float32
+	meta.Tables, data = b.tables()
 	hdr, err := json.Marshal(meta)
 	if err != nil {
 		return err
@@ -71,8 +91,8 @@ func (b *Bundle) Write(w io.Writer) error {
 	binary.Write(bw, binary.LittleEndian, uint32(len(hdr)))
 	bw.Write(hdr)
 	buf := make([]byte, 4)
-	for x := range b.Win.V {
-		for _, v := range b.Win.V[x] {
+	for _, vals := range data {
+		for _, v := range vals {
 			binary.LittleEndian.PutUint32(buf, math.Float32bits(v))
 			bw.Write(buf)
 		}
@@ -105,9 +125,12 @@ func ReadBundle(r io.Reader) (*Bundle, error) {
 	if err := json.Unmarshal(hdr, &b.Meta); err != nil {
 		return nil, fmt.Errorf("expert: header: %w", err)
 	}
-	if b.Meta.Version != BundleVersion {
-		return nil, fmt.Errorf("expert: bundle version %d; this build reads version %d", b.Meta.Version, BundleVersion)
+	if b.Meta.Version < 1 || b.Meta.Version > BundleVersion {
+		return nil, fmt.Errorf("expert: bundle version %d; this build reads versions 1 to %d", b.Meta.Version, BundleVersion)
 	}
+	want := map[string][]int{"win": winShape, "crib": cribShape, "peg": pegShape, "show": showShape}
+	d := new(DiscardTables)
+	nd := 0
 	buf := make([]byte, 4)
 	for _, t := range b.Meta.Tables {
 		vals := make([]float32, t.size())
@@ -117,21 +140,36 @@ func ReadBundle(r io.Reader) (*Bundle, error) {
 			}
 			vals[i] = math.Float32frombits(binary.LittleEndian.Uint32(buf))
 		}
+		shape, ok := want[t.Name]
+		if !ok {
+			return nil, fmt.Errorf("expert: unknown table %q", t.Name)
+		}
+		if !slices.Equal(t.Shape, shape) {
+			return nil, fmt.Errorf("expert: %s table shape %v, want %v", t.Name, t.Shape, shape)
+		}
 		switch t.Name {
 		case "win":
-			if !slices.Equal(t.Shape, winShape) {
-				return nil, fmt.Errorf("expert: win table shape %v, want %v", t.Shape, winShape)
-			}
 			b.Win = new(WinTable)
 			for x := range b.Win.V {
 				copy(b.Win.V[x][:], vals[x*Scores:])
 			}
-		default:
-			return nil, fmt.Errorf("expert: unknown table %q", t.Name)
+		case "crib":
+			d.Crib, nd = vals, nd+1
+		case "peg":
+			d.Peg, nd = vals, nd+1
+		case "show":
+			d.Show, nd = vals, nd+1
 		}
 	}
 	if b.Win == nil {
 		return nil, errors.New("expert: bundle has no win table")
+	}
+	switch nd {
+	case 3:
+		b.Discard = d
+	case 0:
+	default:
+		return nil, errors.New("expert: bundle has only some of the discard tables")
 	}
 	if _, err := br.ReadByte(); err != io.EOF {
 		return nil, errors.New("expert: trailing data after tables")

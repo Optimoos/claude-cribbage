@@ -132,13 +132,13 @@ func (g *Game) SetQuiet(q bool) { g.quiet = q }
 // The slice is reused by the next Apply.
 func (g *Game) Events() []Event { return g.events }
 
-func (g *Game) Phase() Phase       { return g.phase }
-func (g *Game) Dealer() int        { return g.dealer }
-func (g *Game) Turn() int          { return g.turn }
-func (g *Game) Scores() [2]int     { return g.scores }
+func (g *Game) Phase() Phase   { return g.phase }
+func (g *Game) Dealer() int    { return g.dealer }
+func (g *Game) Turn() int      { return g.turn }
+func (g *Game) Scores() [2]int { return g.scores }
 
 // Pegged returns each player's pegging points over the game so far.
-func (g *Game) Pegged() [2]int { return g.pegged }
+func (g *Game) Pegged() [2]int     { return g.pegged }
 func (g *Game) Winner() int        { return g.winner }
 func (g *Game) HandNumber() int    { return g.handNum }
 func (g *Game) Count() int         { return g.count }

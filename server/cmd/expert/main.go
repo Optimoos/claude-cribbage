@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/signal"
 	"runtime"
+	"strings"
 	"time"
 
 	"cribbage/internal/expert"
@@ -66,6 +67,8 @@ func selfPlay(ctx context.Context, bot string, games, workers int, seed uint64) 
 func build(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("build", flag.ExitOnError)
 	bot := fs.String("bot", "models-big/best.bin", "bot whose self-play the tables are built from")
+	tables := fs.String("tables", "win,discard", "tables to build: win, discard (crib, pegging and show)")
+	basePath := fs.String("base", "", "bundle to take the tables not being built from")
 	games := fs.Int("games", 500000, "self-play games")
 	workers := fs.Int("workers", runtime.NumCPU(), "parallel games")
 	seed := fs.Uint64("seed", 1, "base seed")
@@ -73,34 +76,62 @@ func build(ctx context.Context, args []string) error {
 	window := fs.Int("window", expert.DefaultWindowHands, "hands used to value each score (fewer: more local, noisier)")
 	fs.Parse(args)
 
+	want := map[string]bool{}
+	for _, t := range strings.Split(*tables, ",") {
+		if t != "win" && t != "discard" {
+			return fmt.Errorf("unknown table set %q", t)
+		}
+		want[t] = true
+	}
+	b := &expert.Bundle{Meta: expert.Meta{Sources: map[string]string{}, Metrics: map[string]float64{}}}
+	if *basePath != "" {
+		base, err := expert.LoadBundle(*basePath)
+		if err != nil {
+			return err
+		}
+		b.Win, b.Discard = base.Win, base.Discard
+		for k, v := range base.Meta.Metrics {
+			b.Meta.Metrics[k] = v
+		}
+		for k, v := range base.Meta.Sources {
+			b.Meta.Sources[k] = v
+		}
+		if b.Meta.Sources["win"] == "" {
+			b.Meta.Sources["win"] = base.Meta.Source
+		}
+	}
+	if !want["win"] && b.Win == nil {
+		return fmt.Errorf("no win table: build it or give -base")
+	}
+
 	sp, err := selfPlay(ctx, *bot, *games, *workers, *seed)
 	if err != nil {
 		return err
 	}
-	start := time.Now()
-	win, err := expert.BuildWinTable(&sp.Hands, *window)
-	if err != nil {
-		return err
+	if want["win"] {
+		start := time.Now()
+		win, err := expert.BuildWinTable(&sp.Hands, *window)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("win table built in %v\n", time.Since(start).Round(time.Millisecond))
+		viol, _ := win.Monotonicity()
+		_, loss, base := win.Calibration(&sp.Outcomes, 10, 1)
+		b.Win = win
+		b.Meta.Sources["win"] = *bot
+		b.Meta.Metrics["win_monotone_violations"] = float64(viol)
+		b.Meta.Metrics["win_window_hands"] = float64(*window)
+		b.Meta.Metrics["win_log_loss"] = loss
+		b.Meta.Metrics["win_base_log_loss"] = base
 	}
-	fmt.Printf("win table built in %v\n", time.Since(start).Round(time.Millisecond))
-	viol, _ := win.Monotonicity()
-	_, loss, base := win.Calibration(&sp.Outcomes, 10, 1)
-	b := &expert.Bundle{
-		Meta: expert.Meta{
-			Saved:  time.Now().UTC().Format(time.RFC3339),
-			Source: *bot,
-			Games:  sp.Games,
-			Hands:  sp.Hands.Len(),
-			Seed:   *seed,
-			Metrics: map[string]float64{
-				"win_monotone_violations": float64(viol),
-				"win_window_hands":        float64(*window),
-				"win_log_loss":            loss,
-				"win_base_log_loss":       base,
-			},
-		},
-		Win: win,
+	if want["discard"] {
+		b.Discard = expert.BuildDiscardTables(sp.Details)
+		b.Meta.Sources["discard"] = *bot
+		b.Meta.Metrics["discard_hands"] = float64(len(sp.Details))
+		fmt.Printf("discard tables built from %d hands\n", len(sp.Details))
 	}
+	b.Meta.Saved = time.Now().UTC().Format(time.RFC3339)
+	b.Meta.Source, b.Meta.Games, b.Meta.Hands, b.Meta.Seed = *bot, sp.Games, sp.Hands.Len(), *seed
 	if err := b.Save(*out); err != nil {
 		return err
 	}
@@ -122,8 +153,23 @@ func inspect(args []string) error {
 	for _, t := range m.Tables {
 		fmt.Printf("  table %-8s %v\n", t.Name, t.Shape)
 	}
+	for k, v := range m.Sources {
+		fmt.Printf("  %s table from %s\n", k, v)
+	}
 	for k, v := range m.Metrics {
 		fmt.Printf("  %-26s %g\n", k, v)
+	}
+	if d := b.Discard; d != nil {
+		fmt.Println("\naverage crib (over starter ranks) for a discarded pair:")
+		fmt.Printf("  %-6s %8s %8s\n", "pair", "dealer", "pone")
+		for _, p := range [][2]int{{5, 5}, {5, 11}, {5, 10}, {2, 3}, {7, 8}, {1, 4}, {10, 13}, {9, 13}, {13, 13}} {
+			fmt.Printf("  %2d-%-3d %8.2f %8.2f\n", p[0], p[1], d.CribMean(0, p[0], p[1]), d.CribMean(1, p[0], p[1]))
+		}
+		fmt.Println("average pegging, mine vs theirs, for a kept shape:")
+		for _, k := range [][4]int{{1, 2, 3, 4}, {5, 5, 10, 10}, {7, 7, 8, 8}, {10, 11, 12, 13}, {2, 4, 9, 13}} {
+			fmt.Printf("  %v  dealer %.2f vs %.2f   pone %.2f vs %.2f\n", k,
+				d.PegMean(0, k, 0), d.PegMean(0, k, 1), d.PegMean(1, k, 0), d.PegMean(1, k, 1))
+		}
 	}
 	w := b.Win
 	viol, worst := w.Monotonicity()

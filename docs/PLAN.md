@@ -350,6 +350,26 @@ my hand in each world) is the suspect; revisit in M13.
 **Verify:** paired win rate and points edge over heuristic and nn improve
 on M11. Spot-check a sample of discards against published expert tables.
 
+**Built (2026-10-04):** `internal/expert` (`tables.go`, `discard.go`), bundle v2
+with optional `crib`, `peg` and `show` tables (v1 bundles still load and
+discard like the heuristic). `cmd/expert build -tables discard -base B`
+keeps B's win table and builds the rest.
+- Crib: distribution by (whose crib, discarded rank pair, starter rank),
+  each cell shrunk (20 hands) towards the exact random-crib distribution.
+  Already conditioned on whose crib it is (planned for M13).
+- Pegging: my and their points by (dealer or pone, kept rank shape);
+  opponent show by (dealer or pone, starter rank). Only complete hands
+  starting below 70-70 are used, so games ending mid-hand bias nothing.
+- Each option: my show exact per starter; crib and their show mixed over
+  the same starters; pegging, pone show, dealer show, crib in order, then W.
+  1.7 ms per discard on one thread.
+- Tables from 200k games of the M11 bot (effort 25), 1.05M hands. Dealer
+  crib averages: 5-5 9.0, 5-J 7.0, 5-10 6.7, A-4 5.4 (published: about
+  8.5, 7.0, 6.6, 5.4).
+- Results, 20k paired games each: vs heuristic 55.31% ± 0.45 (M11 54.05%),
+  vs the M11 bot 51.70% ± 0.39, vs `models-big` 53.53% ± 0.45 (M11
+  52.28%), pegging now +0.09 per hand against the nn as well.
+
 ### M13: Opponent modelling
 - Weight each sampled opponent hand by the probability the discard model
   keeps it, and by consistency with their pegging plays so far.
