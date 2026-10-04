@@ -213,17 +213,18 @@ const Board = (() => {
   // 46-80 come back along the bottom arm, 82-84 turn at the near end, and
   // 86-120 run out along the middle to the single 121 game hole. Holes are
   // grouped in fives with a number between groups. The geometry is worked in
-  // portrait, as the board stands in the picture (start at the bottom left),
-  // and turned a quarter clockwise when drawn: portrait (px, py) is drawn at
-  // (X0 - py, Y0 + px).
-  const serpentine = (() => {
+  // portrait, with the start at the bottom left; an upright board is drawn
+  // that way, and otherwise it is turned a quarter clockwise to lie along
+  // the top of the table.
+  const serpentine = upright => {
     const P = 18;        // distance between rows of holes
     const S = 70;        // distance between arms; the far turn's radius
     const HW = 10;       // half the distance between the two lanes
     const BW = 23;       // half the board's width
     const CYT = -6, YB = 44 * P, CYB = YB + 6; // centers of the far and near turns
-    const X0 = 910, Y0 = 100;
-    const pt = (px, py) => `${X0 - py} ${Y0 + px}`;
+    // map turns a portrait position into drawing coordinates.
+    const map = upright ? (px, py) => [100 + px, 105 + py] : (px, py) => [910 - py, 100 + px];
+    const pt = (px, py) => map(px, py).join(' ');
     const lane = { me: 0, opp: 1 }; // lane 1 runs on the outside of both turns
 
     // hole gives the portrait position of hole n (1-121, or 0 for the start
@@ -270,12 +271,13 @@ const Board = (() => {
       // Numbers between the groups of five; the skunk lines fall at 60/61 and
       // 90/91, where the 60 and 90 sit.
       const num = (px, slot, text) => {
-        const x = X0 - slot * P, y = Y0 + px;
+        const [x, y] = map(px, slot * P);
         const skunk = text === 60 || text === 90;
         if (skunk) {
           const g = el('g', {}, svg);
           el('title', {}, g).textContent = text === 60 ? 'Double skunk line' : 'Skunk line';
-          el('line', { class: 'skunk', x1: x, y1: y - BW + 3, x2: x, y2: y + BW - 3 }, g);
+          const [x1, y1] = map(px - BW + 3, slot * P), [x2, y2] = map(px + BW - 3, slot * P);
+          el('line', { class: 'skunk', x1, y1, x2, y2 }, g);
         }
         el('text', { class: 'num' + (skunk ? ' skunk-num' : '') + (text === 'Start' ? ' start' : ''), x, y: y + 3.5, 'text-anchor': 'middle' }, svg).textContent = text;
       };
@@ -283,23 +285,26 @@ const Board = (() => {
       for (let g = 0; g < 6; g++) { num(-S, 7 + 6 * g, 30 - 5 * g); num(0, 7 + 6 * g, 115 - 5 * g); num(S, 7 + 6 * g, 50 + 5 * g); }
       num(-S, 43, 'Start'); num(0, 43, 85); num(S, 43, 80);
 
-      const at = ([px, py]) => ({ cx: X0 - py, cy: Y0 + px });
+      const at = ([px, py]) => { const [cx, cy] = map(px, py); return { cx, cy }; };
       for (const j of [0, 1]) {
         for (let n = 1; n <= 120; n++) el('circle', { class: 'hole', ...at(hole(j, n)), r: 4.2 }, svg);
         for (const i of [0, 1]) el('circle', { class: 'hole', ...at(hole(j, 0, i)), r: 4.2 }, svg);
       }
       el('circle', { class: 'game-hole', ...at(hole(0, 121)), r: 6.5 }, svg);
-      for (const k of ['opp', 'me']) {
-        const { cy } = at(hole(lane[k], 0, 1));
-        names[k] = el('text', { class: `name lbl-${k}`, x: X0 - 45 * P - BW - 6, y: cy + 3.5, 'text-anchor': 'end' }, svg);
+      // Lying down, the names fit beyond the start holes; upright they don't.
+      if (!upright) {
+        for (const k of ['opp', 'me']) {
+          const [x, y] = map(hole(lane[k], 0)[0], 45 * P + BW + 6);
+          names[k] = el('text', { class: `name lbl-${k}`, x, y: y + 3.5, 'text-anchor': 'end' }, svg);
+        }
       }
     }
 
     return {
-      viewBox: `0 0 1020 200`, pegR: 7, draw,
-      xy(k, s, pegIdx) { const [px, py] = hole(lane[k], Math.min(s, 121), pegIdx); return [X0 - py, Y0 + px]; },
+      viewBox: upright ? '0 0 200 975' : '0 0 1020 200', pegR: 7, draw,
+      xy: (k, s, pegIdx) => map(...hole(lane[k], Math.min(s, 121), pegIdx)),
     };
-  })();
+  };
 
   // Long track: a continuous 121-hole board. Four runs of 30 holes snake
   // across it (1-30 out, 31-60 back, 61-90 out, 91-120 back), with the two
@@ -368,18 +373,18 @@ const Board = (() => {
     return { viewBox: '0 0 1000 232', pegR: 9, draw, xy };
   })();
 
-  const STYLES = { serpentine, long };
-  let svg = null, style = serpentine, gameId = null, last = null;
-  let pegs = { me: [], opp: [] }, pos = { me: null, opp: null };
-  const names = {};
+  let svg = null, style = null, gameId = null, last = null;
+  let pegs = { me: [], opp: [] }, pos = { me: null, opp: null }, names = {};
 
-  // build draws the board in container in the named style, replacing any
-  // board already there, and puts the pegs back where they were.
-  function build(container, styleName) {
-    style = STYLES[styleName] || serpentine;
+  // build draws the board in container in the named style, upright if asked
+  // and the style allows, replacing any board already there, and puts the
+  // pegs back where they were.
+  function build(container, styleName, upright) {
+    style = styleName === 'long' ? long : serpentine(!!upright);
     container.replaceChildren();
-    container.dataset.style = styleName in STYLES ? styleName : 'serpentine';
+    container.dataset.style = styleName === 'long' ? 'long' : 'serpentine';
     svg = el('svg', { viewBox: style.viewBox, role: 'img', 'aria-label': 'Cribbage board' }, container);
+    names = {};
     style.draw(svg, names);
     pegs = { me: [], opp: [] };
     pos = { me: null, opp: null };
@@ -433,8 +438,10 @@ const Board = (() => {
   function show(id, meName, oppName, v, animate) {
     last = [id, meName, oppName, v];
     if (id !== gameId) { gameId = id; pos = { me: null, opp: null }; animate = false; }
-    names.me.textContent = meName.toUpperCase().slice(0, 7);
-    names.opp.textContent = oppName.toUpperCase().slice(0, 7);
+    if (names.me) {
+      names.me.textContent = meName.toUpperCase().slice(0, 7);
+      names.opp.textContent = oppName.toUpperCase().slice(0, 7);
+    }
     const me = v.g.seat < 0 ? 0 : v.g.seat;
     update('me', v.scores[me], v.trail[me], animate);
     update('opp', v.scores[1 - me], v.trail[1 - me], animate);
@@ -962,6 +969,14 @@ function select(id) {
   renderTable();
 }
 
+// On a landscape screen the serpentine board stands upright beside the table.
+const sideBoard = matchMedia('(min-width: 861px) and (orientation: landscape)');
+function buildBoard() {
+  const side = prefs.board === 'serpentine' && sideBoard.matches;
+  $('table').classList.toggle('side-board', side);
+  Board.build($('board'), prefs.board, side);
+}
+
 function setDrawer(open) {
   document.body.classList.toggle('drawer-open', open);
   $('scrim').hidden = !open || !document.body.classList.contains('has-table');
@@ -1255,7 +1270,7 @@ document.addEventListener('keydown', e => {
   if (e.key === 'Escape') { $('settings').hidden = true; setDrawer(false); }
 });
 $('theme').onchange = () => { prefs.theme = $('theme').value; savePrefs(); applyPrefs(); };
-$('board-style').onchange = () => { prefs.board = $('board-style').value; savePrefs(); Board.build($('board'), prefs.board); };
+$('board-style').onchange = () => { prefs.board = $('board-style').value; savePrefs(); buildBoard(); };
 $('rapid').onchange = () => {
   prefs.rapid = $('rapid').checked;
   savePrefs();
@@ -1273,5 +1288,6 @@ document.addEventListener('visibilitychange', () => { if (document.hidden) skipA
 
 if (narrow()) $('log-panel').open = false;
 applyPrefs();
-Board.build($('board'), prefs.board);
+buildBoard();
+sideBoard.addEventListener('change', buildBoard);
 conn.connect();

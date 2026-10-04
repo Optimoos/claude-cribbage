@@ -468,17 +468,31 @@ button.card:disabled { cursor: default; }
 @keyframes toast { 0% { opacity: 0; transform: translateY(-8px); } 8%, 85% { opacity: 1; transform: none; } 100% { opacity: 0; } }
 @keyframes fall { to { transform: translateY(110vh) rotate(720deg); } }
 
-/* ---- Narrow screens ---------------------------------------------------- */
+/* ---- Games drawer ------------------------------------------------------ */
+/* With a game open, the lobby slides out from the left on demand and the
+   table takes the full width. */
 .only-narrow { display: none; }
+body.has-table #menu { display: inline-flex; }
 .scrim { position: fixed; inset: 0; background: #0007; z-index: 44; animation: fade-in .2s; }
+body.has-table main { grid-template-columns: minmax(0, 1fr); }
+body.has-table .lobby {
+  position: fixed; z-index: 45; top: 0; bottom: 0; left: 0; width: min(88vw, 22rem); border-radius: 0 14px 14px 0;
+  overflow-y: auto; transform: translateX(-105%); transition: transform .25s ease; padding-top: 1.2rem;
+}
+body.has-table.drawer-open .lobby { transform: none; }
+
+/* On a landscape screen the serpentine board stands upright in its own
+   column, start at the bottom, as tall as the window. */
+.table.side-board { grid-template-columns: auto minmax(0, 1fr); grid-template-rows: auto auto auto 1fr; column-gap: 1.2rem; align-items: start; }
+.table.side-board > * { grid-column: 2; }
+.table.side-board > .board { grid-column: 1; grid-row: 1 / -1; position: sticky; top: 4rem; }
+.table.side-board .board svg { width: auto; height: calc(100dvh - 7rem); min-height: 30rem; }
+.table.side-board .board .num { font-size: 12px; }
+
+/* ---- Narrow screens ---------------------------------------------------- */
 @media (max-width: 860px) {
   .only-narrow { display: inline-flex; }
   main { grid-template-columns: minmax(0, 1fr); padding: .6rem .6rem 1.5rem; gap: .6rem; }
-  body.has-table .lobby {
-    position: fixed; z-index: 45; top: 0; bottom: 0; left: 0; width: min(88vw, 22rem); border-radius: 0 14px 14px 0;
-    overflow-y: auto; transform: translateX(-105%); transition: transform .25s ease; padding-top: 1.2rem;
-  }
-  body.has-table.drawer-open .lobby { transform: none; }
   .brand { font-size: 1.1rem; }
   .felt, [data-theme="felt"] .felt { padding: .7rem; gap: .55rem; }
   .center { grid-template-columns: auto minmax(0, 1fr); }
