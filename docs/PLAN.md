@@ -270,11 +270,11 @@ seeds within its interval.
 
 | Bot | vs heuristic, seed 1 | seed 2 | margin/game |
 |---|---|---|---|
-| `models-ft/best.bin` (served as `nn`) | 50.04% ± 0.20 | 50.18% ± 0.20 | -0.29 ± 0.06 |
-| `models-big/best.bin` | 50.89% ± 0.20 | 51.14% ± 0.20 | 0.00 ± 0.06 |
+| `models-ft/best.bin` (served as `nn`) | 50.04% Â± 0.20 | 50.18% Â± 0.20 | -0.29 Â± 0.06 |
+| `models-big/best.bin` | 50.89% Â± 0.20 | 51.14% Â± 0.20 | 0.00 Â± 0.06 |
 
-`models-big` beats `models-ft` head to head 51.08% ± 0.20. Pairing cuts the
-win-rate interval from ±0.31 to ±0.20 (about 2.4x fewer games for equal
+`models-big` beats `models-ft` head to head 51.08% Â± 0.20. Pairing cuts the
+win-rate interval from Â±0.31 to Â±0.20 (about 2.4x fewer games for equal
 precision) and the margin interval by half. The training-time figures
 (50.3%, 52.9%) were inflated by picking the best of many noisy evaluations.
 M9+ comparisons use `models-big/best.bin` as the `nn` reference.
@@ -289,6 +289,24 @@ M9+ comparisons use `models-big/best.bin` as the `nn` reference.
 **Verify:** W is monotone in both scores, swapping seats and dealer gives
 complementary probabilities, and spot checks match raw empirical
 frequencies within their intervals.
+
+**Built (2026-10-04):** `internal/expert`, `cmd/expert`, bundle `CRIBEX01` v1.
+- One table V(dealer score, pone score) = P(dealer wins); either seat's
+  chance follows from it, so the two seats are complementary by construction.
+- Every self-play hand is stored as its start and its ordered scoring steps.
+  The DP replays hands step by step, so races to 121 are exact.
+- "Binned by score region" became a sliding window: each start (x, y) is
+  valued with the 5000 hands that started nearest below and left of it.
+  Score-independent hands (all hands pooled) were off by up to 2 points in
+  the endgame, because the nn plays differently near 121; the heuristic,
+  which ignores the score, was calibrated either way. Windows below-left
+  keep hands cut short by a win usable without bias.
+- Sampling noise is clamped away: each V(x, y) is held between its two
+  already-computed neighbours, so the table is exactly monotone.
+- Result from 500k games of `models-big`, checked on 500k fresh games: no
+  monotonicity violations; 76 of 86 10x10 bins within their 95% interval
+  (chi-squared/bin 1.53); largest error 0.8 points (both scores 110-119);
+  per-state noise about 0.2 points; first dealer wins 56.1%.
 
 ### M11: Pegging search
 - Opponent-hand enumeration by rank multiset over unseen cards (uniform

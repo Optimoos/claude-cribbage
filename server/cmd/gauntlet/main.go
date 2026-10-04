@@ -20,6 +20,7 @@ import (
 
 	"cribbage/internal/ai"
 	"cribbage/internal/bots"
+	"cribbage/internal/players"
 )
 
 func main() {
@@ -39,7 +40,7 @@ func main() {
 }
 
 func run(ctx context.Context, bot string, opponents []string, n, workers int, seed uint64) error {
-	newA, err := resolve(bot)
+	newA, err := players.Resolve(bot)
 	if err != nil {
 		return err
 	}
@@ -53,7 +54,7 @@ func run(ctx context.Context, bot string, opponents []string, n, workers int, se
 	fmt.Printf("%s: %d games per opponent, seed %d, %d workers\n", bot, n, seed, workers)
 	for _, name := range opponents {
 		name = strings.TrimSpace(name)
-		newB, err := resolve(name)
+		newB, err := players.Resolve(name)
 		if err != nil {
 			return err
 		}
@@ -98,17 +99,4 @@ func run(ctx context.Context, bot string, opponents []string, n, workers int, se
 			l.l.Mean(), l.l.Quantile(0.5), l.l.Quantile(0.99), l.l.Max)
 	}
 	return nil
-}
-
-// resolve turns a player spec into a per-worker constructor: a registered
-// bot name, or else a model file played greedily by the network agent.
-func resolve(spec string) (func(worker int) bots.Bot, error) {
-	if _, err := bots.New(spec, 0); err == nil {
-		return func(w int) bots.Bot { b, _ := bots.New(spec, uint64(w)); return b }, nil
-	}
-	net, _, err := ai.Load(spec)
-	if err != nil {
-		return nil, fmt.Errorf("%q is neither a bot (%v) nor a loadable model: %w", spec, bots.Names(), err)
-	}
-	return func(w int) bots.Bot { return ai.NewAgent(net, 0, uint64(w)) }, nil
 }

@@ -19,6 +19,9 @@ go run ./cmd/sim -a heuristic -b random -n 100000 # in-process bot matches
 go run ./cmd/train run -out models                # train the neural network (Ctrl-C to stop)
 go run ./cmd/train eval -model models/best.bin -vs heuristic -n 10000
 go run ./cmd/gauntlet -bot models-ft/best.bin -vs random,heuristic -n 100000   # duplicate-deal table
+go run ./cmd/expert build -bot models-big/best.bin -games 500000   # expert bundle (win table) from self-play
+go run ./cmd/expert inspect models-expert/expert.bin
+go run ./cmd/expert eval -bundle models-expert/expert.bin -seed 2       # calibration against fresh self-play
 ```
 
 | Path | Purpose |
@@ -32,6 +35,7 @@ go run ./cmd/gauntlet -bot models-ft/best.bin -vs random,heuristic -n 100000   #
 | `internal/ai/nn` | MLP with sparse inputs, Adam, and the model file format |
 | `internal/ai/encode` | Observation to features; afterstates |
 | `internal/ai/train` | Self-play TD(λ) training |
+| `internal/expert` | Expert AI: learned tables (win probability) and the bundle file format |
 | `internal/transport/tcp` | Length-prefixed protobuf framing |
 | `internal/transport/rtc` | WebRTC data channel transport and WebSocket signaling |
 | `web/static` | HTML test client, embedded in the server binary |
