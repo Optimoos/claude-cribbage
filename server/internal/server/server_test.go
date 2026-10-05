@@ -19,7 +19,9 @@ import (
 	"cribbage/internal/ai/nn"
 	"cribbage/internal/auth"
 	"cribbage/internal/botclient"
+	"cribbage/internal/bots"
 	"cribbage/internal/client"
+	"cribbage/internal/expert"
 	"cribbage/internal/protocol/pb"
 	"cribbage/internal/store"
 )
@@ -428,5 +430,49 @@ func TestNNBotOpponent(t *testing.T) {
 	}
 	if st.Finished != 200 || st.Errors != 0 || st.Resigned != 0 {
 		t.Fatalf("unexpected stats %+v", st)
+	}
+}
+
+var (
+	testExpertOnce sync.Once
+	testExpertErr  error
+)
+
+// registerTestExpert registers the expert levels with a small bundle built
+// from heuristic self-play.
+func registerTestExpert(t *testing.T) {
+	testExpertOnce.Do(func() {
+		newHeuristic := func(int) bots.Bot { return bots.NewHeuristic() }
+		sp, err := expert.Collect(context.Background(), newHeuristic, 200, 4, 1)
+		if err != nil {
+			testExpertErr = err
+			return
+		}
+		win, err := expert.BuildWinTable(&sp.Hands, 200)
+		if err != nil {
+			testExpertErr = err
+			return
+		}
+		expert.Register(&expert.Bundle{Win: win, Discard: expert.BuildDiscardTables(sp.Details), KeepTemp: [2]float64{0.5, 0.5}})
+	})
+	if testExpertErr != nil {
+		t.Fatal(testExpertErr)
+	}
+}
+
+func TestExpertBotOpponents(t *testing.T) {
+	registerTestExpert(t)
+	_, addr := startServer(t)
+	for _, l := range expert.Levels {
+		st, err := botclient.Run(context.Background(), botclient.Config{
+			Addr: addr, Username: "expertfan", Password: "password123", Bot: "random",
+			Opponent: l.Name, Concurrent: 10, Games: 30,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if st.Finished != 30 || st.Errors != 0 || st.Resigned != 0 {
+			t.Fatalf("%s: unexpected stats %+v", l.Name, st)
+		}
 	}
 }

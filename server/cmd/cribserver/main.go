@@ -20,6 +20,7 @@ import (
 	"cribbage/internal/ai"
 	"cribbage/internal/auth"
 	"cribbage/internal/bots"
+	"cribbage/internal/expert"
 	"cribbage/internal/server"
 	"cribbage/internal/store"
 	"cribbage/internal/transport/rtc"
@@ -38,6 +39,7 @@ func main() {
 	bcryptCost := flag.Int("bcrypt-cost", bcrypt.DefaultCost, "bcrypt cost for password hashes")
 	pprofAddr := flag.String("pprof", "", "serve net/http/pprof on this address (e.g. localhost:6060)")
 	model := flag.String("model", "", "neural network model to offer as the \"nn\" bot (e.g. models/best.bin)")
+	expertPath := flag.String("expert", "", "expert bundle to offer as the \"expert\" bots (e.g. models-expert/expert.bin)")
 	flag.Parse()
 
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
@@ -53,6 +55,20 @@ func main() {
 		}
 		log.Info("loaded model", "path", *model, "bot", ai.BotName, "sizes", meta.Sizes, "games", meta.Games,
 			"vs_heuristic", meta.Metrics["vs_heuristic"])
+	}
+
+	if *expertPath != "" {
+		b, err := expert.LoadBundle(*expertPath)
+		if err != nil {
+			fail("load expert bundle", err)
+		}
+		expert.Register(b)
+		names := make([]string, len(expert.Levels))
+		for i, l := range expert.Levels {
+			names[i] = l.Name
+		}
+		log.Info("loaded expert bundle", "path", *expertPath, "saved", b.Meta.Saved, "bots", strings.Join(names, ","),
+			"discard_tables", b.Discard != nil, "opponent_model", b.KeepTemp[0] > 0)
 	}
 
 	var users store.Store

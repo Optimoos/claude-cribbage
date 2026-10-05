@@ -11,6 +11,7 @@ go test ./...                       # all tests
 go run ./cmd/cribserver             # web client on http://localhost:8080, TCP for bots on :7777
 go run ./cmd/cribserver -db ""      # in-memory only (nothing survives a restart)
 go run ./cmd/cribserver -model models-ft/best.bin   # also offer the "nn" bot
+go run ./cmd/cribserver -expert models-expert/expert.bin   # also offer the "expert" bots (three levels)
 go run ./cmd/botclient -user alice -opponent heuristic -games 1000 -concurrent 100
 go run ./cmd/botclient -user bob -games 1000      # matchmaking: run two of these
 go run ./cmd/botclient -addr ws://localhost:8080/rtc -user carol -opponent random   # over WebRTC
@@ -22,7 +23,8 @@ go run ./cmd/gauntlet -bot models-ft/best.bin -vs random,heuristic -n 100000   #
 go run ./cmd/expert build -bot models-big/best.bin -games 500000   # expert bundle (win table) from self-play
 go run ./cmd/expert inspect models-expert/expert.bin
 go run ./cmd/expert eval -bundle models-expert/expert.bin -seed 2       # calibration against fresh self-play
-go run ./cmd/gauntlet -bot models-expert/expert.bin@100 -vs heuristic -n 20000   # expert bot; @N = opponent hands searched (0 = all)
+go run ./cmd/gauntlet -bot models-expert/expert.bin@100,nokeep -vs heuristic -n 20000   # expert; @effort plus options nokeep, nopeg, heurdiscard, pegtemp=X
+go run ./cmd/expert iterate -start models-expert/expert.bin -rounds 3   # policy iteration: rebuild tables from self-play, keep if not worse
 ```
 
 | Path | Purpose |

@@ -16,6 +16,7 @@ import (
 	"cribbage/internal/auth"
 	"cribbage/internal/botclient"
 	"cribbage/internal/client"
+	"cribbage/internal/expert"
 	"cribbage/internal/protocol/pb"
 	"cribbage/internal/store"
 )
@@ -67,13 +68,22 @@ func (in *instance) stop(t *testing.T) {
 	}
 }
 
-func TestRestoreReproducesState(t *testing.T) {
+func TestRestoreReproducesState(t *testing.T) { testRestore(t, "heuristic") }
+
+// A game against the expert bot resumes after a restart: the bot is
+// recreated by name, from the same bundle.
+func TestRestoreExpertGame(t *testing.T) {
+	registerTestExpert(t)
+	testRestore(t, expert.BotName)
+}
+
+func testRestore(t *testing.T, bot string) {
 	path := filepath.Join(t.TempDir(), "s.db")
 	in := startPersistent(t, path, "127.0.0.1:0")
 	addr := in.ln.Addr().String()
 
 	a := login(t, addr, "alice")
-	id := a.send(t, &pb.ClientMessage{Body: &pb.ClientMessage_CreateGame{CreateGame: &pb.CreateGame{Bot: "heuristic"}}})
+	id := a.send(t, &pb.ClientMessage{Body: &pb.ClientMessage_CreateGame{CreateGame: &pb.CreateGame{Bot: bot}}})
 	u := a.next(t, replyTo(id)).GetGameUpdate()
 	gameID := u.Game.GameId
 	// Play into the pegging phase.

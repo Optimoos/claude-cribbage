@@ -442,6 +442,24 @@ a smaller win-table window) remain an option but would gain little.
 browser game against each level plays well, and a saved game against
 `expert` resumes after a restart.
 
+**Built (2026-10-05):** `cribserver -expert models-expert/expert.bin`
+registers three levels (`internal/expert/levels.go`); the lobby shows a
+button for each level the server offers. Bots share the bundle's tables;
+each game gets its own scratch (about 0.4 MB). Saved games are recreated
+by bot name on restart.
+
+| Level | Settings | vs heuristic (paired) | pegging decision |
+|---|---|---|---|
+| `expert-easy` | effort 10, no opponent model, heuristic discards | 51.02% ± 0.55 | 0.3 ms |
+| `expert-medium` | effort 50, discard tables, no opponent model | 54.80% ± 0.63 | 0.8 ms |
+| `expert` | effort 400, everything | 57.16% ± 0.32 | 5.3 ms |
+
+- 10k games through the server (botclient heuristic vs `expert`, TCP,
+  16 in flight): the expert won 57.0%, matching the arena; no errors.
+- Tests: all three levels play 30 games each through the server, and a
+  saved game against `expert` resumes after a restart.
+- Left to verify by hand: a browser game against each level.
+
 ### M16 (optional): Distillation
 - Train a policy and value network in Go from millions of expert
   decisions, as a fast approximation and as the search's opponent model.
