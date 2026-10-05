@@ -405,6 +405,32 @@ weighting; bundle table `keep` (two temperatures).
 **Verify:** each round is evaluated paired against the previous round and
 accepted only if it does not regress. Final run against the M9 baseline.
 
+**Built (2026-10-05):** `cmd/expert iterate` (each round rebuilds every table
+from self-play of the current best at effort 25, then plays it paired
+against the best at effort 100 and keeps it if it wins at least half).
+Run on the i7 laptop: 300k games per round, about 80 minutes each.
+
+| Round | vs | Win % | Margin | Accepted |
+|---|---|---|---|---|
+| 1 | M13 | 50.65 ± 0.39 | +0.26 ± 0.11 | yes |
+| 2 | round 1 | 50.02 ± 0.38 | -0.02 ± 0.10 | yes |
+
+Round 2 showed no gain, so the iteration stopped there; it is the default
+bundle `models-expert/expert.bin` (the M10 bundle is kept as
+`expert-m10.bin`). Final run at effort 400:
+
+| Opponent | Paired games | Win % | Margin/game | Pegging/hand |
+|---|---|---|---|---|
+| heuristic | 40k | **57.16 ± 0.32** | +1.96 ± 0.09 | +0.240 ± 0.007 |
+| `models-big` (nn) | 20k | 55.85 ± 0.45 | +1.88 ± 0.13 | +0.156 ± 0.010 |
+| M13 bot | 20k | 50.31 ± 0.39 | +0.17 ± 0.11 | -0.006 ± 0.007 |
+
+The phase 2 success metric is met: at least 57% against the heuristic with
+an interval within ±0.5, a clear points edge, and a clear win over the nn.
+Decision time under 8-way load: discard 3.1 ms mean (p99 8 ms), pegging
+5.3 ms mean (p99 47 ms). Longer runs on the 5900X (more games per round,
+a smaller win-table window) remain an option but would gain little.
+
 ### M15: Server integration and difficulty levels
 - `cribserver -expert models/expert.bin` registers the `expert` bot and its
   difficulty levels; the lobby offers them; `GET /api/bots` lists them.
