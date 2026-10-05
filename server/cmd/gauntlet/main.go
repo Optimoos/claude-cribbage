@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/signal"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -33,7 +34,7 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
-	if err := run(ctx, *bot, strings.Split(*vs, ","), *n, *workers, *seed); err != nil {
+	if err := run(ctx, *bot, splitSpecs(*vs), *n, *workers, *seed); err != nil {
 		fmt.Fprintln(os.Stderr, "gauntlet:", err)
 		os.Exit(1)
 	}
@@ -100,4 +101,22 @@ func run(ctx context.Context, bot string, opponents []string, n, workers int, se
 			l.l.Mean(), l.l.Quantile(0.5), l.l.Quantile(0.99), l.l.Max)
 	}
 	return nil
+}
+
+// splitSpecs splits a comma-separated list of player specs. Expert options
+// also use commas (bundle@100,nokeep), so a piece that is an option joins
+// the spec before it.
+func splitSpecs(list string) []string {
+	var out []string
+	for _, p := range strings.Split(list, ",") {
+		p = strings.TrimSpace(p)
+		_, numErr := strconv.Atoi(p)
+		isOpt := numErr == nil || p == "nokeep" || p == "nopeg" || p == "heurdiscard" || strings.HasPrefix(p, "pegtemp=")
+		if isOpt && len(out) > 0 && strings.Contains(out[len(out)-1], "@") {
+			out[len(out)-1] += "," + p
+			continue
+		}
+		out = append(out, p)
+	}
+	return out
 }

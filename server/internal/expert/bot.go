@@ -12,6 +12,20 @@ const BotName = "expert"
 // pegging decision.
 const DefaultEffort = 400
 
+// DefaultPegTemp is the default temperature, in points, of the model of the
+// opponent's pegging used to weight their possible hands.
+const DefaultPegTemp = 1.0
+
+// Options configure a Bot. The zero value plus an Effort uses every
+// component the bundle has.
+type Options struct {
+	Effort           int     // opponent hands searched per pegging decision; 0 for all
+	PegTemp          float64 // temperature of the opponent pegging model; 0 for DefaultPegTemp
+	NoKeepModel      bool    // do not weight opponent hands by how likely they were kept
+	NoPegModel       bool    // do not weight opponent hands by the plays made with them
+	HeuristicDiscard bool    // discard as the heuristic does, ignoring the discard tables
+}
+
 // Bot is the expert player. It pegs by searching the possible opponent
 // hands, and discards by valuing each option through the bundle's tables
 // (or as the heuristic does, if the bundle has none). It is deterministic
@@ -23,11 +37,24 @@ type Bot struct {
 }
 
 // NewBot creates an expert bot searching at most effort opponent hands per
-// pegging decision (0 for all of them).
-func NewBot(b *Bundle, effort int) *Bot {
-	bot := &Bot{search: newSearcher(b.Win, effort)}
-	if b.Discard != nil {
+// pegging decision (0 for all of them), using every component the bundle
+// has.
+func NewBot(b *Bundle, effort int) *Bot { return NewBotWith(b, Options{Effort: effort}) }
+
+// NewBotWith creates an expert bot with the given options.
+func NewBotWith(b *Bundle, opt Options) *Bot {
+	bot := &Bot{search: newSearcher(b.Win, opt.Effort)}
+	if b.Discard != nil && !opt.HeuristicDiscard {
 		bot.discard = newDiscarder(b.Win, b.Discard)
+	}
+	if !opt.NoKeepModel {
+		bot.search.keep = b.keepModel()
+	}
+	if !opt.NoPegModel {
+		bot.search.pegTemp = opt.PegTemp
+		if bot.search.pegTemp == 0 {
+			bot.search.pegTemp = DefaultPegTemp
+		}
 	}
 	return bot
 }

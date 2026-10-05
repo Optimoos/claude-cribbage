@@ -3,6 +3,7 @@
 //	go run ./cmd/expert build -bot models-big/best.bin -games 200000 -out models-expert/expert.bin
 //	go run ./cmd/expert inspect models-expert/expert.bin
 //	go run ./cmd/expert eval -bundle models-expert/expert.bin -games 200000 -seed 2
+//	go run ./cmd/expert iterate -start models-expert/expert.bin -rounds 3
 package main
 
 import (
@@ -32,6 +33,8 @@ func main() {
 		err = build(ctx, os.Args[2:])
 	case "inspect":
 		err = inspect(os.Args[2:])
+	case "iterate":
+		err = iterate(ctx, os.Args[2:])
 	case "eval":
 		err = eval(ctx, os.Args[2:])
 	default:
@@ -44,7 +47,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: expert build|inspect|eval [flags]")
+	fmt.Fprintln(os.Stderr, "usage: expert build|inspect|eval|iterate [flags]")
 	os.Exit(2)
 }
 
@@ -66,30 +69,55 @@ func selfPlay(ctx context.Context, bot string, games, workers int, seed uint64) 
 
 func build(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("build", flag.ExitOnError)
-	bot := fs.String("bot", "models-big/best.bin", "bot whose self-play the tables are built from")
-	tables := fs.String("tables", "win,discard", "tables to build: win, discard (crib, pegging and show)")
-	basePath := fs.String("base", "", "bundle to take the tables not being built from")
-	games := fs.Int("games", 500000, "self-play games")
-	workers := fs.Int("workers", runtime.NumCPU(), "parallel games")
-	seed := fs.Uint64("seed", 1, "base seed")
+	var spec buildSpec
+	fs.StringVar(&spec.bot, "bot", "models-big/best.bin", "bot whose self-play the tables are built from")
+	tables := fs.String("tables", "win,discard,keep", "tables to build: win, discard (crib, pegging and show), keep (opponent discard model)")
+	fs.StringVar(&spec.base, "base", "", "bundle to take the tables not being built from")
+	fs.IntVar(&spec.games, "games", 500000, "self-play games")
+	fs.IntVar(&spec.workers, "workers", runtime.NumCPU(), "parallel games")
+	fs.Uint64Var(&spec.seed, "seed", 1, "base seed")
 	out := fs.String("out", "models-expert/expert.bin", "bundle file to write")
-	window := fs.Int("window", expert.DefaultWindowHands, "hands used to value each score (fewer: more local, noisier)")
+	fs.IntVar(&spec.window, "window", expert.DefaultWindowHands, "hands used to value each score (fewer: more local, noisier)")
 	fs.Parse(args)
 
-	want := map[string]bool{}
+	spec.want = map[string]bool{}
 	for _, t := range strings.Split(*tables, ",") {
-		if t != "win" && t != "discard" {
+		if t != "win" && t != "discard" && t != "keep" {
 			return fmt.Errorf("unknown table set %q", t)
 		}
-		want[t] = true
+		spec.want[t] = true
 	}
+	b, err := makeBundle(ctx, spec)
+	if err != nil {
+		return err
+	}
+	if err := b.Save(*out); err != nil {
+		return err
+	}
+	fmt.Printf("wrote %s\n", *out)
+	return nil
+}
+
+// buildSpec says which tables to build from whose self-play.
+type buildSpec struct {
+	bot     string
+	want    map[string]bool // win, discard, keep
+	base    string          // bundle supplying the other tables
+	games   int
+	workers int
+	seed    uint64
+	window  int
+}
+
+func makeBundle(ctx context.Context, spec buildSpec) (*expert.Bundle, error) {
+	want, bot := spec.want, &spec.bot
 	b := &expert.Bundle{Meta: expert.Meta{Sources: map[string]string{}, Metrics: map[string]float64{}}}
-	if *basePath != "" {
-		base, err := expert.LoadBundle(*basePath)
+	if spec.base != "" {
+		base, err := expert.LoadBundle(spec.base)
 		if err != nil {
-			return err
+			return nil, err
 		}
-		b.Win, b.Discard = base.Win, base.Discard
+		b.Win, b.Discard, b.KeepTemp = base.Win, base.Discard, base.KeepTemp
 		for k, v := range base.Meta.Metrics {
 			b.Meta.Metrics[k] = v
 		}
@@ -101,18 +129,18 @@ func build(ctx context.Context, args []string) error {
 		}
 	}
 	if !want["win"] && b.Win == nil {
-		return fmt.Errorf("no win table: build it or give -base")
+		return nil, fmt.Errorf("no win table: build it or give -base")
 	}
 
-	sp, err := selfPlay(ctx, *bot, *games, *workers, *seed)
+	sp, err := selfPlay(ctx, *bot, spec.games, spec.workers, spec.seed)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if want["win"] {
 		start := time.Now()
-		win, err := expert.BuildWinTable(&sp.Hands, *window)
+		win, err := expert.BuildWinTable(&sp.Hands, spec.window)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		fmt.Printf("win table built in %v\n", time.Since(start).Round(time.Millisecond))
 		viol, _ := win.Monotonicity()
@@ -120,7 +148,7 @@ func build(ctx context.Context, args []string) error {
 		b.Win = win
 		b.Meta.Sources["win"] = *bot
 		b.Meta.Metrics["win_monotone_violations"] = float64(viol)
-		b.Meta.Metrics["win_window_hands"] = float64(*window)
+		b.Meta.Metrics["win_window_hands"] = float64(spec.window)
 		b.Meta.Metrics["win_log_loss"] = loss
 		b.Meta.Metrics["win_base_log_loss"] = base
 	}
@@ -130,13 +158,20 @@ func build(ctx context.Context, args []string) error {
 		b.Meta.Metrics["discard_hands"] = float64(len(sp.Details))
 		fmt.Printf("discard tables built from %d hands\n", len(sp.Details))
 	}
-	b.Meta.Saved = time.Now().UTC().Format(time.RFC3339)
-	b.Meta.Source, b.Meta.Games, b.Meta.Hands, b.Meta.Seed = *bot, sp.Games, sp.Hands.Len(), *seed
-	if err := b.Save(*out); err != nil {
-		return err
+	if want["keep"] {
+		if b.Discard == nil {
+			return nil, fmt.Errorf("the keep model needs discard tables: build them or give -base")
+		}
+		temps, ll := expert.FitKeepTemps(b.Discard, sp.Details)
+		b.KeepTemp = temps
+		b.Meta.Sources["keep"] = *bot
+		b.Meta.Metrics["keep_temp_dealer"], b.Meta.Metrics["keep_temp_pone"] = temps[0], temps[1]
+		b.Meta.Metrics["keep_loglik_dealer"], b.Meta.Metrics["keep_loglik_pone"] = ll[0], ll[1]
+		fmt.Printf("keep model: temperature %.3f (dealer), %.3f (pone); mean log-likelihood %.3f, %.3f\n", temps[0], temps[1], ll[0], ll[1])
 	}
-	fmt.Printf("wrote %s\n", *out)
-	return nil
+	b.Meta.Saved = time.Now().UTC().Format(time.RFC3339)
+	b.Meta.Source, b.Meta.Games, b.Meta.Hands, b.Meta.Seed = *bot, sp.Games, sp.Hands.Len(), spec.seed
+	return b, nil
 }
 
 func inspect(args []string) error {

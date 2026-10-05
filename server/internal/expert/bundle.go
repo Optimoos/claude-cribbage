@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"sync"
 )
 
 const (
@@ -56,6 +57,23 @@ type Bundle struct {
 	Meta    Meta
 	Win     *WinTable
 	Discard *DiscardTables
+	// KeepTemp is the fitted temperature of the opponent discard model by
+	// side; zero when the bundle has none (the search then weights
+	// opponent hands only by card counts).
+	KeepTemp [2]float64
+
+	keepOnce sync.Once
+	keep     *keepModel
+}
+
+// keepModel returns the opponent discard model, built on first use, or nil.
+func (b *Bundle) keepModel() *keepModel {
+	b.keepOnce.Do(func() {
+		if b.Discard != nil && b.KeepTemp[0] > 0 && b.KeepTemp[1] > 0 {
+			b.keep = newKeepModel(b.Discard, b.KeepTemp)
+		}
+	})
+	return b.keep
 }
 
 // tables lists the bundle's tables in file order with their data.
@@ -70,10 +88,17 @@ func (b *Bundle) tables() ([]Table, [][]float32) {
 		ts = append(ts, Table{"crib", cribShape}, Table{"peg", pegShape}, Table{"show", showShape})
 		data = append(data, d.Crib, d.Peg, d.Show)
 	}
+	if b.KeepTemp[0] > 0 {
+		ts = append(ts, Table{"keep", keepShape})
+		data = append(data, []float32{float32(b.KeepTemp[0]), float32(b.KeepTemp[1])})
+	}
 	return ts, data
 }
 
-var winShape = []int{Scores, Scores}
+var (
+	winShape  = []int{Scores, Scores}
+	keepShape = []int{2}
+)
 
 // Write encodes the bundle: magic, a little-endian uint32 header length,
 // the JSON header, then each table listed in the header.
@@ -128,7 +153,7 @@ func ReadBundle(r io.Reader) (*Bundle, error) {
 	if b.Meta.Version < 1 || b.Meta.Version > BundleVersion {
 		return nil, fmt.Errorf("expert: bundle version %d; this build reads versions 1 to %d", b.Meta.Version, BundleVersion)
 	}
-	want := map[string][]int{"win": winShape, "crib": cribShape, "peg": pegShape, "show": showShape}
+	want := map[string][]int{"win": winShape, "crib": cribShape, "peg": pegShape, "show": showShape, "keep": keepShape}
 	d := new(DiscardTables)
 	nd := 0
 	buf := make([]byte, 4)
@@ -159,6 +184,8 @@ func ReadBundle(r io.Reader) (*Bundle, error) {
 			d.Peg, nd = vals, nd+1
 		case "show":
 			d.Show, nd = vals, nd+1
+		case "keep":
+			b.KeepTemp = [2]float64{float64(vals[0]), float64(vals[1])}
 		}
 	}
 	if b.Win == nil {

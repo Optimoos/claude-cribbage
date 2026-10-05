@@ -1,6 +1,9 @@
 package expert
 
 import (
+	"math"
+	"sort"
+
 	"cribbage/internal/engine"
 )
 
@@ -16,21 +19,30 @@ type world struct {
 
 const (
 	maxShow = 30 // a show scores at most 29
-	maxPeg  = 64 // pegging points per player per hand, with room to spare
+	maxPeg  = 32 // pegging points per player per hand cached; more is computed uncached
 )
 
 // searcher chooses pegging plays. It keeps scratch space between
 // decisions, so it is not safe for concurrent use.
 type searcher struct {
-	win     *WinTable
-	effort  int // most worlds searched per decision; 0 for all
-	base    [2]int
-	iDeal   bool
-	myShow  int
-	crib    [maxShow]float64 // probability of each crib score
-	show    int              // the current world's opponent show
-	worlds  []world
-	sampled []world
+	win      *WinTable
+	effort   int // most worlds searched per decision; 0 for all
+	base     [2]int
+	iDeal    bool
+	myShow   int
+	crib     [maxShow]float64 // probability of each crib score
+	show     int              // the current world's opponent show
+	worlds   []world
+	pool     []world
+	sampled  []world
+	weighted []world
+	// Opponent modelling: worlds are weighted by how likely the opponent
+	// was to keep that hand (keep, nil to skip) and to make the plays they
+	// made with it (a softmax on immediate points at pegTemp, 0 to skip).
+	keep      *keepModel
+	pegTemp   float64
+	keepKey   keepCacheKey
+	keepCache map[int16]float64
 	// end-of-hand values by (opponent show, my pegging, their pegging),
 	// valid when stamp matches gen.
 	endVal   []float64
@@ -80,7 +92,17 @@ func (s *searcher) choose(o *engine.Observation, legal []engine.Action) engine.A
 	if len(s.worlds) == 0 {
 		return legal[0] // inconsistent observation; should not happen
 	}
-	worlds := s.sample()
+	// Draw a pool by card counts, weight it by the opponent model, then
+	// draw the worlds to search by those weights. The model's cost is spent
+	// on the pool rather than on every world.
+	worlds := s.worlds
+	if s.effort > 0 && len(worlds) > poolFactor*s.effort {
+		worlds = systematic(worlds, poolFactor*s.effort, &s.pool)
+	}
+	worlds = s.reweight(o, oppPlayed, worlds)
+	if s.effort > 0 && len(worlds) > s.effort {
+		worlds = systematic(worlds, s.effort, &s.sampled)
+	}
 
 	// The root: my hand, the current count and whose card was last.
 	var root pegNode
@@ -288,20 +310,179 @@ func (s *searcher) enumerate(o *engine.Observation, seen *[52]bool, oppPlayed []
 	rec(1, k, 1)
 }
 
+// keepCacheKey identifies a hand from one player's side: the keep weight
+// of an opponent shape depends only on the cards that player has seen
+// before the play, which stay fixed through the hand.
+type keepCacheKey struct {
+	my      [6]engine.Card
+	starter engine.Card
+	oppSide int
+}
+
+// reweight multiplies each world's weight by the opponent model, dropping
+// worlds the model rules out (unless it rules out all of them).
+func (s *searcher) reweight(o *engine.Observation, oppPlayed []engine.Card, worlds []world) []world {
+	if s.keep == nil && s.pegTemp <= 0 {
+		return worlds
+	}
+	key := keepCacheKey{starter: o.Starter, oppSide: 1}
+	copy(key.my[:4], o.Kept[:])
+	copy(key.my[4:], o.Discards[:])
+	if o.Dealer != o.Player {
+		key.oppSide = 0
+	}
+	if s.keep != nil && (s.keepCache == nil || key != s.keepKey) {
+		s.keepKey, s.keepCache = key, map[int16]float64{}
+	}
+	s.weighted = s.weighted[:0]
+	for _, w := range worlds {
+		if s.keep != nil {
+			w.weight *= s.keepWeight(key, oppPlayed, w)
+		}
+		if s.pegTemp > 0 {
+			w.weight *= s.pegLikelihood(o, w)
+		}
+		if w.weight > 0 {
+			s.weighted = append(s.weighted, w)
+		}
+	}
+	if len(s.weighted) == 0 {
+		return worlds
+	}
+	return s.weighted
+}
+
+// keepWeight is the relative chance that the opponent, dealt six cards from
+// those I have not seen, kept the four of this world (their played cards
+// and its hidden ranks): the sum over the two cards they might have thrown.
+func (s *searcher) keepWeight(key keepCacheKey, oppPlayed []engine.Card, w world) float64 {
+	var k4 [4]int
+	n := 0
+	for _, c := range oppPlayed {
+		k4[n] = c.Rank()
+		n++
+	}
+	for _, r := range w.ranks[:w.n] {
+		k4[n] = int(r)
+		n++
+	}
+	sort.Ints(k4[:])
+	shape := shapeIdx[((k4[0]*14+k4[1])*14+k4[2])*14+k4[3]]
+	if v, ok := s.keepCache[shape]; ok {
+		return v
+	}
+	var avail [14]int
+	for r := 1; r <= 13; r++ {
+		avail[r] = 4
+	}
+	for _, c := range key.my {
+		avail[c.Rank()]--
+	}
+	avail[key.starter.Rank()]--
+	for _, r := range k4 {
+		avail[r]--
+	}
+	var v float64
+	for r1 := 1; r1 <= 13; r1++ {
+		for r2 := r1; r2 <= 13; r2++ {
+			combos := avail[r1] * avail[r2]
+			if r1 == r2 {
+				combos = choose(avail[r1], 2)
+			}
+			if combos <= 0 {
+				continue
+			}
+			v += float64(combos) * s.keep.prob(key.oppSide, merge6(k4, r1, r2), shape)
+		}
+	}
+	s.keepCache[shape] = v
+	return v
+}
+
+// pegLikelihood is the chance that the opponent, holding this world's
+// ranks, played the cards they did this hand, if each play is chosen by a
+// softmax on the points it scores at once.
+func (s *searcher) pegLikelihood(o *engine.Observation, w world) float64 {
+	me := o.Player
+	played := o.Played[:o.PlayedN]
+	// The opponent's hand before each of their plays: this world's ranks
+	// plus everything they played from then on.
+	var hand [8]int8
+	nh := copy(hand[:], w.ranks[:w.n])
+	for _, pc := range played {
+		if pc.Player != me {
+			hand[nh] = int8(pc.Card.Rank())
+			nh++
+		}
+	}
+	lik := 1.0
+	var seq [8]int8
+	ns, count := 0, 0
+	for _, pc := range played {
+		r := int8(pc.Card.Rank())
+		v := pc.Card.Value()
+		if count+v > 31 {
+			count, ns = 0, 0
+		}
+		if pc.Player != me {
+			var z, chosen float64
+			var tried uint16
+			for _, h := range hand[:nh] {
+				if tried&(1<<h) != 0 || count+int(rankValue(h)) > 31 {
+					continue
+				}
+				tried |= 1 << h
+				seq[ns] = h
+				e := math.Exp(float64(pegPoints(seq[:ns+1], int8(count)+rankValue(h))) / s.pegTemp)
+				z += e
+				if h == r {
+					chosen = e
+				}
+			}
+			lik *= chosen / z
+			for i := range hand[:nh] { // this card is no longer held
+				if hand[i] == r {
+					hand[i] = hand[nh-1]
+					nh--
+					break
+				}
+			}
+		}
+		seq[ns] = r
+		ns++
+		count += v
+		if count == 31 {
+			count, ns = 0, 0
+		}
+	}
+	return lik
+}
+
+// poolFactor is how many worlds per unit of effort are drawn by card
+// counts before the opponent model weights them and the final sample is
+// drawn by those weights.
+const poolFactor = 4
+
 // sample returns the worlds to search: all of them, or a systematic sample
 // of s.effort drawn in proportion to weight, which is deterministic.
 func (s *searcher) sample() []world {
 	if s.effort <= 0 || len(s.worlds) <= s.effort {
 		return s.worlds
 	}
+	return systematic(s.worlds, s.effort, &s.sampled)
+}
+
+// systematic draws n of worlds in proportion to weight, deterministically,
+// into *out; a world drawn k times gets weight k.
+func systematic(worlds []world, n int, out *[]world) []world {
 	var total float64
-	for _, w := range s.worlds {
+	for _, w := range worlds {
 		total += w.weight
 	}
-	s.sampled = s.sampled[:0]
-	step := total / float64(s.effort)
+	*out = (*out)[:0]
+	step := total / float64(n)
 	next, cum := step/2, 0.0
-	for _, w := range s.worlds {
+	for _, w := range worlds {
 		cum += w.weight
 		picks := 0
 		for next < cum {
@@ -310,10 +491,10 @@ func (s *searcher) sample() []world {
 		}
 		if picks > 0 {
 			w.weight = float64(picks)
-			s.sampled = append(s.sampled, w)
+			*out = append(*out, w)
 		}
 	}
-	return s.sampled
+	return *out
 }
 
 // goFloor returns a card value v such that every card the opponent still
@@ -388,4 +569,24 @@ func choose(n, k int) int {
 		r = r * (n - i) / (i + 1)
 	}
 	return r
+}
+
+// merge6 returns the sorted ranks of a sorted four and r1 <= r2.
+func merge6(k4 [4]int, r1, r2 int) [6]int8 {
+	var six [6]int8
+	i, n := 0, 0
+	for _, r := range [2]int{r1, r2} {
+		for i < 4 && k4[i] <= r {
+			six[n] = int8(k4[i])
+			n++
+			i++
+		}
+		six[n] = int8(r)
+		n++
+	}
+	for ; i < 4; i++ {
+		six[n] = int8(k4[i])
+		n++
+	}
+	return six
 }

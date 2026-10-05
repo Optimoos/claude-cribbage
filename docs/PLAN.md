@@ -377,6 +377,27 @@ keeps B's win table and builds the rest.
 
 **Verify:** paired gain over the M12 bot.
 
+**Built (2026-10-05):** `internal/expert/keep.go` and the search's world
+weighting; bundle table `keep` (two temperatures).
+- Discard model: for every six-rank shape and side, a softmax over the
+  distinct keeps of (expected hand over starters + pegging edge from the
+  peg table +/- the crib table's average). The temperature per side is
+  fitted by maximum likelihood to self-play discards (0.47 dealer, 0.43
+  pone on M12 self-play; the bot's real keep gets probability 0.54 on
+  average). A world's weight sums over the two cards the opponent may
+  have thrown; it is cached per hand by rank shape.
+- Pegging consistency: each opponent play this hand is scored by a
+  softmax on its immediate points (temperature 1; 2 played the same).
+- In heuristic games the model makes the opponent's real hand 2.4x more
+  likely on average than card counting alone.
+- Sampling: a pool of 4x effort worlds drawn by card counts, weighted by
+  the model, then the searched worlds drawn by weight: same strength as
+  weighting every world (53.00% vs 52.96%), 40% faster.
+- Results at effort 100 both sides, 20k paired games vs M12: 53.00% ±
+  0.37, margin +1.23, pegging +0.12 per hand. The pegging model alone is
+  +0.34% ± 0.28; the keep model is most of the gain.
+- Crib tables were already conditioned on whose crib it is (M12).
+
 ### M14: Policy iteration and long runs
 - Regenerate all tables from expert self-play (low, equal effort), repeat
   for several rounds, tune effort levels. Long runs on the 5900X.

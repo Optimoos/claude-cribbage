@@ -11,7 +11,12 @@ import (
 // the game, the observation of the player to move, and the chosen action.
 func pegGames(t *testing.T, games int, f func(g *engine.Game, o *engine.Observation, a engine.Action)) {
 	t.Helper()
-	r := bots.NewRandom(9)
+	botGames(t, bots.NewRandom(9), games, f)
+}
+
+// botGames is pegGames with both seats played by bot.
+func botGames(t *testing.T, r bots.Bot, games int, f func(g *engine.Game, o *engine.Observation, a engine.Action)) {
+	t.Helper()
 	for seed := uint64(0); seed < uint64(games); seed++ {
 		g := engine.NewGame(seed)
 		g.SetQuiet(true)

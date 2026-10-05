@@ -13,22 +13,42 @@ import (
 
 // Resolve turns a spec into a per-worker constructor. A spec is a
 // registered bot name, a network model file (played greedily), or an
-// expert bundle file, optionally followed by @effort (opponent hands
-// searched per pegging decision; 0 for all).
+// expert bundle file, optionally followed by @ and comma-separated options:
+// a number (opponent hands searched per pegging decision; 0 for all),
+// nokeep, nopeg, heurdiscard, pegtemp=X.
+//
+//	models-expert/expert.bin@100,nokeep
 func Resolve(spec string) (func(worker int) bots.Bot, error) {
 	if _, err := bots.New(spec, 0); err == nil {
 		return func(w int) bots.Bot { b, _ := bots.New(spec, uint64(w)); return b }, nil
 	}
-	path, effort := spec, expert.DefaultEffort
+	path, opt := spec, expert.Options{Effort: expert.DefaultEffort}
 	if i := strings.LastIndexByte(spec, '@'); i >= 0 {
-		e, err := strconv.Atoi(spec[i+1:])
-		if err != nil || e < 0 {
-			return nil, fmt.Errorf("%q: bad effort after @", spec)
+		path = spec[:i]
+		for _, o := range strings.Split(spec[i+1:], ",") {
+			var err error
+			switch {
+			case o == "nokeep":
+				opt.NoKeepModel = true
+			case o == "nopeg":
+				opt.NoPegModel = true
+			case o == "heurdiscard":
+				opt.HeuristicDiscard = true
+			case strings.HasPrefix(o, "pegtemp="):
+				opt.PegTemp, err = strconv.ParseFloat(o[len("pegtemp="):], 64)
+			default:
+				opt.Effort, err = strconv.Atoi(o)
+				if opt.Effort < 0 {
+					err = fmt.Errorf("negative effort")
+				}
+			}
+			if err != nil {
+				return nil, fmt.Errorf("%q: bad option %q: %v", spec, o, err)
+			}
 		}
-		path, effort = spec[:i], e
 	}
 	if b, err := expert.LoadBundle(path); err == nil {
-		return func(int) bots.Bot { return expert.NewBot(b, effort) }, nil
+		return func(int) bots.Bot { return expert.NewBotWith(b, opt) }, nil
 	} else if path != spec {
 		return nil, err
 	}
