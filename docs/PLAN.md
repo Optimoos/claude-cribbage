@@ -460,7 +460,7 @@ by bot name on restart.
   saved game against `expert` resumes after a restart.
 - Left to verify by hand: a browser game against each level.
 
-### M16 (optional): Distillation
+### M16 (optional): Distillation (skipped 2026-10-05: the expert already meets the target and decides in milliseconds)
 - Train a policy and value network in Go from millions of expert
   decisions, as a fast approximation and as the search's opponent model.
 
