@@ -466,3 +466,76 @@ by bot name on restart.
 
 **Verify:** the distilled network beats `nn` and approaches the expert at
 a fraction of the latency.
+
+# Possible future milestones: a stronger heuristic (M17 to M21)
+
+Added 2026-10-05, not scheduled. The `heuristic` bot stays frozen: every
+result above, the network's training evaluations, the difficulty tiers
+and the win-table calibration are anchored to it. Any improvement goes
+in under a new name, `heuristic2`, measured paired against the frozen
+bot with `cmd/gauntlet` (40k games resolve a one-point gain). The payoff
+is a cheap lobby tier between `heuristic` and `expert-easy`.
+
+## Where the heuristic loses
+
+From the phase 2 results, with the heuristic as the opponent:
+
+| Component added to the heuristic | Paired win % |
+|---|---|
+| Pegging search only, 10 worlds, no opponent model (`expert-easy`) | 51.0 |
+| Pegging search only, 400 worlds (M11) | 54.1 |
+| Plus learned discard tables (M12) | 55.3 |
+| Plus opponent modelling and policy iteration (M14) | 57.2 |
+
+About four of the seven points come from pegging and three from discards
+and opponent inference. The search's pegging gain comes from enumerating
+the rest of the hand with the actual cards, which rules cannot replicate,
+so a rule-based bot should expect 3 to 4 points over the current
+heuristic, not the full seven.
+
+## Milestones, in order of expected gain per effort
+
+### M17: Score-aware discards
+The heuristic maximizes mean points at 3-3 and at 115-118 alike. It
+already enumerates every starter, so when either player is within a
+hand of 121 it should maximize the probability of reaching 121 (pone
+counts first), and as the trailing player prefer variance. M11 found
+most of the expert's edge over the network came from playing for the
+win near 121.
+
+**Verify:** paired gain over `heuristic`, largest in games where a
+player starts a hand at 95 or more.
+
+### M18: Go and 31 awareness in pegging
+The risk term counts only the opponent's immediate scoring reply. Add
+a second ply: the go point when the opponent cannot play, keeping a
+card that makes 31 later, and what I score back on the following play.
+
+**Verify:** pegging points per hand improve in a paired match.
+
+### M19: A non-uniform opponent model
+Every unseen card is treated as equally likely in the opponent's hand,
+but kept hands are rich in fives and ten-value cards, and a go is hard
+evidence. Use a fixed per-rank prior for kept cards (from self-play or
+from the expert bundle's keep model) and exclude ranks a go rules out.
+
+**Verify:** the real opponent hand gets higher probability than under
+card counting alone; paired gain over M18.
+
+### M20: Crib tables by side
+`CribEV` assumes the other two crib cards are random. Opponents throw
+poor cards to your crib and good ones to their own. Replace it with two
+91-entry tables (dealer's crib, pone's crib), taken from the expert
+bundle's crib tables or published values.
+
+**Verify:** dealer and pone discards change in the expected direction
+(for example pone throws fewer fives); paired gain.
+
+### M21: Pegging value of the kept hand
+Discards ignore how the kept cards peg. Add a per-rank or per-shape
+pegging bonus, derived from the expert bundle's peg table (mean of my
+points minus theirs by side and shape), to the discard value.
+
+**Verify:** paired gain; combined `heuristic2` lands between
+`heuristic` and `expert-easy` in the level table, and is offered in the
+lobby if so.
