@@ -1,4 +1,4 @@
-# Regenerate with: buf generate   (needs buf and protoc-gen-go v1.36.5 on PATH)
+# Regenerate with: buf generate   (needs buf and protoc-gen-go v1.36.12 on PATH)
 version: v2
 plugins:
   - local: protoc-gen-go
