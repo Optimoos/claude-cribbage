@@ -31,6 +31,7 @@ type Heuristic2 struct {
 	g     [32][64]float64 // dealer: my win probability after my show and crib, by my pegging and their pegging plus show
 
 	// Scratch space for one play.
+	opp     holdings
 	replies []reply
 	seqBuf  [16]engine.Card
 }

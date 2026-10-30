@@ -3,6 +3,7 @@ package bots
 import (
 	"math"
 	"math/rand/v2"
+	"slices"
 	"testing"
 
 	"cribbage/internal/engine"
@@ -139,8 +140,68 @@ func TestHeuristic2Lookahead(t *testing.T) {
 		for _, c := range seq {
 			count += c.Value()
 		}
-		if got := h.lookahead(seq, count, cards(tc.rest), cards(tc.unseen), tc.k); math.Abs(got-tc.want) > 1e-12 {
+		h.opp = holdings{k: tc.k}
+		for _, u := range cards(tc.unseen) {
+			h.opp.cards[h.opp.n], h.opp.w[h.opp.n] = u, 1
+			h.opp.total++
+			h.opp.n++
+		}
+		if got := h.lookahead(seq, count, cards(tc.rest)); math.Abs(got-tc.want) > 1e-12 {
 			t.Errorf("%s: lookahead = %v, want %v", tc.name, got, tc.want)
 		}
+	}
+}
+
+func TestHoldingsNoneOf(t *testing.T) {
+	// Equal weights: the hypergeometric probability.
+	m := holdings{n: 10, total: 10, k: 3}
+	if got, want := m.noneOf(4, 4), 6.0/10*5/9*4/8; math.Abs(got-want) > 1e-12 {
+		t.Errorf("equal weights: %v, want %v", got, want)
+	}
+	// Heavier cards are likelier to be held.
+	m = holdings{n: 10, total: 14, k: 3}
+	if light, heavy := m.noneOf(2, 1), m.noneOf(2, 4); heavy >= light {
+		t.Errorf("none of two heavy cards %v, of two light ones %v", heavy, light)
+	}
+	if got := m.noneOf(8, 13); got != 0 {
+		t.Errorf("only two cards left for three: %v", got)
+	}
+}
+
+// The opponent's real hand is likelier under the rank prior and the go
+// floor than under card counting alone.
+func TestHoldingsLikelihood(t *testing.T) {
+	var base Heuristic
+	var ll [2]float64
+	for seed := uint64(1); seed <= 500; seed++ {
+		g := engine.NewGame(seed)
+		g.SetQuiet(true)
+		for !g.Over() {
+			for p := 0; p < 2 && !g.Over(); p++ {
+				if !g.ToAct(p) {
+					continue
+				}
+				o, legal := g.Observation(p), g.Legal(p)
+				if o.Phase == engine.PhasePegging && o.OppHandN > 0 {
+					for v, model := range []bool{false, true} {
+						var m holdings
+						m.observe(&o, model, model)
+						for _, c := range g.Hand(1 - p) {
+							i := slices.Index(m.cards[:m.n], c)
+							if i < 0 {
+								t.Fatalf("model %v rules out the opponent's %v", model, c)
+							}
+							ll[v] += math.Log(1 - m.noneOf(1, m.w[i]))
+						}
+					}
+				}
+				if err := g.Apply(p, base.Choose(&o, legal)); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+	}
+	if ll[1] <= ll[0] {
+		t.Errorf("log-likelihood %.1f with the model, %.1f by card counting", ll[1], ll[0])
 	}
 }

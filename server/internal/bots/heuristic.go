@@ -223,3 +223,42 @@ func unseenCards(o *engine.Observation, unseen *[52]engine.Card) int {
 	}
 	return nu
 }
+
+// GoFloor returns a card value v such that every card the opponent still
+// holds is known to be worth more than v.
+//
+// The opponent could not play when I played twice running within one
+// count, and neither player could when the count was reset below 31. The
+// cards they hold now were in their hand then.
+func GoFloor(o *engine.Observation) int {
+	me := o.Player
+	floor := 0
+	count, oppPlayed := 0, 0
+	played := o.Played[:o.PlayedN]
+	for i, pc := range played {
+		v := pc.Card.Value()
+		if count+v > 31 { // reset by a go before this card
+			if oppPlayed < 4 {
+				floor = max(floor, 31-count)
+			}
+			count = 0
+		}
+		count += v
+		if pc.Player != me {
+			oppPlayed++
+		}
+		if count == 31 {
+			count = 0
+			continue
+		}
+		if i+1 < len(played) && pc.Player == me && played[i+1].Player == me &&
+			count+played[i+1].Card.Value() <= 31 && oppPlayed < 4 {
+			floor = max(floor, 31-count)
+		}
+	}
+	// It is my turn again right after my own card: the opponent said go.
+	if len(played) > 0 && played[len(played)-1].Player == me && o.Count > 0 && oppPlayed < 4 {
+		floor = max(floor, 31-o.Count)
+	}
+	return floor
+}

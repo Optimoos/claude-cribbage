@@ -581,6 +581,40 @@ from the expert bundle's keep model) and exclude ranks a go rules out.
 **Verify:** the real opponent hand gets higher probability than under
 card counting alone; paired gain over M18.
 
+**Built (2026-10-29):** `heuristic2`'s pegging lookahead draws the
+opponent's hand from weighted holdings (`holdings` in
+`internal/bots/heuristic2_peg.go`):
+- **Prior:** each unseen card weighs how much likelier heuristic
+  self-play keeps its rank than a random card's, by side (`h2Keep` in
+  `h2stats.go`). The pone keeps fives 1.46× as often and kings 0.60×;
+  the dealer's weights are flatter.
+- **Go floor:** cards the gos rule out weigh nothing. `goFloor` moved
+  from `internal/expert` to `bots.GoFloor`, and the expert's search
+  calls it there.
+- **Odds:** the hypergeometric "they hold none of these" becomes a
+  weighted draw. It is exact when weights are equal, and the uniform
+  variant reproduces M18's result exactly.
+
+Mean log-likelihood of the opponent's real hand per pegging decision
+(3000 heuristic games): card counting −6.577, prior −6.550, floor
+−6.505, both −6.477. No variant ever rules out a card they hold.
+
+| Variant (200k games, paired vs `heuristic`) | Win % | Pegging per hand |
+|---|---|---|
+| M18 (card counting) | 51.78 ± 0.12 | +0.085 |
+| Go floor only | 51.78 ± 0.12 | +0.085 |
+| Rank prior only | 52.22 ± 0.12 | +0.106 |
+| Both (shipped) | 52.23 ± 0.12 | +0.107 |
+
+- The prior is worth +0.45; the floor improves the likelihood but not
+  play. M18 already treats a go in the current count as certain, and
+  most other go evidence concerns cards that would not fit anyway.
+- Against `expert-easy`: 51.09% ± 0.12 (M18: 50.74%).
+- Pegging decisions: 9.8 µs mean.
+- Tests: weighted odds (equal weights give the hypergeometric; heavier
+  cards are likelier held) and the real hand's likelihood beating card
+  counting over 500 games.
+
 ### M20: Crib tables by side
 `CribEV` assumes the other two crib cards are random. Opponents throw
 poor cards to your crib and good ones to their own. Replace it with two

@@ -121,7 +121,7 @@ func TestGoFloorIsSound(t *testing.T) {
 	s := newSearcher(&WinTable{}, 0)
 	constrained := 0
 	pegGames(t, 300, func(g *engine.Game, o *engine.Observation, _ engine.Action) {
-		floor := goFloor(o)
+		floor := bots.GoFloor(o)
 		if floor > 0 {
 			constrained++
 		}

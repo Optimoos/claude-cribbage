@@ -4,6 +4,7 @@ import (
 	"math"
 	"sort"
 
+	"cribbage/internal/bots"
 	"cribbage/internal/engine"
 )
 
@@ -278,7 +279,7 @@ func (s *searcher) cribDistribution(o *engine.Observation, seen *[52]bool) {
 // enumerate fills s.worlds with every rank multiset the opponent may hold,
 // consistent with the cards I have seen and with every go they have said.
 func (s *searcher) enumerate(o *engine.Observation, seen *[52]bool, oppPlayed []engine.Card) {
-	minValue := goFloor(o) + 1
+	minValue := bots.GoFloor(o) + 1
 	var avail [14]int
 	for c := engine.Card(0); c < 52; c++ {
 		if !seen[c] && c.Value() >= minValue {
@@ -495,45 +496,6 @@ func systematic(worlds []world, n int, out *[]world) []world {
 		}
 	}
 	return *out
-}
-
-// goFloor returns a card value v such that every card the opponent still
-// holds is known to be worth more than v.
-//
-// The opponent could not play when I played twice running within one
-// count, and neither player could when the count was reset below 31. The
-// cards they hold now were in their hand then.
-func goFloor(o *engine.Observation) int {
-	me := o.Player
-	floor := 0
-	count, oppPlayed := 0, 0
-	played := o.Played[:o.PlayedN]
-	for i, pc := range played {
-		v := pc.Card.Value()
-		if count+v > 31 { // reset by a go before this card
-			if oppPlayed < 4 {
-				floor = max(floor, 31-count)
-			}
-			count = 0
-		}
-		count += v
-		if pc.Player != me {
-			oppPlayed++
-		}
-		if count == 31 {
-			count = 0
-			continue
-		}
-		if i+1 < len(played) && pc.Player == me && played[i+1].Player == me &&
-			count+played[i+1].Card.Value() <= 31 && oppPlayed < 4 {
-			floor = max(floor, 31-count)
-		}
-	}
-	// It is my turn again right after my own card: the opponent said go.
-	if len(played) > 0 && played[len(played)-1].Player == me && o.Count > 0 && oppPlayed < 4 {
-		floor = max(floor, 31-o.Count)
-	}
-	return floor
 }
 
 // oppShow scores the opponent's hand: the cards they have played, which

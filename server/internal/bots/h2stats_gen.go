@@ -33,6 +33,7 @@ func main() {
 	var show [2][13][30]float64
 	var dealer [64]float64
 	var rankN [13]float64
+	var kept [2][13]float64
 	for _, h := range sp.Details {
 		peg[min(h.Peg[0], 31)][min(h.Peg[1], 31)]++
 		r := h.Starter.Rank() - 1
@@ -44,6 +45,11 @@ func main() {
 			t += 2 // his heels
 		}
 		dealer[min(t, 63)]++
+		for side := range h.Kept {
+			for _, c := range h.Kept[side] {
+				kept[side][c.Rank()-1]++
+			}
+		}
 	}
 	n := float64(len(sp.Details))
 
@@ -69,8 +75,14 @@ func main() {
 	b.WriteString("// h2Dealer[k] is the probability that the dealer's show, crib and heels together score k points (63 means 63 or more).\n")
 	b.WriteString("var h2Dealer = [64]float32")
 	writeRow(&b, dealer[:], n)
-	src := bytes.TrimSuffix(b.Bytes(), []byte(",\n"))
-	src, err = format.Source(append(src, '\n'))
+	b.Truncate(b.Len() - 2) // the row's ",\n"
+	b.WriteString("\n\n// h2Keep[side][r-1] is how much likelier a card of rank r is to be kept than a random card; side 0 is the dealer, 1 the pone.\n")
+	b.WriteString("var h2Keep = [2][13]float32{\n")
+	for side := range kept {
+		writeRow(&b, kept[side][:], 4*n/13)
+	}
+	b.WriteString("}\n")
+	src, err := format.Source(b.Bytes())
 	if err != nil {
 		log.Fatal(err)
 	}
