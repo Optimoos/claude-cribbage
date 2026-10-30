@@ -545,6 +545,33 @@ card that makes 31 later, and what I score back on the following play.
 
 **Verify:** pegging points per hand improve in a paired match.
 
+**Built (2026-10-29):** `heuristic2` pegs with a three-play lookahead
+(`internal/bots/heuristic2_peg.go`). A card is worth its points, plus
+the go point times the chance the opponent cannot play, plus, over their
+replies, P(their best scoring card is u) × (my best answer to u − their
+points for u). Unseen cards are equally likely to be held (exact
+hypergeometric odds). Ties in their choice go to the reply that leaves
+me least. When they have just said go, the go is certain.
+
+| Pegging variant (paired vs `heuristic`, M17 discards) | Win % | Pegging per hand |
+|---|---|---|
+| M17 (heuristic's pegging) | 50.30 ± 0.07 | −0.002 |
+| Lookahead without my answer | 50.47 ± 0.12 | +0.007 |
+| Lookahead, go valued as my whole solo run | 51.61 ± 0.12 | +0.077 |
+| Lookahead, go point only (shipped) | 51.78 ± 0.12 | +0.085 |
+| Shipped, but every reply weighted as in the heuristic's risk | 49.66 ± 0.12 | −0.028 |
+
+- My answer to their reply carries most of the gain. It only helps once
+  their reply is modelled as their best card. Weighting every card they
+  might hold counts my answers to replies that can't all happen, and
+  that variant loses to the heuristic.
+- Against `expert-easy` (bundle@10,nokeep,nopeg,heurdiscard): 50.74% ±
+  0.12, so `heuristic2` already sits above the easiest expert level
+  (51.0% vs heuristic in M15) rather than below it.
+- Pegging decisions: 9 µs mean (p99 28 µs) under 24-way load.
+- Tests: the lookahead's value on hand-worked positions (their reply, my
+  answer, their best card, a forced go, an empty hand).
+
 ### M19: A non-uniform opponent model
 Every unseen card is treated as equally likely in the opponent's hand,
 but kept hands are rich in fives and ten-value cards, and a go is hard

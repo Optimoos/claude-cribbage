@@ -1,13 +1,14 @@
 package bots
 
 import (
+	"math"
 	"math/rand/v2"
 	"testing"
 
 	"cribbage/internal/engine"
 )
 
-func TestHeuristic2MatchesHeuristicBeforeEndgame(t *testing.T) {
+func TestHeuristic2DiscardsAsHeuristicBeforeEndgame(t *testing.T) {
 	h, base := NewHeuristic2(), NewHeuristic()
 	checked := 0
 	for seed := uint64(1); seed <= 200; seed++ {
@@ -20,7 +21,7 @@ func TestHeuristic2MatchesHeuristicBeforeEndgame(t *testing.T) {
 				}
 				o, legal := g.Observation(p), g.Legal(p)
 				a := base.Choose(&o, legal)
-				if max(o.Scores[0], o.Scores[1]) < h.Endgame {
+				if o.Phase == engine.PhaseDiscard && max(o.Scores[0], o.Scores[1]) < h.Endgame {
 					if b := h.Choose(&o, legal); b != a {
 						t.Fatalf("seed %d, scores %v: heuristic2 chose %v, heuristic %v", seed, o.Scores, b, a)
 					}
@@ -32,8 +33,8 @@ func TestHeuristic2MatchesHeuristicBeforeEndgame(t *testing.T) {
 			}
 		}
 	}
-	if checked < 10000 {
-		t.Fatalf("only %d decisions checked", checked)
+	if checked < 1000 {
+		t.Fatalf("only %d discards checked", checked)
 	}
 }
 
@@ -112,4 +113,34 @@ func TestHeuristic2KeepsASureSix(t *testing.T) {
 		t.Error("heuristic always kept a sure 6 as well; the test shows nothing")
 	}
 	t.Logf("%d hands, heuristic risked the 6 in %d", tested, differ)
+}
+
+func TestHeuristic2Lookahead(t *testing.T) {
+	h := NewHeuristic2()
+	for _, tc := range []struct {
+		name              string
+		seq, rest, unseen string
+		k                 int
+		want              float64
+	}{
+		// 10 on the table; they hold one of 5C (fifteen, 2) and KC (20, 0).
+		{"their reply", "TH", "", "5C KC", 1, 0.5 * -2},
+		// My 5D answers 5C with a pair (2) and KC with nothing.
+		{"my answer", "TH", "5D", "5C KC", 1, 0.5*(2-2) + 0.5*0},
+		// They play the 5 whenever they hold it: P = 1 - (2/3)(1/2).
+		{"their best card", "TH", "", "5C KC QC", 2, (1 - 2.0/3*1.0/2) * -2},
+		// At 25 no ten-card fits, so they say go and I get the point.
+		{"go", "TH KD 5S", "", "KC QC JC TC", 2, 1},
+		// They have no cards left.
+		{"no cards", "TH", "", "5C KC", 0, 1},
+	} {
+		seq := cards(tc.seq)
+		count := 0
+		for _, c := range seq {
+			count += c.Value()
+		}
+		if got := h.lookahead(seq, count, cards(tc.rest), cards(tc.unseen), tc.k); math.Abs(got-tc.want) > 1e-12 {
+			t.Errorf("%s: lookahead = %v, want %v", tc.name, got, tc.want)
+		}
+	}
 }

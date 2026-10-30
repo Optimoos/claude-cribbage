@@ -18,8 +18,8 @@ const DefaultEndgame = 90
 // probability of winning the game rather than its expected points. That
 // probability follows the counting order (pegging, the pone's show, the
 // dealer's show, the crib) and then a win table for the hands after,
-// all built from heuristic self-play statistics (h2stats.go). Pegging is
-// Heuristic's.
+// all built from heuristic self-play statistics (h2stats.go). Pegging
+// looks three plays ahead (heuristic2_peg.go).
 type Heuristic2 struct {
 	Endgame int
 
@@ -29,6 +29,10 @@ type Heuristic2 struct {
 	cribH [30][32]float64 // pone: P(my show, their crib and heels)
 	their [30][64]float64 // pone: P(my show, their show, crib and heels)
 	g     [32][64]float64 // dealer: my win probability after my show and crib, by my pegging and their pegging plus show
+
+	// Scratch space for one play.
+	replies []reply
+	seqBuf  [16]engine.Card
 }
 
 // tieBreak weighs Heuristic's points value against the win probability.
@@ -43,7 +47,7 @@ func (h *Heuristic2) Choose(o *engine.Observation, legal []engine.Action) engine
 		return legal[0]
 	}
 	if o.Phase != engine.PhaseDiscard {
-		return choosePlay(o, legal)
+		return h.choosePlay(o, legal)
 	}
 	if max(o.Scores[0], o.Scores[1]) < h.Endgame {
 		return chooseDiscard(o, legal)

@@ -161,32 +161,8 @@ func choosePlay(o *engine.Observation, legal []engine.Action) engine.Action {
 		seq[n] = pc.Card
 		n++
 	}
-
-	// Cards the opponent might hold: everything we have not seen.
-	var seen [52]bool
-	mark := func(c engine.Card) {
-		if c.Valid() {
-			seen[c] = true
-		}
-	}
-	for _, c := range o.Kept {
-		mark(c)
-	}
-	for _, c := range o.Discards {
-		mark(c)
-	}
-	mark(o.Starter)
-	for _, pc := range o.Played[:o.PlayedN] {
-		mark(pc.Card)
-	}
 	var unseen [52]engine.Card
-	nu := 0
-	for c := engine.Card(0); c < 52; c++ {
-		if !seen[c] {
-			unseen[nu] = c
-			nu++
-		}
-	}
+	nu := unseenCards(o, &unseen)
 	// Each unseen card is in the opponent's hand with this probability.
 	pHeld := 0.0
 	if nu > 0 {
@@ -217,4 +193,33 @@ func choosePlay(o *engine.Observation, legal []engine.Action) engine.Action {
 		}
 	}
 	return best
+}
+
+// unseenCards fills unseen with the cards the opponent might hold:
+// everything the observing player has not seen. It returns their number.
+func unseenCards(o *engine.Observation, unseen *[52]engine.Card) int {
+	var seen [52]bool
+	mark := func(c engine.Card) {
+		if c.Valid() {
+			seen[c] = true
+		}
+	}
+	for _, c := range o.Kept {
+		mark(c)
+	}
+	for _, c := range o.Discards {
+		mark(c)
+	}
+	mark(o.Starter)
+	for _, pc := range o.Played[:o.PlayedN] {
+		mark(pc.Card)
+	}
+	nu := 0
+	for c := engine.Card(0); c < 52; c++ {
+		if !seen[c] {
+			unseen[nu] = c
+			nu++
+		}
+	}
+	return nu
 }
