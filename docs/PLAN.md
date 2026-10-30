@@ -624,6 +624,39 @@ bundle's crib tables or published values.
 **Verify:** dealer and pone discards change in the expected direction
 (for example pone throws fewer fives); paired gain.
 
+**Built (2026-10-29), no gain:** `heuristic2` values the crib by side
+in all its discards: the points rule before the endgame
+(`chooseDiscard2`), the endgame's win probability and its tie-break.
+The other two crib cards are enumerated with each pair weighted by how
+much likelier the other side is to throw those ranks than a random
+pair's. Those habits come from heuristic self-play (`h2Throw` in
+`h2stats.go`), not the expert bundle, so `heuristic2` stays
+self-contained. The tables are per starter rank, as before, so 91 × 13
+per side rather than 91.
+
+- Directions are as expected. My discards are worth less to my own crib
+  than to a random one (5-5: 8.69 vs 8.99; 10-K: 2.69 vs 3.41) and more
+  to the dealer's when I am the pone (5-5: 9.28; 10-K: 3.72).
+- Discards change in 7.4% of pone hands and 10.1% of dealer hands. The
+  dealer throws slightly fewer fives (125 vs 130 per 1000 hands). The
+  pone barely changes (14 vs 13), because the heuristic almost never
+  throws the dealer a five already.
+
+| Variant (200k games, paired vs `heuristic`) | Win % | Margin per game |
+|---|---|---|
+| M19 (random crib) | 52.23 ± 0.12 | +0.88 |
+| By side before the endgame only | 52.20 ± 0.13 | +0.90 |
+| By side in the endgame only | 52.25 ± 0.12 | +0.90 |
+| Both (shipped) | 52.22 ± 0.13 | +0.91 |
+
+- No win gain. Points rise by about 0.03 per game, and against
+  `expert-easy` it's 51.22% ± 0.13 (M19: 51.09%), both within noise.
+  More accurate crib values only change close decisions, where little
+  is at stake. Kept because it is no slower, and M21's pegging value is
+  added to these discard values.
+- Tests: summed over every pair, the dealer's crib table lies below the
+  random one and the pone's above.
+
 ### M21: Pegging value of the kept hand
 Discards ignore how the kept cards peg. Add a per-rank or per-shape
 pegging bonus, derived from the expert bundle's peg table (mean of my

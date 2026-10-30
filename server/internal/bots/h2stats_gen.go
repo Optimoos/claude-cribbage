@@ -34,6 +34,7 @@ func main() {
 	var dealer [64]float64
 	var rankN [13]float64
 	var kept [2][13]float64
+	var throws [2][13][13]float64
 	for _, h := range sp.Details {
 		peg[min(h.Peg[0], 31)][min(h.Peg[1], 31)]++
 		r := h.Starter.Rank() - 1
@@ -49,6 +50,8 @@ func main() {
 			for _, c := range h.Kept[side] {
 				kept[side][c.Rank()-1]++
 			}
+			r1, r2 := h.Discards[side][0].Rank()-1, h.Discards[side][1].Rank()-1
+			throws[side][min(r1, r2)][max(r1, r2)]++
 		}
 	}
 	n := float64(len(sp.Details))
@@ -80,6 +83,16 @@ func main() {
 	b.WriteString("var h2Keep = [2][13]float32{\n")
 	for side := range kept {
 		writeRow(&b, kept[side][:], 4*n/13)
+	}
+	b.WriteString("}\n\n")
+	b.WriteString("// h2Throw[side][r1-1][r2-1], r1 <= r2, is the probability that a side throws ranks r1 and r2 to the crib; side 0 is the dealer, 1 the pone.\n")
+	b.WriteString("var h2Throw = [2][13][13]float32{\n")
+	for side := range throws {
+		b.WriteString("{\n")
+		for r := range throws[side] {
+			writeRow(&b, throws[side][r][:], n)
+		}
+		b.WriteString("},\n")
 	}
 	b.WriteString("}\n")
 	src, err := format.Source(b.Bytes())

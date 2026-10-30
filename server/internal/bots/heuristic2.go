@@ -15,7 +15,9 @@ const DefaultEndgame = 90
 
 // Heuristic2 is Heuristic with score-aware discards: once either player
 // has Endgame points or more, it keeps the four cards that maximize its
-// probability of winning the game rather than its expected points. That
+// probability of winning the game rather than its expected points. Before
+// that it maximizes points as Heuristic does, but values the crib by side:
+// the other two crib cards are what the opponent tends to throw. That
 // probability follows the counting order (pegging, the pone's show, the
 // dealer's show, the crib) and then a win table for the hands after,
 // all built from heuristic self-play statistics (h2stats.go). Pegging
@@ -51,7 +53,7 @@ func (h *Heuristic2) Choose(o *engine.Observation, legal []engine.Action) engine
 		return h.choosePlay(o, legal)
 	}
 	if max(o.Scores[0], o.Scores[1]) < h.Endgame {
-		return chooseDiscard(o, legal)
+		return chooseDiscard2(o, legal)
 	}
 	return h.chooseWinDiscard(o, legal)
 }
@@ -72,12 +74,57 @@ func (h *Heuristic2) chooseWinDiscard(o *engine.Observation, legal []engine.Acti
 	best, bestV := legal[0], math.Inf(-1)
 	for _, a := range legal {
 		kept := keptAfter(hand, a)
-		v := h.winValue(kept, a.Cards, &held, me, opp, iDeal) + tieBreak*discardEV(kept, a, &held, iDeal)
+		v := h.winValue(kept, a.Cards, &held, me, opp, iDeal) + tieBreak*discardEV2(kept, a, &held, iDeal)
 		if v > bestV {
 			best, bestV = a, v
 		}
 	}
 	return best
+}
+
+// chooseDiscard2 keeps the four cards with the most expected points: their
+// show plus (dealer) or minus (pone) the crib by side.
+func chooseDiscard2(o *engine.Observation, legal []engine.Action) engine.Action {
+	h2Once.Do(buildH2)
+	hand := o.HandCards()
+	var held [52]bool
+	for _, c := range hand {
+		held[c] = true
+	}
+	dealer := o.Dealer == o.Player
+	best, bestV := legal[0], math.Inf(-1)
+	for _, a := range legal {
+		if v := discardEV2(keptAfter(hand, a), a, &held, dealer); v > bestV {
+			best, bestV = a, v
+		}
+	}
+	return best
+}
+
+// discardEV2 is discardEV with the crib valued by side.
+func discardEV2(kept [4]engine.Card, a engine.Action, held *[52]bool, dealer bool) float64 {
+	side := cribSide(dealer)
+	means := &h2CribMean[side][a.Cards[0].Rank()][a.Cards[1].Rank()]
+	var crib float64
+	for s := engine.Card(0); s < 52; s++ {
+		if !held[s] {
+			crib += means[s.Rank()-1]
+		}
+	}
+	crib /= 46
+	if dealer {
+		return HandEV(kept, held) + crib
+	}
+	return HandEV(kept, held) - crib
+}
+
+// cribSide indexes the crib tables: 0 for the dealer's discards, 1 for the
+// pone's.
+func cribSide(dealer bool) int {
+	if dealer {
+		return 0
+	}
+	return 1
 }
 
 // winValue is my probability of winning after keeping kept and discarding
@@ -105,7 +152,7 @@ func (h *Heuristic2) winValue(kept [4]engine.Card, disc [2]engine.Card, held *[5
 		for q, p := range h2Show[oside][sr-1] {
 			h.qmix[q] += w * float64(p)
 		}
-		crib := &h2Crib[r1][r2][sr-1]
+		crib := &h2Crib[cribSide(iDeal)][r1][r2][sr-1]
 		for c, p := range crib {
 			if p == 0 {
 				continue
@@ -216,11 +263,14 @@ var (
 	// h2V[x][y] is the probability that the dealer wins from the start of
 	// a hand with the dealer on x and the pone on y.
 	h2V [engine.WinScore][engine.WinScore]float64
-	// h2Crib[r1][r2][sr-1][c] is the probability that a crib holding
-	// discards of ranks r1 and r2 scores c with a starter of rank sr, the
-	// other two cards being random. Suits are fixed, so crib flushes are
-	// not counted.
-	h2Crib [14][14][13][30]float64
+	// h2Crib[side][r1][r2][sr-1][c] is the probability that a crib
+	// holding one side's discards of ranks r1 and r2 scores c with a
+	// starter of rank sr, the other two cards being thrown as the other
+	// side tends to throw (h2Throw). Suits are fixed, so crib flushes are
+	// not counted. Side 0 is the dealer, 1 the pone.
+	h2Crib [2][14][14][13][30]float64
+	// h2CribMean[side][r1][r2][sr-1] is the mean of that distribution.
+	h2CribMean [2][14][14][13]float64
 )
 
 // h2Win is my probability of winning from the start of a hand; scores of
@@ -241,20 +291,37 @@ func buildH2() {
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() { defer wg.Done(); buildH2Win() }()
-	for r1 := 1; r1 <= 13; r1++ {
-		for r2 := r1; r2 <= 13; r2++ {
-			wg.Add(1)
-			go func(r1, r2 int) {
-				defer wg.Done()
-				buildH2Crib(r1, r2)
-				h2Crib[r2][r1] = h2Crib[r1][r2]
-			}(r1, r2)
+	for side := range h2Crib {
+		for r1 := 1; r1 <= 13; r1++ {
+			for r2 := r1; r2 <= 13; r2++ {
+				wg.Add(1)
+				go func(side, r1, r2 int) {
+					defer wg.Done()
+					buildH2Crib(side, r1, r2)
+					h2Crib[side][r2][r1] = h2Crib[side][r1][r2]
+					h2CribMean[side][r2][r1] = h2CribMean[side][r1][r2]
+				}(side, r1, r2)
+			}
 		}
 	}
 	wg.Wait()
 }
 
-func buildH2Crib(r1, r2 int) {
+// buildH2Crib enumerates the other side's two discards from the cards
+// left, each pair weighted by how much likelier that side is to throw its
+// ranks than a random pair's.
+func buildH2Crib(side, r1, r2 int) {
+	var weight [13][13]float64
+	for x := range weight {
+		for y := x; y < 13; y++ {
+			random := 16.0 // pairs of cards with two different ranks
+			if x == y {
+				random = 6
+			}
+			weight[x][y] = float64(h2Throw[1-side][x][y]) / random
+			weight[y][x] = weight[x][y]
+		}
+	}
 	a, b := engine.NewCard(r1, engine.Clubs), engine.NewCard(r2, engine.Diamonds)
 	for sr := 1; sr <= 13; sr++ {
 		s := engine.NewCard(sr, engine.Hearts)
@@ -264,17 +331,21 @@ func buildH2Crib(r1, r2 int) {
 				rest = append(rest, c)
 			}
 		}
-		dist := &h2Crib[r1][r2][sr-1]
-		n := 0
+		dist := &h2Crib[side][r1][r2][sr-1]
+		var total float64
 		for i := 0; i < len(rest); i++ {
 			for j := i + 1; j < len(rest); j++ {
-				dist[engine.ScoreHand([4]engine.Card{a, b, rest[i], rest[j]}, s, true).Total()]++
-				n++
+				w := weight[rest[i].Rank()-1][rest[j].Rank()-1]
+				dist[engine.ScoreHand([4]engine.Card{a, b, rest[i], rest[j]}, s, true).Total()] += w
+				total += w
 			}
 		}
+		var mean float64
 		for c := range dist {
-			dist[c] /= float64(n)
+			dist[c] /= total
+			mean += float64(c) * dist[c]
 		}
+		h2CribMean[side][r1][r2][sr-1] = mean
 	}
 }
 

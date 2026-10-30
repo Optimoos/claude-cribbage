@@ -9,33 +9,23 @@ import (
 	"cribbage/internal/engine"
 )
 
-func TestHeuristic2DiscardsAsHeuristicBeforeEndgame(t *testing.T) {
-	h, base := NewHeuristic2(), NewHeuristic()
-	checked := 0
-	for seed := uint64(1); seed <= 200; seed++ {
-		g := engine.NewGame(seed)
-		g.SetQuiet(true)
-		for !g.Over() {
-			for p := 0; p < 2 && !g.Over(); p++ {
-				if !g.ToAct(p) {
-					continue
-				}
-				o, legal := g.Observation(p), g.Legal(p)
-				a := base.Choose(&o, legal)
-				if o.Phase == engine.PhaseDiscard && max(o.Scores[0], o.Scores[1]) < h.Endgame {
-					if b := h.Choose(&o, legal); b != a {
-						t.Fatalf("seed %d, scores %v: heuristic2 chose %v, heuristic %v", seed, o.Scores, b, a)
-					}
-					checked++
-				}
-				if err := g.Apply(p, a); err != nil {
-					t.Fatal(err)
-				}
+// The pone throws poor cards to the dealer's crib and the dealer good ones
+// to their own, so my discards are worth less than in a random crib when I
+// deal and more when I am the pone.
+func TestH2CribBySide(t *testing.T) {
+	h2Once.Do(buildH2)
+	var dealer, pone, random float64
+	for r1 := 1; r1 <= 13; r1++ {
+		for r2 := r1; r2 <= 13; r2++ {
+			for sr := 0; sr < 13; sr++ {
+				dealer += h2CribMean[0][r1][r2][sr] / 13
+				pone += h2CribMean[1][r1][r2][sr] / 13
 			}
+			random += CribEV(engine.NewCard(r1, engine.Clubs), engine.NewCard(r2, engine.Diamonds))
 		}
 	}
-	if checked < 1000 {
-		t.Fatalf("only %d discards checked", checked)
+	if !(dealer < random && random < pone) {
+		t.Errorf("summed crib means: dealer's %.1f, random %.1f, pone's %.1f", dealer, random, pone)
 	}
 }
 
