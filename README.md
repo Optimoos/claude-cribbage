@@ -17,6 +17,8 @@ go run ./cmd/botclient -user bob -games 1000      # matchmaking: run two of thes
 go run ./cmd/botclient -addr ws://localhost:8080/rtc -user carol -opponent random   # over WebRTC
 go run ./cmd/botclient -user dave -bot nn -model models-ft/best.bin -opponent heuristic   # NN plays as the client
 go run ./cmd/sim -a heuristic -b random -n 100000 # in-process bot matches
+go run ./cmd/gauntlet -bot heuristic2 -vs heuristic -n 200000   # score-aware discards (M17) against the frozen heuristic
+go generate ./internal/bots                       # rebuild heuristic2's self-play statistics (h2stats.go)
 go run ./cmd/train run -out models                # train the neural network (Ctrl-C to stop)
 go run ./cmd/train eval -model models/best.bin -vs heuristic -n 10000
 go run ./cmd/gauntlet -bot models-ft/best.bin -vs random,heuristic -n 100000   # duplicate-deal table
@@ -30,7 +32,7 @@ go run ./cmd/expert iterate -start models-expert/expert.bin -rounds 3   # policy
 | Path | Purpose |
 |---|---|
 | `internal/engine` | Rules engine: pure, deterministic state machine |
-| `internal/bots` | Bot interface, random and heuristic bots, game runner |
+| `internal/bots` | Bot interface, random, heuristic and heuristic2 bots, game runner |
 | `internal/protocol` | Engine to protobuf conversions; `pb/` is generated |
 | `internal/server` | Connections, auth, lobby, matchmaking, game actors |
 | `internal/store` | Users, sessions and games: in-memory or SQLite |

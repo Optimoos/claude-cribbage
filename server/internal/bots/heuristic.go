@@ -38,18 +38,21 @@ func chooseDiscard(o *engine.Observation, legal []engine.Action) engine.Action {
 	dealer := o.Dealer == o.Player
 	best, bestV := legal[0], math.Inf(-1)
 	for _, a := range legal {
-		kept := keptAfter(hand, a)
-		v := HandEV(kept, &seen)
-		if crib := CribEV(a.Cards[0], a.Cards[1]); dealer {
-			v += crib
-		} else {
-			v -= crib
-		}
-		if v > bestV {
+		if v := discardEV(keptAfter(hand, a), a, &seen, dealer); v > bestV {
 			best, bestV = a, v
 		}
 	}
 	return best
+}
+
+// discardEV is the expected show of kept plus (dealer) or minus (pone) the
+// expected crib from the discards.
+func discardEV(kept [4]engine.Card, a engine.Action, seen *[52]bool, dealer bool) float64 {
+	v, crib := HandEV(kept, seen), CribEV(a.Cards[0], a.Cards[1])
+	if dealer {
+		return v + crib
+	}
+	return v - crib
 }
 
 func keptAfter(hand []engine.Card, a engine.Action) [4]engine.Card {

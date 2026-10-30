@@ -506,6 +506,38 @@ win near 121.
 **Verify:** paired gain over `heuristic`, largest in games where a
 player starts a hand at 95 or more.
 
+**Built (2026-10-29):** `heuristic2` (`internal/bots/heuristic2.go`).
+Once either player has 90 or more, it keeps the four cards with the
+highest win probability, in counting order: joint pegging, the pone's
+show, then the dealer's show, crib and heels, then a win table for the
+hands after. The table is computed at first use by dynamic programming
+over per-hand distributions from 200k heuristic self-play games
+(`h2stats.go`, regenerated with `go generate ./internal/bots`). It
+agrees with the expert bundle's learned table to 0.15% on average.
+Near-ties in win probability (1e-4 per point) go to the heuristic's
+points value. Below 90, and in pegging, it plays exactly as `heuristic`.
+
+| Variant (200k games, paired vs `heuristic`) | Win % | Margin per game |
+|---|---|---|
+| Endgame from 90, no points tie-break | 50.01 ± 0.17 (40k) | −0.11 |
+| Endgame from 90 (shipped) | 50.30 ± 0.07 | −0.06 |
+| Endgame from 0 (every discard) | 50.29 ± 0.09 | −0.13 |
+
+- The gain is real but small: +0.3 points, not the one or more hoped
+  for. The threshold doesn't matter (60, 80, 90 and 100 all gave the
+  same result within noise), so mid-game discards gain nothing from it.
+  Every gain comes from hands where someone has 90 or more, since no
+  other decision changes.
+- Without the tie-break the bot gives away points in games already won
+  or lost, where options tie on win probability.
+- Most likely limit: pegging is drawn from one distribution whatever is
+  kept, so an endgame keep can't be chosen for its pegging. M21 adds
+  that.
+- Endgame discards take 0.5 ms mean (p99 5 ms) under 24-way load.
+- Tests: identical to `heuristic` below the endgame, the win table is
+  monotonic, and the pone on 115 always keeps a sure 6 when one exists
+  (the heuristic risks it in 12 of 200 such hands).
+
 ### M18: Go and 31 awareness in pegging
 The risk term counts only the opponent's immediate scoring reply. Add
 a second ply: the go point when the opponent cannot play, keeping a

@@ -19,8 +19,9 @@ type Bot interface {
 }
 
 var factories = map[string]func(seed uint64) Bot{
-	"random":    func(seed uint64) Bot { return NewRandom(seed) },
-	"heuristic": func(uint64) Bot { return NewHeuristic() },
+	"random":     func(seed uint64) Bot { return NewRandom(seed) },
+	"heuristic":  func(uint64) Bot { return NewHeuristic() },
+	"heuristic2": func(uint64) Bot { return NewHeuristic2() },
 }
 
 // Register adds a bot factory under name, replacing any existing one. Call
