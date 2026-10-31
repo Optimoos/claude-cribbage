@@ -1026,7 +1026,7 @@ function cardEl(c, opts = {}) {
 
 const BOT_LABELS = {
   expert: 'Expert bot', 'expert-medium': 'Expert bot (medium)', 'expert-easy': 'Expert bot (easy)',
-  nn: 'Neural network bot', heuristic: 'Heuristic bot', random: 'Random bot',
+  heuristic2: 'Heuristic bot (strong)', nn: 'Neural network bot', heuristic: 'Heuristic bot', random: 'Random bot',
 };
 
 function plate(el, v, seat, isMe) {

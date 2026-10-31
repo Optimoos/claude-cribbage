@@ -70,6 +70,8 @@ func (in *instance) stop(t *testing.T) {
 
 func TestRestoreReproducesState(t *testing.T) { testRestore(t, "heuristic") }
 
+func TestRestoreHeuristic2Game(t *testing.T) { testRestore(t, "heuristic2") }
+
 // A game against the expert bot resumes after a restart: the bot is
 // recreated by name, from the same bundle.
 func TestRestoreExpertGame(t *testing.T) {

@@ -705,3 +705,7 @@ with 0.5 ms discards (mean; p99 5 ms) and 10 µs pegging decisions.
 Pegging gave most of the gain (M18, M19, M21: +2.4 points), and the
 discard ideas alone (M17, M20) gave +0.3. The plan expected 3 to 4
 points from rules; this is 2.7.
+
+The lobby offers it as its own level, "Heuristic bot (strong)", listed
+between Expert (medium) and Expert (easy). Unlike the expert levels it
+needs no bundle, so it is always shown, like `heuristic`.
