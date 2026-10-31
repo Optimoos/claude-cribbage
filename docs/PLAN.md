@@ -164,6 +164,44 @@ Decisions confirmed with you:
 - Godot plays against an HTML-client human.
 - Killing the client and reopening it resumes the game.
 
+**Built (2026-10-30):** `client-godot/`, a Godot 4.7.2 .NET project
+(net8.0, rolling forward to the installed .NET 10). WebRTC comes from the
+webrtc-native 1.2.2 GDExtension, fetched by `fetch-webrtc.sh` (pinned
+SHA-256) rather than checked in. The C# protocol classes are generated at
+build time by Grpc.Tools from `/proto`. The server needed no changes: it
+already answers binary data channels in binary.
+- **Connection** mirrors the web client: an offer over the `/rtc`
+  WebSocket, held-back candidates on both sides, a 15 s open deadline, a
+  1.5 s grace on "disconnected", and reconnects backing off from 0.5 s
+  to 2 s. ICE servers come from `/api/config` and the bot list from
+  `/api/bots`.
+- **Screens** are built in code from one `Main.tscn`. The login form is
+  an overlay with the server URL. The lobby (bot picks, find a match, open
+  game, your/open/recent games) sits down the left. The table has the
+  opponent plate and hand, a 3 × 40 board with front and back pegs, the
+  crib, the starter, the count with the current and earlier sequences, the
+  last hand's counts, your hand, a game log, and a game-over banner with
+  "Play again". Cards and the board are drawn with `_Draw`.
+- **Session** token and server URL persist in `user://<profile>.cfg`.
+- **Autoplay** (`--autoplay`) plays random legal moves through the UI
+  code paths (discards go through pick-and-press), for headless tests.
+  Other test options are `--quit-after`, `--pace` and `--screenshot`.
+
+**Verified:**
+- Headless Godot played full games against `heuristic` and `heuristic2`.
+- Two Godot clients played each other through an open game and agreed on
+  the result (121–92).
+- A client killed with SIGKILL after 12 moves was reopened with the same
+  profile and finished the same game from 9–27.
+- Windowed screenshots checked the layout in pegging, the show and game
+  over.
+- Not checked here: Godot against a browser player, since no scriptable
+  browser with WebRTC is installed. The server keeps a codec per
+  connection, so a mixed game should behave like the two above. No export
+  templates are installed, so there is no exported build yet.
+- Simpler than the web client: no event-by-event animation or sound, and
+  only the default theme.
+
 ## Later (out of scope now)
 - Web export for Godot once .NET web support lands, or a GDScript port.
 - Matchmaking and ratings.

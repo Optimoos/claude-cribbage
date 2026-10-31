@@ -1,0 +1,5 @@
+.godot/
+bin/
+obj/
+# Downloaded by fetch-webrtc.sh.
+addons/webrtc_native/

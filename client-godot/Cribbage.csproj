@@ -1,0 +1,16 @@
+<Project Sdk="Godot.NET.Sdk/4.7.2">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <EnableDynamicLoading>true</EnableDynamicLoading>
+    <RootNamespace>Cribbage</RootNamespace>
+    <Nullable>enable</Nullable>
+    <!-- Run on whichever .NET runtime is installed (8 or later). -->
+    <RollForward>LatestMajor</RollForward>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Google.Protobuf" Version="3.36.1" />
+    <PackageReference Include="Grpc.Tools" Version="2.84.0" PrivateAssets="all" />
+    <!-- C# classes for the shared schema, generated at build time. -->
+    <Protobuf Include="../proto/cribbage/v1/cribbage.proto" ProtoRoot="../proto" GrpcServices="None" />
+  </ItemGroup>
+</Project>

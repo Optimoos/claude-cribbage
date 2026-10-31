@@ -138,6 +138,43 @@ step:
 - **Development:** `-web-dir web/static` serves the client from disk, so edits
   show up on reload without rebuilding.
 
+## Godot desktop client (`client-godot/`)
+
+A Godot 4.7 .NET project that plays over the same WebRTC data channel as the
+browser, with binary protobuf messages. It needs the .NET SDK (8 or later) and
+the Godot 4.7 .NET editor. Desktop Godot has no built-in WebRTC, so fetch the
+[webrtc-native](https://github.com/godotengine/webrtc-native) GDExtension
+first (it is not checked in):
+
+```sh
+cd client-godot
+./fetch-webrtc.sh       # into addons/webrtc_native (pinned version and checksum)
+dotnet build            # also generates the C# protocol classes from /proto
+godot --path .          # or open project.godot in the editor
+```
+
+- **Screens:** a login form (with the server's signaling URL, default
+  `ws://127.0.0.1:8080/rtc`), the lobby down the left, and the table: the
+  opponent's cards, a three-street board with front and back pegs, crib,
+  starter, the count and cards played, your hand, and a game log. Click two
+  cards and **Discard**; in pegging, click a card to play it (cards that
+  would pass 31 are dimmed). After the show, the table lists each count.
+- **Sessions:** the server URL and session token are kept in
+  `user://<profile>.cfg`. Reopening the client resumes its games; it also
+  reconnects by itself if the connection drops.
+- **Command line** (after `--`): `--server URL`, `--profile NAME` for several
+  clients on one machine, and a self-play test mode:
+
+```sh
+godot --headless --path . -- --server ws://127.0.0.1:8080/rtc --profile t1 \
+  --autoplay --user t1 --password password123 --vs heuristic   # or --open / --join
+```
+
+  Autoplay plays random legal moves through the UI code and quits when the
+  game ends. `--quit-after N` kills the client after N moves (rerun with the
+  same `--profile` to resume), `--pace S` slows it down, and
+  `--screenshot FILE --after S` saves the window and quits.
+
 ## Persistence
 
 The server keeps users, sessions and games in SQLite (`-db`, default
@@ -165,6 +202,9 @@ with the `google.golang.org/protobuf` version in `server/go.mod`):
 ```sh
 buf lint && buf generate
 ```
+
+The Godot client generates its C# classes from the same file at build time
+(Grpc.Tools in `client-godot/Cribbage.csproj`).
 
 The TCP transport sends each message as a 4-byte big-endian length followed by
 a binary `ClientMessage` / `ServerMessage`.
