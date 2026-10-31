@@ -73,9 +73,14 @@ On AWS, GCP or Azure the public IP is NATed rather than on the interface:
 add `-public-ip <elastic/static IP>` to `ExecStart`, and open the same
 ports in the cloud's security group.
 
-Leave ports 8080 and 7777 closed: they listen on localhost only. Port 7777
-is for headless bots (`cmd/botclient`), which run on the server itself;
-its protocol is not encrypted.
+Leave ports 8080 and 7777 closed: they listen on localhost only (the
+default). Port 7777 is for headless bots (`cmd/botclient`), which run on
+the server itself; its protocol is not encrypted.
+
+`-rtc-public-only` makes the server ignore WebRTC addresses a client
+offers on private, loopback or link-local networks, so nobody can make it
+send packets into its own network. Leave it off to play on one machine or
+a LAN.
 
 ## Updating
 
@@ -90,9 +95,10 @@ ssh root@SERVER 'install -m 0755 /tmp/cribserver /opt/cribbage/ && systemctl res
 ## Backups
 
 The server writes a compacted copy of the database to
-`/var/lib/cribbage/backups/cribbage-<UTC time>.db` at startup and every
-24 hours, keeping the newest 7 (`-backup-dir`, `-backup-every`,
-`-backup-keep`). Writes pause while a backup runs; for a database of tens
+`/var/lib/cribbage/backups/cribbage-<UTC time>.db` every 24 hours, keeping
+the newest 7 (`-backup-dir`, `-backup-every`, `-backup-keep`). At startup
+it writes one only if the newest is a day old, so restarts (or a crash
+loop) do not pile them up. Writes pause while a backup runs; for a database of tens
 of MB that is well under a second.
 
 Backups on the same disk do not survive losing the machine. Copy them off
@@ -103,7 +109,8 @@ rsync -a root@SERVER:/var/lib/cribbage/backups/ ~/cribbage-backups/
 ```
 
 or with your provider's volume snapshots. The files contain password
-hashes and session tokens; keep them private.
+hashes; keep them private. Session tokens are stored hashed, so a backup
+cannot be used to sign in as anyone.
 
 You cannot copy the live `cribbage.db` with `sqlite3 .backup` or
 Litestream while the server runs: it holds an exclusive lock.
@@ -135,7 +142,17 @@ but one CPU at most, so a flood of logins cannot stall the games.
 
 **Connections.** At most 20 per address and 5,000 in all; one that has
 not logged in within 30 seconds is closed. Messages over 64 KB are
-refused.
+refused. WebRTC connection setups: 10 at once per address and 200 in all,
+each with at most 32 network addresses. HTTP requests time out after 30
+seconds.
+
+**Requests and CPU.** Once logged in, a player may make 60 requests at
+once, then 10 a second, across all their connections. Bot moves are
+computed on all but one CPU at most, so bot games played as fast as a
+script can go cannot slow everyone else.
+
+**Sessions.** Logging out ends the session on the server, and expired
+sessions are deleted hourly.
 
 **Games and invites, per player.**
 - 20 unfinished games, of which 5 against the computer, and 1 open game.
@@ -150,6 +167,10 @@ refused.
 leaves memory and is rebuilt from the database the moment anyone opens it
 or moves. Slow games, such as a move every few days, cost only their
 database rows, so memory follows how many people are playing right now.
+
+**Web page.** The server sends a Content-Security-Policy allowing only the
+page's own script, stylesheet and server, so injected markup could not run
+script.
 
 ## TURN (optional)
 

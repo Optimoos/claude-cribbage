@@ -8,7 +8,8 @@ client. See [docs/PLAN.md](docs/PLAN.md) for the milestone plan.
 ```sh
 cd server
 go test ./...                       # all tests
-go run ./cmd/cribserver             # web client on http://localhost:8080, TCP for bots on :7777
+go run ./cmd/cribserver             # web client on http://localhost:8080, TCP for bots on :7777 (both localhost only)
+go run ./cmd/cribserver -http :8080 # let other machines on the network play too
 go run ./cmd/cribserver -db ""      # in-memory only (nothing survives a restart)
 go run ./cmd/cribserver -model models-ft/best.bin   # also offer the "nn" bot
 go run ./cmd/cribserver -expert models-expert/expert.bin   # also offer the "expert" bots (three levels)
@@ -103,7 +104,7 @@ A model trained with a different encoding version is rejected when loaded.
 ## Web client and WebRTC
 
 Browse to `http://localhost:8080`, register, and play against a bot or another
-browser tab. The page uses WebRTC. A WebSocket at `/rtc` exchanges the SDP
+browser tab. The server listens on localhost only unless given `-http :8080`. The page uses WebRTC. A WebSocket at `/rtc` exchanges the SDP
 offer, answer and ICE candidates. After that, all traffic uses one reliable,
 ordered data channel labelled `cribbage`.
 
@@ -201,8 +202,8 @@ Set `GODOT` to the editor binary if it is not in the repo root.
 
 See [deploy/README.md](deploy/README.md): one VPS running `cribserver` under
 systemd behind Caddy for HTTPS, with UDP 7778 open for WebRTC, daily
-database backups (`-backup-dir`, `-backup-every`, `-backup-keep`) and
-login rate limits. The server stops cleanly on SIGINT or SIGTERM.
+database backups (`-backup-dir`, `-backup-every`, `-backup-keep`), rate
+limits and `-rtc-public-only`. The server stops cleanly on SIGINT or SIGTERM.
 
 ## Persistence
 

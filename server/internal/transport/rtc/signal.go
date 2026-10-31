@@ -1,18 +1,23 @@
 package rtc
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/coder/websocket"
 	"github.com/pion/ice/v4"
 	"github.com/pion/webrtc/v4"
+
+	"cribbage/internal/netkey"
 )
 
 // signal is one message on the signaling WebSocket.
@@ -73,16 +78,32 @@ func (s *signaler) candidate(ctx context.Context, c *webrtc.ICECandidate) {
 }
 
 // remoteCandidates queues candidates that arrive before the remote
-// description is set.
+// description is set. With keep set, it ignores candidates keep refuses,
+// and refuses more than maxCandidates in all.
 type remoteCandidates struct {
+	keep func(addr string) bool
+
 	mu      sync.Mutex
 	ready   bool
 	pending []webrtc.ICECandidateInit
+	count   int
 }
+
+// maxCandidates bounds the remote candidates one session may offer: a
+// browser sends a handful, and each one is an address we send probes to.
+const maxCandidates = 32
+
+var errTooManyCandidates = errors.New("too many ICE candidates")
 
 func (r *remoteCandidates) add(pc *webrtc.PeerConnection, c webrtc.ICECandidateInit) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.count++; r.count > maxCandidates {
+		return errTooManyCandidates
+	}
+	if r.keep != nil && !r.keep(candidateAddress(c.Candidate)) {
+		return nil
+	}
 	if !r.ready {
 		r.pending = append(r.pending, c)
 		return nil
@@ -101,6 +122,45 @@ func (r *remoteCandidates) described(pc *webrtc.PeerConnection) error {
 	}
 	r.pending = nil
 	return nil
+}
+
+// candidateAddress is the connection address of an ICE candidate line
+// ("candidate:foundation component protocol priority address port typ
+// ..."), or "" if it has none.
+func candidateAddress(line string) string {
+	line = strings.TrimPrefix(strings.TrimPrefix(line, "a="), "candidate:")
+	if f := strings.Fields(line); len(f) >= 6 {
+		return f[4]
+	}
+	return ""
+}
+
+// publicAddress reports whether a candidate's address is a public IP. It
+// refuses private, loopback and link-local addresses, which would let a
+// client make the server send probes into its own network, and mDNS names
+// (".local"), which only resolve on the client's network anyway.
+func publicAddress(addr string) bool {
+	return netkey.Public(net.ParseIP(addr))
+}
+
+// filterSDP drops the candidate lines of sdp whose address keep refuses,
+// and fails if there are more than maxCandidates.
+func filterSDP(sdp string, keep func(string) bool) (string, int, error) {
+	lines := strings.SplitAfter(sdp, "\n")
+	out := lines[:0]
+	n := 0
+	for _, l := range lines {
+		if strings.HasPrefix(l, "a=candidate:") {
+			if n++; n > maxCandidates {
+				return "", n, errTooManyCandidates
+			}
+			if keep != nil && !keep(candidateAddress(strings.TrimSpace(l))) {
+				continue
+			}
+		}
+		out = append(out, l)
+	}
+	return strings.Join(out, ""), n, nil
 }
 
 func readSignal(ctx context.Context, ws *websocket.Conn) (signal, error) {
@@ -126,7 +186,18 @@ type Options struct {
 	// ICEServers (e.g. "stun:stun.l.google.com:19302") are given to clients
 	// and used by the server.
 	ICEServers []string
-	Logger     *slog.Logger
+	// PublicOnly ignores clients' ICE candidates on private, loopback and
+	// link-local addresses, so a client cannot make the server probe its
+	// internal network. Set it on a server on the internet; leave it off
+	// to play on one machine or a LAN.
+	PublicOnly bool
+	// MaxSessions bounds connection setups in progress at once (default
+	// 200), and MaxSessionsPerAddr those from one address (default 10).
+	// Behind a reverse proxy on localhost, the address is the last
+	// X-Forwarded-For entry.
+	MaxSessions        int
+	MaxSessionsPerAddr int
+	Logger             *slog.Logger
 }
 
 // API holds WebRTC settings shared by all connections.
@@ -135,6 +206,13 @@ type API struct {
 	config webrtc.Configuration
 	log    *slog.Logger
 	mux    *ice.MultiUDPMuxDefault
+	keep   func(addr string) bool // remote candidates to use; nil for all
+
+	smu         sync.Mutex
+	sessions    int
+	byAddr      map[string]int
+	maxSessions int
+	maxPerAddr  int
 
 	// live counts accepted connections whose peer connection has not yet
 	// finished closing, so Close can let peers hear that we are going.
@@ -149,13 +227,23 @@ func NewAPI(o Options) (*API, error) {
 		o.Logger = slog.Default()
 	}
 	var se webrtc.SettingEngine
-	se.SetIncludeLoopbackCandidate(true) // lets a browser on the same machine connect
+	if !o.PublicOnly {
+		se.SetIncludeLoopbackCandidate(true) // lets a browser on the same machine connect
+	}
 	// Every protocol message is small. Advertise that, and bound what a
 	// peer can make us buffer (pion's defaults: 1 GiB messages, 1 MiB
 	// receive buffer); conn.go closes a peer that sends more anyway.
 	se.SetSCTPMaxMessageSize(maxMessage)
 	se.SetSCTPMaxReceiveBufferSize(4 * maxMessage)
-	a := &API{log: o.Logger}
+	a := &API{
+		log:         o.Logger,
+		byAddr:      map[string]int{},
+		maxSessions: cmp.Or(o.MaxSessions, 200),
+		maxPerAddr:  cmp.Or(o.MaxSessionsPerAddr, 10),
+	}
+	if o.PublicOnly {
+		a.keep = publicAddress
+	}
 	if o.UDPPort != 0 {
 		mux, err := ice.NewMultiUDPMuxFromPort(o.UDPPort, ice.UDPMuxFromPortWithLoopback())
 		if err != nil {
@@ -213,6 +301,12 @@ func (a *API) ClientConfig() map[string]any {
 // channel once it opens.
 func (a *API) Handler(onConn func(*Conn)) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		key := netkey.Of(clientIP(r))
+		if !a.startSession(key) {
+			http.Error(w, "too many connection attempts", http.StatusServiceUnavailable)
+			return
+		}
+		defer a.endSession(key)
 		// Any origin may connect: signaling grants nothing by itself, and
 		// clients still authenticate over the data channel.
 		ws, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
@@ -227,6 +321,49 @@ func (a *API) Handler(onConn func(*Conn)) http.Handler {
 		}
 		ws.Close(websocket.StatusNormalClosure, "")
 	})
+}
+
+// clientIP is the address of the client making r: the TCP peer, or, for a
+// request from a reverse proxy on this machine, the last address the proxy
+// added to X-Forwarded-For (earlier entries come from the client and could
+// be anything).
+func clientIP(r *http.Request) string {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return ""
+	}
+	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+		if xff := r.Header.Values("X-Forwarded-For"); len(xff) > 0 {
+			last := xff[len(xff)-1]
+			last = strings.TrimSpace(last[strings.LastIndex(last, ",")+1:])
+			if net.ParseIP(last) != nil {
+				return last
+			}
+		}
+	}
+	return host
+}
+
+// startSession counts a connection setup from key, unless that would pass
+// the limits.
+func (a *API) startSession(key string) bool {
+	a.smu.Lock()
+	defer a.smu.Unlock()
+	if a.sessions >= a.maxSessions || a.byAddr[key] >= a.maxPerAddr {
+		return false
+	}
+	a.sessions++
+	a.byAddr[key]++
+	return true
+}
+
+func (a *API) endSession(key string) {
+	a.smu.Lock()
+	defer a.smu.Unlock()
+	a.sessions--
+	if a.byAddr[key]--; a.byAddr[key] <= 0 {
+		delete(a.byAddr, key)
+	}
 }
 
 const signalTimeout = 30 * time.Second
@@ -263,7 +400,7 @@ func (a *API) answer(ctx context.Context, ws *websocket.Conn, onConn func(*Conn)
 	})
 	sig := &signaler{ws: ws}
 	pc.OnICECandidate(func(c *webrtc.ICECandidate) { sig.candidate(ctx, c) })
-	var remote remoteCandidates
+	remote := remoteCandidates{keep: a.keep}
 
 	errc := make(chan error, 1)
 	go func() {
@@ -275,7 +412,15 @@ func (a *API) answer(ctx context.Context, ws *websocket.Conn, onConn func(*Conn)
 			}
 			switch m.Type {
 			case "offer":
-				if err := pc.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeOffer, SDP: m.SDP}); err != nil {
+				sdp, n, err := filterSDP(m.SDP, a.keep)
+				if err != nil {
+					errc <- err
+					return
+				}
+				remote.mu.Lock()
+				remote.count += n
+				remote.mu.Unlock()
+				if err := pc.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeOffer, SDP: sdp}); err != nil {
 					errc <- err
 					return
 				}

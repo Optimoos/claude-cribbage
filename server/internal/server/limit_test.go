@@ -1,10 +1,12 @@
 package server
 
 import (
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -12,6 +14,8 @@ import (
 	"golang.org/x/crypto/bcrypt"
 
 	"cribbage/internal/auth"
+	"cribbage/internal/bots"
+	"cribbage/internal/engine"
 	"cribbage/internal/protocol/pb"
 	"cribbage/internal/store"
 	"cribbage/internal/transport/tcp"
@@ -242,5 +246,73 @@ func TestConnectionLimits(t *testing.T) {
 			t.Fatal("logged-in connection was closed")
 		}
 	case <-time.After(400 * time.Millisecond):
+	}
+}
+
+// Requests after login are limited per player, across connections.
+func TestActionRateLimit(t *testing.T) {
+	addr := startRemote(t, "203.0.113.20", AuthLimits{
+		AttemptsPerIP: 100, AttemptEvery: time.Hour,
+		RegistersPerIP: 10, RegisterEvery: time.Hour,
+		FailuresPerUser: 10, FailureEvery: time.Hour,
+		ActionsPerUser: 3, ActionEvery: time.Hour,
+	})
+	list := &pb.ClientMessage{Body: &pb.ClientMessage_ListGames{ListGames: &pb.ListGames{}}}
+	a := login(t, addr, "alice")
+	for i := 0; i < 2; i++ {
+		if a.next(t, replyTo(a.send(t, list))).GetGameList() == nil {
+			t.Fatalf("request %d refused", i)
+		}
+	}
+	b := login(t, addr, "alice") // a second connection shares the budget
+	if b.next(t, replyTo(b.send(t, list))).GetGameList() == nil {
+		t.Fatal("third request refused")
+	}
+	wantError(t, a.next(t, replyTo(a.send(t, list))), pb.ErrorCode_ERROR_CODE_RATE_LIMITED)
+	// Pings are not counted, and other players have their own budget.
+	if a.next(t, replyTo(a.send(t, &pb.ClientMessage{Body: &pb.ClientMessage_Ping{Ping: &pb.Ping{}}}))).GetPong() == nil {
+		t.Fatal("ping refused")
+	}
+	c := login(t, addr, "carol")
+	if c.next(t, replyTo(c.send(t, list))).GetGameList() == nil {
+		t.Fatal("another player refused")
+	}
+}
+
+// countingBot records how many bots are choosing at once.
+type countingBot struct{ now, peak *atomic.Int32 }
+
+func (countingBot) Name() string { return "counting" }
+func (b countingBot) Choose(o *engine.Observation, legal []engine.Action) engine.Action {
+	n := b.now.Add(1)
+	for p := b.peak.Load(); n > p && !b.peak.CompareAndSwap(p, n); p = b.peak.Load() {
+	}
+	time.Sleep(time.Millisecond)
+	b.now.Add(-1)
+	return legal[0]
+}
+
+// Bot decisions across all games are capped at BotMoves at a time.
+func TestBotMovesCapped(t *testing.T) {
+	var now, peak atomic.Int32
+	bots.Register("counting", func(uint64) bots.Bot { return countingBot{&now, &peak} })
+	l := *loadLimits
+	l.BotMoves = 2
+	_, addr := startServerWith(t, &l)
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			c := login(t, addr, fmt.Sprint("player", i))
+			u := c.next(t, replyTo(c.send(t, createGame("counting")))).GetGameUpdate()
+			for j := 0; j < 5 && u != nil && len(u.Legal) > 0; j++ {
+				u = c.next(t, replyTo(c.send(t, act(u.Game.GameId, u.Legal[0])))).GetGameUpdate()
+			}
+		}()
+	}
+	wg.Wait()
+	if p := peak.Load(); p > 2 || p < 2 {
+		t.Fatalf("peak concurrent bot moves %d, want 2", p)
 	}
 }

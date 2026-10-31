@@ -903,14 +903,80 @@ games per player of which 5 against the computer.
   other client accepted it later.
 - **Not tested:** the web client's invite UI in a browser.
 
-**Left for later** (review items 10–18):
-- a cap on concurrent bot CPU and per-connection action rates
-- signaling-session limits and filtering of private ICE candidates
-- skipping the startup backup when a recent one exists
-- hashing session tokens and deleting expired sessions
-- localhost defaults for `-http` and `-tcp`
-- HTTP read and write timeouts
-- the group-commit retry storm
-- WAL size
-- prebuilding the heuristic tables at startup
-- a CSP header
+**Left for later:** review items 10–18, done in M24.
+
+### M24: The review's remaining items
+
+**Built (2026-10-30):**
+- **Bot CPU (10).**
+  - Bot decisions run under a semaphore of GOMAXPROCS−1
+    (`GameLimits.BotMoves`), so scripted bot games cannot take every core.
+  - After login, each player gets 60 requests at once, then 10 a second,
+    across all their connections (`AuthLimits.ActionsPerUser`). Pings and
+    loopback connections are not counted.
+- **WebRTC setup (11).**
+  - At most 10 setups in progress per address and 200 in all
+    (`rtc.Options.MaxSessions*`). The address is the TCP peer, or the last
+    `X-Forwarded-For` entry when the peer is a proxy on localhost.
+  - At most 32 remote candidates per session, counting those in the offer.
+  - `-rtc-public-only` drops remote candidates on private, loopback,
+    link-local, CGNAT, documentation and reserved addresses, and mDNS
+    names. That covers trickled candidates and those inline in the SDP, and
+    the server stops offering its own loopback candidate. It is off by
+    default for local and LAN play; `deploy/cribbage.service` sets it.
+  - Address keys moved to `internal/netkey`.
+- **Backups (12).** At startup a backup is written only if the newest is
+  at least `-backup-every` old (`store.LastBackup` reads the file names).
+  The deploy unit keeps 7, not 14.
+- **Sessions (13).**
+  - SQLite stores SHA-256 hashes of tokens; schema migration 1
+    (`PRAGMA user_version`) hashes existing rows.
+  - Expired sessions are deleted by the hourly sweep.
+  - New `Logout` message: deletes the session, acks, closes the
+    connection. The web and Godot clients send it from "Log out".
+  - Tokens that are not 64 hex characters are refused before any lookup.
+- **Flags (14).** `-http` and `-tcp` default to `127.0.0.1`.
+- **HTTP (15).** Read 30 s, write 60 s, idle 2 min, 16 KB headers. The
+  `/rtc` WebSocket is hijacked, which clears these deadlines.
+- **Database (16).**
+  - A failed batch is retried once, in one transaction with a savepoint per
+    write, instead of once per write. Savepoints on every batch halved
+    throughput in `BenchmarkSQLiteCommitParallel`, so the fast path has
+    none.
+  - A game whose first save fails is recorded as finished, so it does not
+    come back after a restart.
+  - `journal_size_limit` 16 MB: the WAL still grows to about 80 MB between
+    checkpoints but shrinks back afterwards.
+- **Startup (17).** `bots.Prepare` builds the heuristic tables before
+  serving (about 50 ms on this machine).
+- **CSP (18).** The server sends `Content-Security-Policy` with
+  `default-src 'none'` and only `'self'` for script, style and connect, plus
+  `data:` images for the icon. The client needed no changes.
+
+**Verified:**
+- **Unit tests:**
+  - a failing write in a batch of 500 (4–5 transactions instead of about
+    500)
+  - an unsaved game start is not restored
+  - session deletion, expiry and token hashing, including the migration
+  - logout
+  - the request rate limit
+  - the bot move cap
+  - candidate filtering, SDP filtering and the candidate cap
+  - client addresses behind a proxy
+  - the setup limit
+  - finding the latest backup
+- **Race detector:** server, store, transport, auth and bots pass.
+- **Web client in headless Firefox (WebDriver BiDi):**
+  - two players register, one invites the other by username, the other
+    accepts, and both reach the game
+  - an invite code typed in lower case with a space works
+  - logging out makes the old token fail to resume
+  - an injected inline style and script are blocked; the page itself
+    logs no CSP violations or errors
+  - this showed invite rows cutting the sender's name to "Grand…", so the
+    name now has its own line above the time and buttons
+- **Godot:** builds. Its logout was not exercised.
+- **Load test fix:** WebRTC test connections can use the LAN address
+  rather than loopback, so they are rate limited; the load-test server
+  raises the request limit.

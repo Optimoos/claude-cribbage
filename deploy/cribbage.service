@@ -16,10 +16,10 @@ WorkingDirectory=/var/lib/cribbage
 ExecStart=/opt/cribbage/cribserver \
 	-http 127.0.0.1:8080 \
 	-tcp 127.0.0.1:7777 \
-	-rtc-port 7778 \
+	-rtc-port 7778 -rtc-public-only \
 	-db /var/lib/cribbage/cribbage.db \
 	-backup-dir /var/lib/cribbage/backups \
-	-backup-every 24h -backup-keep 14 \
+	-backup-every 24h -backup-keep 7 \
 	-expert /opt/cribbage/expert.bin \
 	-stats 5m
 Restart=always

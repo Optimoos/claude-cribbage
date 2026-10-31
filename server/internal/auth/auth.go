@@ -120,6 +120,9 @@ func (s *Service) dummyHash() []byte {
 
 // Resume authenticates with an existing session token.
 func (s *Service) Resume(ctx context.Context, token string) (*Result, error) {
+	if !validToken(token) {
+		return nil, ErrInvalidCredentials
+	}
 	id, err := s.Store.SessionUser(ctx, token)
 	if errors.Is(err, store.ErrNotFound) {
 		return nil, ErrInvalidCredentials
@@ -134,12 +137,37 @@ func (s *Service) Resume(ctx context.Context, token string) (*Result, error) {
 	return &Result{User: u, Token: token}, nil
 }
 
+// Logout ends a session.
+func (s *Service) Logout(ctx context.Context, token string) error {
+	if !validToken(token) {
+		return nil
+	}
+	return s.Store.DeleteSession(ctx, token)
+}
+
+// Prune deletes expired sessions and reports how many.
+func (s *Service) Prune(ctx context.Context) (int64, error) {
+	return s.Store.DeleteExpiredSessions(ctx, time.Now())
+}
+
+// tokenBytes is the size of a session token before hex encoding.
+const tokenBytes = 32
+
+// validToken reports whether t could be a token from newSession.
+func validToken(t string) bool {
+	if len(t) != 2*tokenBytes {
+		return false
+	}
+	_, err := hex.DecodeString(t)
+	return err == nil
+}
+
 func (s *Service) newSession(ctx context.Context, u *store.User) (*Result, error) {
 	ttl := s.SessionTTL
 	if ttl == 0 {
 		ttl = 30 * 24 * time.Hour
 	}
-	token := RandomID(32)
+	token := RandomID(tokenBytes)
 	if err := s.Store.CreateSession(ctx, token, u.ID, time.Now().Add(ttl)); err != nil {
 		return nil, err
 	}

@@ -57,18 +57,10 @@ func (s *SQLite) BackupTo(ctx context.Context, dir string, keep int) (string, er
 	if err := os.Rename(tmp, final); err != nil {
 		return "", err
 	}
-	entries, err := os.ReadDir(dir)
+	old, err := backupNames(dir)
 	if err != nil {
 		return final, err
 	}
-	var old []string
-	for _, e := range entries {
-		n := e.Name()
-		if !e.IsDir() && strings.HasPrefix(n, backupPrefix) && strings.HasSuffix(n, backupSuffix) {
-			old = append(old, n)
-		}
-	}
-	slices.Sort(old) // the names sort by time
 	for len(old) > max(keep, 1) {
 		if err := os.Remove(filepath.Join(dir, old[0])); err != nil {
 			return final, err
@@ -76,4 +68,37 @@ func (s *SQLite) BackupTo(ctx context.Context, dir string, keep int) (string, er
 		old = old[1:]
 	}
 	return final, nil
+}
+
+// backupNames lists the backups in dir, oldest first.
+func backupNames(dir string) ([]string, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	var names []string
+	for _, e := range entries {
+		n := e.Name()
+		if !e.IsDir() && strings.HasPrefix(n, backupPrefix) && strings.HasSuffix(n, backupSuffix) {
+			names = append(names, n)
+		}
+	}
+	slices.Sort(names) // the names sort by time
+	return names, nil
+}
+
+// LastBackup returns when the newest backup in dir was taken, from its
+// name, or the zero time if there is none.
+func LastBackup(dir string) time.Time {
+	names, err := backupNames(dir)
+	if err != nil {
+		return time.Time{}
+	}
+	for i := len(names) - 1; i >= 0; i-- {
+		stamp := strings.TrimSuffix(strings.TrimPrefix(names[i], backupPrefix), backupSuffix)
+		if t, err := time.Parse("20060102-150405", stamp); err == nil {
+			return t
+		}
+	}
+	return time.Time{}
 }

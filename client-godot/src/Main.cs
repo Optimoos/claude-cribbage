@@ -742,7 +742,12 @@ public partial class Main : Control
         games.Clear();
         invites.Clear();
         selected = null;
-        Connect(); // a fresh, unauthenticated connection
+        // End the session on the server too. It then closes the connection,
+        // and the reconnect comes up unauthenticated, since the token is gone.
+        if (conn == null || conn.Send(new ClientMessage { Logout = new Logout() }) == 0)
+        {
+            Connect(); // a fresh, unauthenticated connection
+        }
         ShowLogin(true);
         RenderAll();
     }

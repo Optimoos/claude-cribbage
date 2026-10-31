@@ -2,7 +2,9 @@ package store
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net/url"
@@ -93,6 +95,7 @@ type SQLite struct {
 	gcErr  atomic.Value // last garbage collection error (string)
 
 	batches, ops atomic.Int64
+	txs          atomic.Int64 // transactions begun, including retries
 }
 
 type liveGame struct {
@@ -131,6 +134,9 @@ func OpenSQLite(path string) (*SQLite, error) {
 	for _, p := range []string{
 		"journal_mode(WAL)", "synchronous(NORMAL)", "busy_timeout(10000)", "foreign_keys(ON)",
 		"cache_size(-65536)", "wal_autocheckpoint(20000)",
+		// The log grows to about 80 MB between checkpoints; shrink it back
+		// afterwards instead of keeping the file at its largest.
+		"journal_size_limit(16777216)",
 		// Only this process opens the database. Exclusive mode skips the
 		// per-transaction file locking and shared-memory index, which
 		// dominates commit cost on Windows.
@@ -148,6 +154,10 @@ func OpenSQLite(path string) (*SQLite, error) {
 	if _, err := db.Exec(schema); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("create schema: %w", err)
+	}
+	if err := migrate(db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate: %w", err)
 	}
 	ins, err := db.Prepare(`INSERT INTO action_log (game_id, seq, seat, kind, card0, card1) VALUES (?,?,?,?,?,?)`)
 	if err != nil {
@@ -291,8 +301,11 @@ func (s *SQLite) collect() error {
 	return err
 }
 
-// commit runs a batch in one transaction. If anything fails, each op is
-// retried in its own transaction so one bad write cannot fail the others.
+// commit runs a batch in one transaction. If anything fails, the batch
+// runs again in one more transaction with each op in its own savepoint, so
+// a failing op (a username already taken, say) is undone alone and the
+// rest still commit together. Savepoints on every batch would halve write
+// throughput.
 func (s *SQLite) commit(batch []*writeOp) {
 	err := s.runTx(func(tx *writeTx) error {
 		for _, op := range batch {
@@ -303,8 +316,28 @@ func (s *SQLite) commit(batch []*writeOp) {
 		return nil
 	})
 	if err != nil && len(batch) > 1 {
-		for _, op := range batch {
-			s.finish(op, s.runTx(op.fn))
+		errs := make([]error, len(batch))
+		err = s.runTx(func(tx *writeTx) error {
+			for i, op := range batch {
+				if _, err := tx.Exec(`SAVEPOINT op`); err != nil {
+					return err
+				}
+				if errs[i] = op.fn(tx); errs[i] != nil {
+					if _, err := tx.Exec(`ROLLBACK TO op`); err != nil {
+						return err // e.g. SQLite already rolled the transaction back
+					}
+				}
+				if _, err := tx.Exec(`RELEASE op`); err != nil {
+					return err
+				}
+			}
+			return nil
+		})
+		for i, op := range batch {
+			if err != nil {
+				errs[i] = err
+			}
+			s.finish(op, errs[i])
 		}
 		return
 	}
@@ -321,6 +354,7 @@ func (s *SQLite) finish(op *writeOp, err error) {
 }
 
 func (s *SQLite) runTx(fn func(*writeTx) error) error {
+	s.txs.Add(1)
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
@@ -396,9 +430,17 @@ func (s *SQLite) UserByID(ctx context.Context, id int64) (*User, error) {
 	return s.scanUser(s.db.QueryRowContext(ctx, `SELECT `+userCols+` FROM users WHERE id = ?`, id))
 }
 
+// Sessions are stored by a SHA-256 of their token, so a copy of the
+// database (a backup, say) holds no usable tokens. Tokens are random, so an
+// unsalted hash is enough.
+func tokenKey(token string) string {
+	h := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(h[:])
+}
+
 func (s *SQLite) CreateSession(ctx context.Context, token string, userID int64, expires time.Time) error {
 	return s.write(ctx, func(tx *writeTx) error {
-		_, err := tx.Exec(`INSERT INTO sessions (token, user_id, expires) VALUES (?, ?, ?)`, token, userID, expires.UnixMilli())
+		_, err := tx.Exec(`INSERT INTO sessions (token, user_id, expires) VALUES (?, ?, ?)`, tokenKey(token), userID, expires.UnixMilli())
 		return err
 	}, nil)
 }
@@ -406,11 +448,76 @@ func (s *SQLite) CreateSession(ctx context.Context, token string, userID int64, 
 func (s *SQLite) SessionUser(ctx context.Context, token string) (int64, error) {
 	var id int64
 	err := s.db.QueryRowContext(ctx, `SELECT user_id FROM sessions WHERE token = ? AND expires > ?`,
-		token, time.Now().UnixMilli()).Scan(&id)
+		tokenKey(token), time.Now().UnixMilli()).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, ErrNotFound
 	}
 	return id, err
+}
+
+func (s *SQLite) DeleteSession(ctx context.Context, token string) error {
+	return s.write(ctx, func(tx *writeTx) error {
+		_, err := tx.Exec(`DELETE FROM sessions WHERE token = ?`, tokenKey(token))
+		return err
+	}, nil)
+}
+
+func (s *SQLite) DeleteExpiredSessions(ctx context.Context, t time.Time) (int64, error) {
+	var n int64
+	err := s.write(ctx, func(tx *writeTx) error {
+		res, err := tx.Exec(`DELETE FROM sessions WHERE expires < ?`, t.UnixMilli())
+		if err != nil {
+			return err
+		}
+		n, err = res.RowsAffected()
+		return err
+	}, nil)
+	return n, err
+}
+
+// migrate brings an older database up to date. PRAGMA user_version counts
+// the migrations applied:
+//
+//	1: session tokens are stored hashed (they were stored as issued).
+func migrate(db *sql.DB) error {
+	var v int
+	if err := db.QueryRow(`PRAGMA user_version`).Scan(&v); err != nil {
+		return err
+	}
+	if v >= 1 {
+		return nil
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	rows, err := tx.Query(`SELECT token FROM sessions`)
+	if err != nil {
+		return err
+	}
+	var tokens []string
+	for rows.Next() {
+		var t string
+		if err := rows.Scan(&t); err != nil {
+			rows.Close()
+			return err
+		}
+		tokens = append(tokens, t)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, t := range tokens {
+		if _, err := tx.Exec(`UPDATE sessions SET token = ? WHERE token = ?`, tokenKey(t), t); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.Exec(`PRAGMA user_version = 1`); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func boolInt(b bool) int {

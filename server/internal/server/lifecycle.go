@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"fmt"
 	"time"
 
@@ -123,9 +124,20 @@ func (s *Server) sweep() {
 		case now := <-t.C:
 			s.expireGames(now)
 			s.expireInvites(now)
+			s.pruneSessions()
 		case <-s.quit:
 			return
 		}
+	}
+}
+
+func (s *Server) pruneSessions() {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	if n, err := s.auth.Prune(ctx); err != nil {
+		s.log.Error("delete expired sessions", "err", err)
+	} else if n > 0 {
+		s.log.Info("deleted expired sessions", "count", n)
 	}
 }
 

@@ -117,6 +117,26 @@ func (m *Memory) SessionUser(_ context.Context, token string) (int64, error) {
 	return s.userID, nil
 }
 
+func (m *Memory) DeleteSession(_ context.Context, token string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.sessions, token)
+	return nil
+}
+
+func (m *Memory) DeleteExpiredSessions(_ context.Context, t time.Time) (int64, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var n int64
+	for k, s := range m.sessions {
+		if s.expires.Before(t) {
+			delete(m.sessions, k)
+			n++
+		}
+	}
+	return n, nil
+}
+
 func (m *Memory) CreateGame(_ context.Context, g *Game) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()

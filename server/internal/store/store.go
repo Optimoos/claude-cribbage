@@ -35,6 +35,12 @@ type Store interface {
 	CreateSession(ctx context.Context, token string, userID int64, expires time.Time) error
 	// SessionUser returns the user ID for a valid, unexpired token.
 	SessionUser(ctx context.Context, token string) (int64, error)
+	// DeleteSession ends a session; deleting an unknown token is not an
+	// error.
+	DeleteSession(ctx context.Context, token string) error
+	// DeleteExpiredSessions removes sessions that expired before t and
+	// reports how many.
+	DeleteExpiredSessions(ctx context.Context, t time.Time) (int64, error)
 }
 
 // Game status values; they match the wire protocol's GameStatus.

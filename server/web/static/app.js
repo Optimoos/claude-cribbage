@@ -1310,7 +1310,12 @@ $('login-form').onsubmit = ev => {
 
 $('logout').onclick = () => {
   localStorage.removeItem('token');
-  location.reload();
+  // End the session on the server too. It closes the connection once it
+  // has; reload then, or after a moment if that never comes.
+  const reload = () => location.reload();
+  if (!conn.send({ logout: {} })) return reload();
+  conn.dc.addEventListener('close', reload);
+  setTimeout(reload, 1500);
 };
 
 for (const b of document.querySelectorAll('[data-create]')) {

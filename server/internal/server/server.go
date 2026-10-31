@@ -11,6 +11,7 @@ import (
 	"math/rand/v2"
 	"net"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -20,6 +21,7 @@ import (
 
 	"cribbage/internal/auth"
 	"cribbage/internal/bots"
+	"cribbage/internal/netkey"
 	"cribbage/internal/protocol/pb"
 	"cribbage/internal/store"
 	"cribbage/internal/transport/tcp"
@@ -65,6 +67,11 @@ type GameLimits struct {
 	BotIdle    time.Duration // a game against a bot with no move expires
 	SleepAfter time.Duration // a game with no activity leaves memory
 	SweepEvery time.Duration // how often to look for expired games and invites
+
+	// BotMoves is how many bot decisions may be computed at once (default
+	// GOMAXPROCS-1), so bot games played as fast as a script can send
+	// moves cannot take every core.
+	BotMoves int
 }
 
 // DefaultGameLimits suit slow family games: up to 20 games each, games
@@ -100,16 +107,24 @@ type AuthLimits struct {
 	// Hashing is how many bcrypt operations may run at once (default
 	// GOMAXPROCS-1), so a flood of logins cannot starve the games.
 	Hashing int
+	// Requests after logging in: ActionsPerUser at once, then one more
+	// every ActionEvery, across all of a player's connections. Zero uses
+	// the default.
+	ActionsPerUser int
+	ActionEvery    time.Duration
 }
 
 // DefaultAuthLimits allows 20 quick attempts per address then 10 a minute,
 // 5 registrations then 5 an hour, and 10 failed logins per username from
-// one address then 1 a minute. IPv6 addresses count by their /64.
+// one address then 1 a minute. IPv6 addresses count by their /64. A player
+// may make 60 requests at once, then 10 a second: far more than anyone
+// clicking, but it bounds a script.
 var DefaultAuthLimits = AuthLimits{
 	AttemptsPerIP: 20, AttemptEvery: 6 * time.Second,
 	RegistersPerIP: 5, RegisterEvery: 12 * time.Minute,
 	FailuresPerUser: 10, FailureEvery: time.Minute,
 	ConnsPerAddr: 20, Conns: 5000, LoginWithin: 30 * time.Second,
+	ActionsPerUser: 60, ActionEvery: 100 * time.Millisecond,
 }
 
 // Server routes client requests to game actors.
@@ -139,6 +154,8 @@ type Server struct {
 
 	attempts, registers, failures *limiter
 	hashing                       chan struct{}
+	actions                       *limiter      // requests per user, once logged in
+	botMoves                      chan struct{} // bot decisions in progress
 
 	limits  GameLimits
 	authLim AuthLimits // connection limits (cmu guards connsByAddr)
@@ -185,11 +202,19 @@ func New(cfg Config) *Server {
 	if lim.Hashing <= 0 {
 		lim.Hashing = max(1, runtime.GOMAXPROCS(0)-1) // leave a core for the games
 	}
+	if lim.ActionsPerUser <= 0 {
+		lim.ActionsPerUser, lim.ActionEvery = DefaultAuthLimits.ActionsPerUser, DefaultAuthLimits.ActionEvery
+	}
+	if gl.BotMoves <= 0 {
+		gl.BotMoves = max(1, runtime.GOMAXPROCS(0)-1) // leave a core for everything else
+	}
 	s := &Server{
 		attempts:    newLimiter(lim.AttemptsPerIP, lim.AttemptEvery),
 		registers:   newLimiter(lim.RegistersPerIP, lim.RegisterEvery),
 		failures:    newLimiter(lim.FailuresPerUser, lim.FailureEvery),
 		hashing:     make(chan struct{}, lim.Hashing),
+		actions:     newLimiter(lim.ActionsPerUser, lim.ActionEvery),
+		botMoves:    make(chan struct{}, gl.BotMoves),
 		limits:      gl,
 		authLim:     lim,
 		connsByAddr: map[string]int{},
@@ -348,6 +373,10 @@ func (s *Server) handle(c *Conn, m *pb.ClientMessage) {
 		c.sendError(id, pb.ErrorCode_ERROR_CODE_UNAUTHENTICATED, "", "log in first")
 		return
 	}
+	if limited(c) && !s.actions.take(c.userKey, time.Now()) {
+		c.sendError(id, pb.ErrorCode_ERROR_CODE_RATE_LIMITED, "", "too many requests; slow down")
+		return
+	}
 	switch b := m.Body.(type) {
 	case *pb.ClientMessage_CreateGame:
 		s.createGame(c, id, b.CreateGame.Bot)
@@ -371,6 +400,17 @@ func (s *Server) handle(c *Conn, m *pb.ClientMessage) {
 		s.withGame(c, id, b.SyncGame.GameId, func(g *game) { g.sync(c, id) })
 	case *pb.ClientMessage_Act:
 		s.withGame(c, id, b.Act.GameId, func(g *game) { g.act(c, id, b.Act.Action) })
+	case *pb.ClientMessage_Logout:
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		err := s.auth.Logout(ctx, c.token)
+		cancel()
+		if err != nil {
+			s.log.Error("logout", "user", c.user.ID, "err", err)
+			c.sendError(id, pb.ErrorCode_ERROR_CODE_INTERNAL, "", "internal error")
+			return
+		}
+		c.send(&pb.ServerMessage{RequestId: id, Body: &pb.ServerMessage_Ack{Ack: &pb.Ack{}}})
+		c.drainAndClose()
 	case *pb.ClientMessage_SendInvite:
 		s.sendInvite(c, id, b.SendInvite.Username)
 	case *pb.ClientMessage_RespondInvite:
@@ -404,19 +444,8 @@ func limited(c *Conn) bool {
 	return ip == nil || !ip.IsLoopback()
 }
 
-// addrKey is the limiter key for an address: IPv4 addresses as they are,
-// IPv6 by their /64, since one household or server usually has a whole /64.
-func addrKey(addr string) string {
-	ip := net.ParseIP(addr)
-	switch {
-	case ip == nil:
-		return "unknown"
-	case ip.To4() != nil:
-		return ip.String()
-	default:
-		return ip.Mask(net.CIDRMask(64, 128)).String() + "/64"
-	}
-}
+// addrKey is the limiter key for an address (IPv6 by its /64).
+func addrKey(addr string) string { return netkey.Of(addr) }
 
 // allowAuth checks the rate limits for a login (to user) or registration,
 // sending an error if c is over them.
@@ -470,7 +499,7 @@ func (s *Server) authenticate(c *Conn, id uint32, fn func(context.Context) (*aut
 		c.sendError(id, pb.ErrorCode_ERROR_CODE_INTERNAL, "", "internal error")
 		return
 	}
-	c.user = res.User
+	c.user, c.token, c.userKey = res.User, res.Token, strconv.FormatInt(res.User.ID, 10)
 	c.authed.Store(true)
 	s.registerConn(c)
 	c.send(&pb.ServerMessage{RequestId: id, Body: &pb.ServerMessage_AuthOk{AuthOk: &pb.AuthOk{

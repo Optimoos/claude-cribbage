@@ -359,8 +359,14 @@ func (g *game) start(replies ...reply) {
 	events := protocol.AppendEvents(nil, g.eng.Events())
 	events = g.driveBots(events)
 	if !g.commit(snap, events, replies...) {
-		// A game that cannot be saved cannot be played; drop it.
+		// A game that cannot be saved cannot be played; drop it, and try to
+		// record that so it does not come back after a restart.
 		g.status = pb.GameStatus_GAME_STATUS_FINISHED
+		g.winner = -1
+		g.dirty = true
+		if err := g.save(); err != nil {
+			g.srv.log.Error("could not cancel unsaved game", "game", g.id, "err", err)
+		}
 		return
 	}
 	g.srv.stats.gamesStarted.Add(1)
@@ -462,6 +468,8 @@ func (g *game) choose(b bots.Bot, p int) (a engine.Action, err error) {
 			err = fmt.Errorf("bot panicked: %v", r)
 		}
 	}()
+	g.srv.botMoves <- struct{}{}
+	defer func() { <-g.srv.botMoves }()
 	return b.Choose(&g.obs, g.legal), nil
 }
 

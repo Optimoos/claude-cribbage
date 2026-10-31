@@ -245,6 +245,8 @@ main {
 .invite-row > .btn:only-child { flex: 1; }
 .invites li { cursor: default; flex-wrap: wrap; row-gap: .3rem; background: var(--surface-2); border-color: var(--line); }
 .invites li.incoming { box-shadow: inset 3px 0 0 var(--accent); }
+/* The name gets its own line; time left and the buttons go below it. */
+.games.invites li .name { flex: 1 0 100%; white-space: normal; }
 .invites .when { color: var(--muted); font-size: .8rem; }
 .invites .code { font: 700 1.05rem/1 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .08em; user-select: all; cursor: text; }
 .invites .acts { display: flex; gap: .35rem; margin-left: auto; }

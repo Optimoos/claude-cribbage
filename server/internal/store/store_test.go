@@ -58,7 +58,63 @@ func TestUsersAndSessions(t *testing.T) {
 		if _, err := s.SessionUser(ctx, "old"); !errors.Is(err, ErrNotFound) {
 			t.Fatalf("expired session: %v", err)
 		}
+		if n, err := s.DeleteExpiredSessions(ctx, time.Now()); err != nil || n != 1 {
+			t.Fatalf("deleting expired sessions: %d, %v", n, err)
+		}
+		if err := s.DeleteSession(ctx, "tok"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.SessionUser(ctx, "tok"); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("deleted session: %v", err)
+		}
+		if err := s.DeleteSession(ctx, "never"); err != nil {
+			t.Fatalf("deleting an unknown session: %v", err)
+		}
 	})
+}
+
+// The database holds hashes of session tokens, and a database from before
+// that has its tokens hashed when opened.
+func TestSQLiteSessionTokensHashed(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "s.db")
+	s, err := OpenSQLite(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	u := &User{Username: "alice", Nickname: "A", PasswordHash: []byte("h"), Created: time.Now()}
+	if err := s.CreateUser(ctx, u); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreateSession(ctx, "new-token", u.ID, time.Now().Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	var stored string
+	if err := s.db.QueryRow(`SELECT token FROM sessions`).Scan(&stored); err != nil || stored == "new-token" || len(stored) != 64 {
+		t.Fatalf("stored token %q, %v", stored, err)
+	}
+	// An old database: a token stored as issued, schema version 0.
+	if _, err := s.db.Exec(`INSERT INTO sessions (token, user_id, expires) VALUES ('old-token', ?, ?)`,
+		u.ID, time.Now().Add(time.Hour).UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`PRAGMA user_version = 0`); err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+
+	s, err = OpenSQLite(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if id, err := s.SessionUser(ctx, "old-token"); err != nil || id != u.ID {
+		t.Fatalf("old session after migration: %d, %v", id, err)
+	}
+	var n int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM sessions WHERE token = 'old-token'`).Scan(&n); err != nil || n != 0 {
+		t.Fatalf("old token still stored as issued: %d, %v", n, err)
+	}
 }
 
 func play(seat int, c engine.Card) engine.Action { return engine.Play(c) }
@@ -340,5 +396,51 @@ func TestSQLiteLogCollection(t *testing.T) {
 	}
 	if n := countLog(t, s); n != 5 {
 		t.Fatalf("after second collect: %d rows", n)
+	}
+}
+
+// A failing write in a batch fails alone, and costs one retry transaction
+// rather than one per write in the batch.
+func TestSQLiteBatchFailure(t *testing.T) {
+	s, err := OpenSQLite(filepath.Join(t.TempDir(), "s.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	ctx := context.Background()
+	user := func(name string) error {
+		return s.CreateUser(ctx, &User{Username: name, Nickname: name, PasswordHash: []byte("h"), Created: time.Now()})
+	}
+	if err := user("dup"); err != nil {
+		t.Fatal(err)
+	}
+	before := s.txs.Load()
+	const n = 500
+	errs := make([]error, n)
+	var wg sync.WaitGroup
+	for i := range n {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			name := fmt.Sprint("u", i)
+			if i%50 == 0 {
+				name = "DUP"
+			}
+			errs[i] = user(name)
+		}()
+	}
+	wg.Wait()
+	for i, err := range errs {
+		if want := i%50 == 0; errors.Is(err, ErrUsernameTaken) != want || (!want && err != nil) {
+			t.Fatalf("write %d: %v", i, err)
+		}
+		if i%50 != 0 {
+			if _, err := s.UserByUsername(ctx, fmt.Sprint("u", i)); err != nil {
+				t.Fatalf("user %d not saved: %v", i, err)
+			}
+		}
+	}
+	if txs := s.txs.Load() - before; txs > n/5 {
+		t.Fatalf("%d transactions for %d writes", txs, n)
 	}
 }

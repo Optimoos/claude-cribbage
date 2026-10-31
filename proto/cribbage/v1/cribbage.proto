@@ -20,6 +20,7 @@ message ClientMessage {
     Register register = 10;
     Login login = 11;
     Resume resume = 12;
+    Logout logout = 13;
     CreateGame create_game = 20;
     JoinGame join_game = 21;
     ListGames list_games = 22;
@@ -50,6 +51,10 @@ message Login {
 message Resume {
   string token = 1;
 }
+
+// Logout ends this connection's session: its token stops working. The
+// server acknowledges, then closes the connection.
+message Logout {}
 
 message CreateGame {
   // Name of a server-side bot opponent ("random", "heuristic", or "nn" when

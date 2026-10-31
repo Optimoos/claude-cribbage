@@ -40,10 +40,15 @@ func startServer(t *testing.T) (*Server, string) {
 
 func startServerWith(t *testing.T, limits *GameLimits) (*Server, string) {
 	t.Helper()
+	// WebRTC test connections may come from a LAN address rather than
+	// loopback, so they are rate limited: allow load tests' bursts.
+	al := DefaultAuthLimits
+	al.ActionsPerUser = 1 << 20
 	srv := New(Config{
 		Auth:       &auth.Service{Store: store.NewMemory(), BcryptCost: bcrypt.MinCost},
 		Logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
 		GameLimits: limits,
+		AuthLimits: &al,
 	})
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -418,6 +423,33 @@ func TestResumeOnNewConnection(t *testing.T) {
 	e := connect(t, addr)
 	if _, err := e.Resume("nope"); !errors.As(err, &se) {
 		t.Fatalf("bad token accepted: %v", err)
+	}
+}
+
+// Logging out ends the session: the server closes the connection and the
+// token no longer resumes.
+func TestLogout(t *testing.T) {
+	_, addr := startServer(t)
+	a := login(t, addr, "alice")
+	if a.next(t, replyTo(a.send(t, &pb.ClientMessage{Body: &pb.ClientMessage_Logout{Logout: &pb.Logout{}}}))).GetAck() == nil {
+		t.Fatal("logout not acknowledged")
+	}
+	select {
+	case _, ok := <-a.msgs:
+		for ok {
+			_, ok = <-a.msgs
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("connection kept open after logout")
+	}
+	var se client.ServerError
+	if _, err := connect(t, addr).Resume(a.auth.Token); !errors.As(err, &se) {
+		t.Fatalf("token resumed after logout: %v", err)
+	}
+	// Other sessions of the same user still work.
+	b := login(t, addr, "alice")
+	if _, err := connect(t, addr).Resume(b.auth.Token); err != nil {
+		t.Fatal(err)
 	}
 }
 

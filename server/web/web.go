@@ -23,10 +23,19 @@ func Handler(dir string) http.Handler {
 	return noCache(http.FileServer(http.FS(sub)))
 }
 
+// csp lets the page load only its own script and stylesheet and talk only
+// to its own server (fetch and the signaling WebSocket; 'self' covers ws:
+// and wss: to the same host). The icon is a data: URL. Nothing needs
+// inline script or style attributes, so injected markup could not run or
+// restyle anything. WebRTC is not covered by CSP.
+const csp = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; " +
+	"connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+
 // noCache keeps browsers from running a stale client after an upgrade.
 func noCache(h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Content-Security-Policy", csp)
 		h.ServeHTTP(w, r)
 	})
 }

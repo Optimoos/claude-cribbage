@@ -1,15 +1,25 @@
 package server
 
 import (
+	"context"
+	"errors"
+	"io"
+	"log/slog"
+	"net"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"golang.org/x/crypto/bcrypt"
+
 	"google.golang.org/protobuf/proto"
 
+	"cribbage/internal/auth"
 	"cribbage/internal/bots"
 	"cribbage/internal/engine"
 	"cribbage/internal/protocol/pb"
+	"cribbage/internal/store"
 )
 
 func createGame(bot string) *pb.ClientMessage {
@@ -221,5 +231,46 @@ func TestCommandPanicReloads(t *testing.T) {
 	}
 	if a.next(t, replyTo(a.send(t, act(id, s.Legal[0])))).GetGameUpdate() == nil {
 		t.Fatal("game not playable after reload")
+	}
+}
+
+// failingActions is a store whose writes of actions fail while fail is
+// set; header-only writes still succeed.
+type failingActions struct {
+	*store.Memory
+	fail atomic.Bool
+}
+
+func (f *failingActions) CommitGame(ctx context.Context, id string, g *store.Game, acts []store.Action) error {
+	if f.fail.Load() && len(acts) > 0 {
+		return errors.New("disk on fire")
+	}
+	return f.Memory.CommitGame(ctx, id, g, acts)
+}
+
+// A game whose first deal cannot be saved is recorded as finished, so it
+// does not come back after a restart.
+func TestUnsavedStartIsCancelled(t *testing.T) {
+	games := &failingActions{Memory: store.NewMemory()}
+	srv := New(Config{
+		Auth:       &auth.Service{Store: store.NewMemory(), BcryptCost: bcrypt.MinCost},
+		Games:      games,
+		Logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
+		GameLimits: loadLimits,
+	})
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	go srv.ServeTCP(ln)
+	t.Cleanup(func() { ln.Close() })
+	a := login(t, ln.Addr().String(), "alice")
+
+	games.fail.Store(true)
+	wantError(t, a.next(t, replyTo(a.send(t, createGame("random")))), pb.ErrorCode_ERROR_CODE_INTERNAL)
+	games.fail.Store(false)
+	left, err := games.LoadUnfinished(context.Background())
+	if err != nil || len(left) != 0 {
+		t.Fatalf("unfinished games after a failed start: %v, %v", left, err)
 	}
 }

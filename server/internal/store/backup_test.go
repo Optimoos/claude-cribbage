@@ -63,3 +63,21 @@ func TestBackupTo(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestLastBackup(t *testing.T) {
+	dir := t.TempDir()
+	if got := LastBackup(dir); !got.IsZero() {
+		t.Fatalf("empty dir: %v", got)
+	}
+	if got := LastBackup(filepath.Join(dir, "missing")); !got.IsZero() {
+		t.Fatalf("missing dir: %v", got)
+	}
+	for _, n := range []string{"cribbage-20240101-000000.db", "cribbage-20250607-080910.db", "cribbage-20260101-000000.db.tmp"} {
+		if err := os.WriteFile(filepath.Join(dir, n), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got, want := LastBackup(dir), time.Date(2025, 6, 7, 8, 9, 10, 0, time.UTC); !got.Equal(want) {
+		t.Fatalf("LastBackup = %v, want %v", got, want)
+	}
+}

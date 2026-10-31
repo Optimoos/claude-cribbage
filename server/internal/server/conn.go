@@ -22,9 +22,11 @@ type Conn struct {
 
 	// user is set once by the reader goroutine during authentication, before
 	// the connection is registered or used in any game command.
-	user   *store.User
-	authed atomic.Bool // user is set (readable from other goroutines)
-	addr   string      // limiter key of a remote address; "" if not limited
+	user    *store.User
+	token   string      // the session token, for Logout
+	userKey string      // user ID as a limiter key
+	authed  atomic.Bool // user is set (readable from other goroutines)
+	addr    string      // limiter key of a remote address; "" if not limited
 }
 
 func (c *Conn) send(m *pb.ServerMessage) {

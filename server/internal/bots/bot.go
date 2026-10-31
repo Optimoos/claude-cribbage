@@ -59,3 +59,10 @@ func (r *Random) Name() string { return "random" }
 func (r *Random) Choose(_ *engine.Observation, legal []engine.Action) engine.Action {
 	return legal[r.rng.IntN(len(legal))]
 }
+
+// Prepare builds the heuristic bots' lookup tables (about 0.3 s of CPU),
+// which otherwise happens during the first game that needs them.
+func Prepare() {
+	cribOnce.Do(buildCribTable)
+	h2Once.Do(buildH2)
+}

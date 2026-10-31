@@ -29,11 +29,12 @@ import (
 )
 
 func main() {
-	tcpAddr := flag.String("tcp", ":7777", "TCP listen address for headless clients")
-	httpAddr := flag.String("http", ":8080", "HTTP address for the web client and WebRTC signaling (empty disables)")
+	tcpAddr := flag.String("tcp", "127.0.0.1:7777", "TCP listen address for headless clients (unencrypted and not rate limited from localhost; keep it private)")
+	httpAddr := flag.String("http", "127.0.0.1:8080", "HTTP address for the web client and WebRTC signaling (empty disables; :8080 for other machines on the network)")
 	webDir := flag.String("web-dir", "", "serve the web client from this directory instead of the embedded copy")
 	rtcPort := flag.Int("rtc-port", 7778, "UDP port for all WebRTC traffic (0 picks a port per connection)")
 	publicIPs := flag.String("public-ip", "", "comma-separated public IPs to advertise for WebRTC (servers behind 1:1 NAT)")
+	rtcPublic := flag.Bool("rtc-public-only", false, "ignore WebRTC candidates on private and loopback addresses (set on an internet server; leave off for one machine or a LAN)")
 	iceServers := flag.String("ice-servers", "", "comma-separated STUN/TURN URLs for WebRTC, e.g. stun:stun.l.google.com:19302")
 	dbPath := flag.String("db", "cribbage.db", "SQLite database file; empty keeps everything in memory")
 	statsEvery := flag.Duration("stats", 10*time.Second, "log statistics at this interval (0 disables)")
@@ -41,7 +42,7 @@ func main() {
 	pprofAddr := flag.String("pprof", "", "serve net/http/pprof on this address (e.g. localhost:6060)")
 	model := flag.String("model", "", "neural network model to offer as the \"nn\" bot (e.g. models/best.bin)")
 	backupDir := flag.String("backup-dir", "", "write database backups here (empty disables)")
-	backupEvery := flag.Duration("backup-every", 24*time.Hour, "how often to back up the database (also once at startup)")
+	backupEvery := flag.Duration("backup-every", 24*time.Hour, "how often to back up the database (also at startup, unless the last backup is more recent)")
 	backupKeep := flag.Int("backup-keep", 7, "how many backups to keep")
 	expertPath := flag.String("expert", "", "expert bundle to offer as the \"expert\" bots (e.g. models-expert/expert.bin)")
 	flag.Parse()
@@ -75,6 +76,10 @@ func main() {
 			"discard_tables", b.Discard != nil, "opponent_model", b.KeepTemp[0] > 0)
 	}
 
+	start := time.Now()
+	bots.Prepare()
+	log.Info("built bot tables", "took", time.Since(start).Round(time.Millisecond))
+
 	var users store.Store
 	var games store.GameStore
 	var sq *store.SQLite
@@ -95,7 +100,7 @@ func main() {
 		Games:  games,
 		Logger: log,
 	})
-	start := time.Now()
+	start = time.Now()
 	n, err := srv.Restore(context.Background())
 	if err != nil {
 		fail("restore games", err)
@@ -120,6 +125,7 @@ func main() {
 			UDPPort:    *rtcPort,
 			PublicIPs:  splitList(*publicIPs),
 			ICEServers: splitList(*iceServers),
+			PublicOnly: *rtcPublic,
 			Logger:     log,
 		})
 		if err != nil {
@@ -136,7 +142,16 @@ func main() {
 			json.NewEncoder(w).Encode(bots.Names())
 		})
 		mux.Handle("/", web.Handler(*webDir))
-		httpSrv = &http.Server{Addr: *httpAddr, Handler: mux, ReadHeaderTimeout: 10 * time.Second}
+		// Requests are small, and /rtc's WebSocket is hijacked, which clears
+		// these deadlines.
+		httpSrv = &http.Server{
+			Addr: *httpAddr, Handler: mux,
+			ReadHeaderTimeout: 10 * time.Second,
+			ReadTimeout:       30 * time.Second,
+			WriteTimeout:      60 * time.Second,
+			IdleTimeout:       2 * time.Minute,
+			MaxHeaderBytes:    16 << 10,
+		}
 		hl, err := net.Listen("tcp", *httpAddr)
 		if err != nil {
 			fail("listen http", err)
@@ -188,13 +203,26 @@ func main() {
 	}
 }
 
-// backups writes a database backup now and then every interval until stop
-// is closed.
+// backups writes a database backup every interval until stop is closed,
+// starting now unless a backup was taken less than an interval ago (so a
+// crash loop does not write one at every start).
 func backups(log *slog.Logger, sq *store.SQLite, dir string, every time.Duration, keep int, stop, done chan struct{}) {
 	defer close(done)
-	t := time.NewTicker(every)
+	wait := time.Duration(0)
+	if last := store.LastBackup(dir); !last.IsZero() {
+		wait = max(0, every-time.Since(last))
+		if wait > 0 {
+			log.Info("recent database backup", "taken", last.Local().Format(time.DateTime), "next_in", wait.Round(time.Minute))
+		}
+	}
+	t := time.NewTimer(wait)
 	defer t.Stop()
 	for {
+		select {
+		case <-t.C:
+		case <-stop:
+			return
+		}
 		start := time.Now()
 		path, err := sq.BackupTo(context.Background(), dir, keep)
 		if err != nil {
@@ -202,11 +230,7 @@ func backups(log *slog.Logger, sq *store.SQLite, dir string, every time.Duration
 		} else {
 			log.Info("database backed up", "path", path, "took", time.Since(start).Round(time.Millisecond))
 		}
-		select {
-		case <-t.C:
-		case <-stop:
-			return
-		}
+		t.Reset(every)
 	}
 }
 
