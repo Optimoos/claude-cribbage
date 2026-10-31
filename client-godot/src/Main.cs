@@ -23,6 +23,11 @@ public partial class Main : Control
     readonly HashSet<uint> picked = new();
     bool awaiting; // an action was sent and its update has not come back
     List<string> bots = new() { "heuristic", "random" };
+    string statusText = "";
+    bool loginShown;
+
+    // Everything below is rebuilt when the theme changes.
+    Control ui = null!;
 
     // Login
     Control loginView = null!;
@@ -33,20 +38,21 @@ public partial class Main : Control
     Control lobbyView = null!;
     Label status = null!, who = null!, notice = null!;
     VBoxContainer botPicks = null!, myList = null!, openList = null!, recentList = null!;
+    Button muteButton = null!;
 
     // Table
-    Control tableView = null!, emptyView = null!;
-    Label oppName = null!, oppScore = null!, meName = null!, meScore = null!, prompt = null!, cribLabel = null!, countLabel = null!;
-    HBoxContainer oppHand = null!, cribCards = null!, sequence = null!, earlier = null!, myHand = null!;
+    Control tableView = null!, emptyView = null!, fxLayer = null!;
+    Label oppName = null!, oppScore = null!, meName = null!, meScore = null!, prompt = null!, cribLabel = null!,
+        countLabel = null!, phaseLabel = null!;
+    HBoxContainer oppHand = null!, cribCards = null!, sequence = null!, earlier = null!, myHand = null!, starterSlot = null!;
     VBoxContainer shows = null!;
-    Control starterSlot = null!;
     Board board = null!;
     Button discardButton = null!, resignButton = null!;
     RichTextLabel log = null!;
-    PanelContainer banner = null!;
-    Label bannerText = null!;
-    Button bannerAgain = null!;
-    string? bannerClosedFor;
+    string? logGame;
+    int logShown;
+    Control bannerLayer = null!;
+    string? bannerFor;
 
     public override void _Ready()
     {
@@ -56,7 +62,13 @@ public partial class Main : Control
         {
             settings.Server = opts.Server;
         }
-        Theme = Style.Build();
+        if (opts.Theme != null)
+        {
+            settings.Theme = opts.Theme;
+        }
+        Style.Use(settings.Theme);
+        Sfx.Init(this);
+        UpdateSound();
         GetWindow().Title = "Cribbage";
         BuildUi();
         ShowLogin(false);
@@ -71,11 +83,18 @@ public partial class Main : Control
     public override void _Process(double delta)
     {
         conn?.Poll();
+        PollWaiters();
         if (opts.Autoplay)
         {
             AutoplayTick();
         }
     }
+
+    // Rapid applies updates at once; autoplay plays rapidly unless asked
+    // to animate.
+    bool Rapid => settings.Rapid || opts.Autoplay && !opts.Animate;
+
+    void UpdateSound() => Sfx.Enabled = !settings.Muted && !Rapid;
 
     // ---------------------------------------------------------------
     // Connection
@@ -182,7 +201,6 @@ public partial class Main : Control
                 me = m.AuthOk;
                 settings.Token = me.Token;
                 settings.LastUser = me.Username;
-                who.Text = $"{me.Nickname} ({me.Username})";
                 loginError.Text = "";
                 ShowLogin(false);
                 Send(new ClientMessage { ListGames = new ListGames() });
@@ -233,6 +251,10 @@ public partial class Main : Control
         }
         awaiting = false;
         Notice(e.Message);
+        if (selected != null && games.TryGetValue(selected, out var gs) && gs.Update != null && !gs.V.Busy)
+        {
+            gs.V.Sync(gs.Update); // undo the optimistic lock on the hand
+        }
         RenderTable();
     }
 
@@ -244,7 +266,7 @@ public partial class Main : Control
         {
             gs = games[id] = new GameState(u.Game);
         }
-        gs.Apply(u);
+        gs.Received(u);
         if (id == selected)
         {
             awaiting = false;
@@ -267,16 +289,14 @@ public partial class Main : Control
         }
         UpdateTitle();
         RenderLobby();
-        if (id == selected)
-        {
-            RenderTable();
-        }
+        Enqueue(u);
     }
 
     void Select(string id)
     {
         if (selected != id)
         {
+            SkipAnimation();
             picked.Clear();
             awaiting = false;
         }
@@ -296,8 +316,12 @@ public partial class Main : Control
             return;
         }
         Send(new ClientMessage { Act = new Act { GameId = selected, Action = a } });
+        EndTails();
         picked.Clear();
         awaiting = true;
+        var v = games[selected].V;
+        v.Legal.Clear();
+        v.MustAct = false;
         RenderTable();
     }
 
@@ -308,13 +332,17 @@ public partial class Main : Control
 
     void BuildUi()
     {
-        var bg = new ColorRect { Color = Style.Felt };
-        AddChild(bg);
+        Theme = Style.Build();
+        ui = new Control();
+        AddChild(ui);
+        ui.SetAnchorsAndOffsetsPreset(LayoutPreset.FullRect);
+        var bg = new ColorRect { Color = Style.P.Felt };
+        ui.AddChild(bg);
         bg.SetAnchorsAndOffsetsPreset(LayoutPreset.FullRect);
 
         var root = new HBoxContainer();
         root.AddThemeConstantOverride("separation", 0);
-        AddChild(root);
+        ui.AddChild(root);
         root.SetAnchorsAndOffsetsPreset(LayoutPreset.FullRect);
         lobbyView = BuildLobby();
         root.AddChild(lobbyView);
@@ -328,23 +356,55 @@ public partial class Main : Control
         var split = new HBoxContainer();
         split.AddThemeConstantOverride("separation", 16);
         main.AddChild(split);
+
+        // The table, with the game-over banner over it.
+        var stack = new Control { SizeFlagsHorizontal = SizeFlags.ExpandFill };
+        split.AddChild(stack);
         tableView = BuildTable();
-        split.AddChild(tableView);
-        emptyView = new CenterContainer { SizeFlagsHorizontal = SizeFlags.ExpandFill };
-        emptyView.AddChild(Style.Label("Pick an opponent to start a game.", 20, Style.Muted));
-        split.AddChild(emptyView);
+        stack.AddChild(tableView);
+        tableView.SetAnchorsAndOffsetsPreset(LayoutPreset.FullRect);
+        stack.GuiInput += e =>
+        {
+            if (e is InputEventMouseButton { ButtonIndex: MouseButton.Left, Pressed: true })
+            {
+                SkipAnimation();
+            }
+        };
+        emptyView = new CenterContainer();
+        emptyView.AddChild(Style.Label("Pick an opponent to start a game.", 20, Style.P.Muted));
+        stack.AddChild(emptyView);
+        emptyView.SetAnchorsAndOffsetsPreset(LayoutPreset.FullRect);
+        bannerLayer = new CenterContainer { MouseFilter = MouseFilterEnum.Ignore };
+        stack.AddChild(bannerLayer);
+        bannerLayer.SetAnchorsAndOffsetsPreset(LayoutPreset.FullRect);
         split.AddChild(BuildLog());
 
+        fxLayer = new Control { MouseFilter = MouseFilterEnum.Ignore };
+        ui.AddChild(fxLayer);
+        fxLayer.SetAnchorsAndOffsetsPreset(LayoutPreset.FullRect);
+
         loginView = BuildLogin();
-        AddChild(loginView);
+        ui.AddChild(loginView);
         loginView.SetAnchorsAndOffsetsPreset(LayoutPreset.FullRect);
-        banner = BuildBanner();
-        AddChild(banner);
+        loginView.Visible = loginShown;
+        SetStatus(statusText);
+        RenderBotPicks();
+    }
+
+    // Restyle rebuilds the interface in the current palette.
+    void Restyle()
+    {
+        RemoveChild(ui);
+        ui.QueueFree();
+        bannerFor = null;
+        logGame = null;
+        BuildUi();
+        RenderAll();
     }
 
     Control BuildLogin()
     {
-        var shade = new ColorRect { Color = new Color(0.02f, 0.08f, 0.05f, 0.92f) };
+        var shade = new ColorRect { Color = Style.P.Page with { A = 0.94f } };
         var center = new CenterContainer();
         shade.AddChild(center);
         center.SetAnchorsAndOffsetsPreset(LayoutPreset.FullRect);
@@ -353,12 +413,12 @@ public partial class Main : Control
         var box = new VBoxContainer();
         box.AddThemeConstantOverride("separation", 10);
         panel.AddChild(box);
-        box.AddChild(Style.Label("♠ Cribbage", 32, Style.Gold));
-        box.AddChild(Style.Label("Log in or create an account.", 15, Style.Muted));
+        box.AddChild(Style.Label("♠ Cribbage", 32, Style.P.Accent));
+        box.AddChild(Style.Label("Log in or create an account.", 15, Style.P.Muted));
 
         LineEdit Field(string label, string placeholder)
         {
-            box.AddChild(Style.Label(label, 14, Style.Muted));
+            box.AddChild(Style.Label(label, 14, Style.P.Muted));
             var e = new LineEdit { PlaceholderText = placeholder };
             box.AddChild(e);
             return e;
@@ -379,7 +439,7 @@ public partial class Main : Control
         box.AddChild(row);
         row.AddChild(Style.Primary("Log in", () => Login(false)));
         row.AddChild(Style.Button("Register", () => Login(true)));
-        loginError = Style.Label("", 14, new Color("#ff9a8a"));
+        loginError = Style.Label("", 14, Style.P.Theirs);
         loginError.AutowrapMode = TextServer.AutowrapMode.WordSmart;
         box.AddChild(loginError);
         return shade;
@@ -418,8 +478,9 @@ public partial class Main : Control
 
     void ShowLogin(bool show)
     {
-        loginView.Visible = show && !opts.Autoplay;
-        if (loginView.Visible)
+        loginShown = show && !opts.Autoplay;
+        loginView.Visible = loginShown;
+        if (loginShown)
         {
             (userEdit.Text == "" ? userEdit : passEdit).GrabFocus();
         }
@@ -427,8 +488,8 @@ public partial class Main : Control
 
     Control BuildLobby()
     {
-        var panel = new PanelContainer { CustomMinimumSize = new Vector2(290, 0) };
-        panel.AddThemeStyleboxOverride("panel", Style.Box(Style.Panel, 0));
+        var panel = new PanelContainer { CustomMinimumSize = new Vector2(250, 0) };
+        panel.AddThemeStyleboxOverride("panel", Style.Box(Style.P.Page, 0));
         var scroll = new ScrollContainer { HorizontalScrollMode = ScrollContainer.ScrollMode.Disabled };
         panel.AddChild(scroll);
         var box = new VBoxContainer { SizeFlagsHorizontal = SizeFlags.ExpandFill };
@@ -436,29 +497,34 @@ public partial class Main : Control
         scroll.AddChild(box);
 
         var title = new HBoxContainer();
-        title.AddChild(Style.Label("♠ Cribbage", 24, Style.Gold));
+        title.AddChild(Style.Label("♠ Cribbage", 24, Style.P.Accent));
         title.AddChild(Style.Expand());
-        status = Style.Label("", 13, Style.Muted);
-        title.AddChild(status);
+        muteButton = Style.Button("", ToggleMute);
+        title.AddChild(muteButton);
+        UpdateMuteButton();
+        var gear = Style.Button("⚙", ShowSettings);
+        gear.TooltipText = "Settings";
+        title.AddChild(gear);
         box.AddChild(title);
         var acct = new HBoxContainer();
-        who = Style.Label("", 13, Style.Muted);
+        who = Style.Label(me != null ? $"{me.Nickname} ({me.Username})" : "", 13, Style.P.Muted);
         who.SizeFlagsHorizontal = SizeFlags.ExpandFill;
         who.ClipText = true;
         acct.AddChild(who);
+        status = Style.Label("", 13, Style.P.Muted);
+        acct.AddChild(status);
         acct.AddChild(Style.Button("Log out", Logout));
         box.AddChild(acct);
 
         box.AddChild(Heading("New game"));
         botPicks = new VBoxContainer();
         box.AddChild(botPicks);
-        RenderBotPicks();
         var people = new HBoxContainer();
         people.AddChild(Style.Button("Find a match", () => Send(new ClientMessage { FindMatch = new FindMatch() })));
         people.AddChild(Style.Button("Open game", () => CreateGame("")));
         people.AddChild(Style.Button("↻", () => Send(new ClientMessage { ListGames = new ListGames() })));
         box.AddChild(people);
-        notice = Style.Label("", 14, Style.Gold);
+        notice = Style.Label("", 14, Style.P.Accent);
         notice.AutowrapMode = TextServer.AutowrapMode.WordSmart;
         box.AddChild(notice);
 
@@ -474,11 +540,71 @@ public partial class Main : Control
         return panel;
     }
 
-    static Label Heading(string text)
+    static Label Heading(string text) => Style.Label(text.ToUpperInvariant(), 12, Style.P.Muted);
+
+    void ToggleMute()
     {
-        var l = Style.Label(text.ToUpperInvariant(), 12, Style.Muted);
-        l.AddThemeConstantOverride("line_spacing", 0);
-        return l;
+        settings.Muted = !settings.Muted;
+        UpdateSound();
+        UpdateMuteButton();
+    }
+
+    void UpdateMuteButton()
+    {
+        muteButton.Text = settings.Muted ? "🔇" : "🔊";
+        muteButton.TooltipText = settings.Muted ? "Unmute sounds" : "Mute sounds";
+    }
+
+    void ShowSettings()
+    {
+        var pop = new PopupPanel();
+        var box = new VBoxContainer();
+        box.AddThemeConstantOverride("separation", 10);
+        pop.AddChild(box);
+        box.AddChild(Heading("Settings"));
+        var row = new HBoxContainer();
+        row.AddThemeConstantOverride("separation", 10);
+        row.AddChild(Style.Label("Theme"));
+        var themes = new OptionButton();
+        for (var i = 0; i < Style.Palettes.Length; i++)
+        {
+            themes.AddItem(Style.Palettes[i].Label, i);
+            if (Style.Palettes[i] == Style.P)
+            {
+                themes.Selected = i;
+            }
+        }
+        themes.ItemSelected += i =>
+        {
+            settings.Theme = Style.Palettes[i].Name;
+            Style.Use(settings.Theme);
+            pop.Hide();
+            Restyle();
+        };
+        row.AddChild(themes);
+        box.AddChild(row);
+        var rapid = new CheckBox { Text = "Rapid play (no animation or sound)", ButtonPressed = settings.Rapid };
+        rapid.Toggled += on =>
+        {
+            settings.Rapid = on;
+            UpdateSound();
+            if (on)
+            {
+                SkipAnimation();
+            }
+        };
+        box.AddChild(rapid);
+        var mute = new CheckBox { Text = "Mute sounds", ButtonPressed = settings.Muted };
+        mute.Toggled += on =>
+        {
+            settings.Muted = on;
+            UpdateSound();
+            UpdateMuteButton();
+        };
+        box.AddChild(mute);
+        ui.AddChild(pop);
+        pop.PopupHide += pop.QueueFree;
+        pop.Popup(new Rect2I((Vector2I)(GetGlobalMousePosition() + new Vector2(-40, 24)), Vector2I.Zero));
     }
 
     void Logout()
@@ -494,15 +620,18 @@ public partial class Main : Control
 
     Control BuildTable()
     {
-        var box = new VBoxContainer { SizeFlagsHorizontal = SizeFlags.ExpandFill };
+        var box = new VBoxContainer();
         box.AddThemeConstantOverride("separation", 12);
 
         var top = new HBoxContainer();
         top.AddThemeConstantOverride("separation", 16);
         box.AddChild(top);
-        top.AddChild(Plate(out oppName, out oppScore, Style.Theirs));
-        oppHand = Fan(-40);
+        top.AddChild(Plate(out oppName, out oppScore, Style.P.Theirs));
+        oppHand = Fan(-30);
         top.AddChild(oppHand);
+        top.AddChild(Style.Expand());
+        phaseLabel = Style.Label("", 14, Style.P.Muted);
+        top.AddChild(phaseLabel);
 
         var boardRow = new CenterContainer();
         board = new Board();
@@ -512,16 +641,16 @@ public partial class Main : Control
         var mid = new HBoxContainer { SizeFlagsVertical = SizeFlags.ExpandFill };
         mid.AddThemeConstantOverride("separation", 20);
         box.AddChild(mid);
-        var crib = new VBoxContainer { CustomMinimumSize = new Vector2(150, 0) };
-        cribLabel = Style.Label("Crib", 14, Style.Muted);
+        var crib = new VBoxContainer { CustomMinimumSize = new Vector2(130, 0) };
+        cribLabel = Style.Label("Crib", 14, Style.P.Muted);
         crib.AddChild(cribLabel);
-        cribCards = Fan(-32);
+        cribCards = Fan(-30);
         crib.AddChild(cribCards);
         mid.AddChild(crib);
 
         var center = new VBoxContainer { SizeFlagsHorizontal = SizeFlags.ExpandFill };
         center.AddThemeConstantOverride("separation", 6);
-        countLabel = Style.Label("", 22, Style.Gold);
+        countLabel = Style.Label("", 22, Style.P.Accent);
         center.AddChild(countLabel);
         sequence = Fan(-28);
         center.AddChild(sequence);
@@ -532,11 +661,11 @@ public partial class Main : Control
         center.AddChild(shows);
         mid.AddChild(center);
 
-        var starter = new VBoxContainer();
-        starter.AddChild(Style.Label("Starter", 14, Style.Muted));
-        starterSlot = new HBoxContainer();
-        starter.AddChild(starterSlot);
-        mid.AddChild(starter);
+        var deck = new VBoxContainer();
+        deck.AddChild(Style.Label("Starter", 14, Style.P.Muted));
+        starterSlot = Fan(-74);
+        deck.AddChild(starterSlot);
+        mid.AddChild(deck);
 
         var act = new HBoxContainer();
         act.AddThemeConstantOverride("separation", 12);
@@ -553,7 +682,7 @@ public partial class Main : Control
         box.AddChild(myHand);
 
         var bottom = new HBoxContainer();
-        bottom.AddChild(Plate(out meName, out meScore, Style.Mine));
+        bottom.AddChild(Plate(out meName, out meScore, Style.P.Mine));
         bottom.AddChild(Style.Expand());
         resignButton = Style.Button("Resign", ConfirmResign);
         bottom.AddChild(resignButton);
@@ -571,7 +700,7 @@ public partial class Main : Control
     static Control Plate(out Label name, out Label score, Color color)
     {
         var p = new PanelContainer();
-        p.AddThemeStyleboxOverride("panel", Style.Box(new Color(0, 0, 0, 0.25f), 8, color with { A = 0.6f }));
+        p.AddThemeStyleboxOverride("panel", Style.Box(Style.P.Panel with { A = 0.6f }, 8, color));
         var h = new HBoxContainer();
         h.AddThemeConstantOverride("separation", 14);
         p.AddChild(h);
@@ -584,7 +713,7 @@ public partial class Main : Control
 
     Control BuildLog()
     {
-        var panel = new PanelContainer { CustomMinimumSize = new Vector2(270, 0) };
+        var panel = new PanelContainer { CustomMinimumSize = new Vector2(240, 0) };
         var box = new VBoxContainer();
         panel.AddChild(box);
         box.AddChild(Heading("Game log"));
@@ -600,30 +729,15 @@ public partial class Main : Control
         return panel;
     }
 
-    PanelContainer BuildBanner()
-    {
-        var p = new PanelContainer { Visible = false };
-        p.AddThemeStyleboxOverride("panel", Style.Box(new Color("#10281c"), 12, Style.Gold, 2));
-        var box = new VBoxContainer();
-        box.AddThemeConstantOverride("separation", 12);
-        p.AddChild(box);
-        bannerText = Style.Label("", 28, Style.Gold);
-        bannerText.HorizontalAlignment = HorizontalAlignment.Center;
-        box.AddChild(bannerText);
-        var row = new HBoxContainer { Alignment = BoxContainer.AlignmentMode.Center };
-        row.AddThemeConstantOverride("separation", 12);
-        bannerAgain = Style.Primary("Play again", PlayAgain);
-        row.AddChild(bannerAgain);
-        row.AddChild(Style.Button("Close", () => { bannerClosedFor = selected; banner.Visible = false; }));
-        box.AddChild(row);
-        return p;
-    }
-
     // ---------------------------------------------------------------
     // Rendering
 
     void RenderAll()
     {
+        if (who != null)
+        {
+            who.Text = me != null ? $"{me.Nickname} ({me.Username})" : "";
+        }
         RenderLobby();
         RenderTable();
         UpdateTitle();
@@ -631,8 +745,9 @@ public partial class Main : Control
 
     void SetStatus(string text)
     {
-        status.Text = text;
-        status.AddThemeColorOverride("font_color", text == "online" ? new Color("#7fdc9a") : Style.Muted);
+        statusText = text;
+        status.Text = text == "online" ? "● online" : text;
+        status.AddThemeColorOverride("font_color", text == "online" ? Style.P.Mine : Style.P.Muted);
     }
 
     void Notice(string text) => notice.Text = text;
@@ -645,10 +760,6 @@ public partial class Main : Control
 
     void RenderBotPicks()
     {
-        if (botPicks == null)
-        {
-            return;
-        }
         Clear(botPicks);
         foreach (var (name, label, blurb) in Text.Bots)
         {
@@ -678,7 +789,7 @@ public partial class Main : Control
         }
         if (myList.GetChildCount() == 0)
         {
-            myList.AddChild(Style.Label("No games in progress", 14, Style.Muted));
+            myList.AddChild(Style.Label("No games in progress", 14, Style.P.Muted));
         }
         Clear(openList);
         foreach (var g in openGames)
@@ -689,7 +800,7 @@ public partial class Main : Control
         }
         if (openList.GetChildCount() == 0)
         {
-            openList.AddChild(Style.Label("Nobody is waiting", 14, Style.Muted));
+            openList.AddChild(Style.Label("Nobody is waiting", 14, Style.P.Muted));
         }
         Clear(recentList);
         foreach (var g in recentGames.Take(10))
@@ -700,7 +811,7 @@ public partial class Main : Control
         }
         if (recentList.GetChildCount() == 0)
         {
-            recentList.AddChild(Style.Label("None yet", 14, Style.Muted));
+            recentList.AddChild(Style.Label("None yet", 14, Style.P.Muted));
         }
     }
 
@@ -718,11 +829,11 @@ public partial class Main : Control
         b.AddThemeFontSizeOverride("font_size", 14);
         if (current)
         {
-            b.AddThemeStyleboxOverride("normal", Style.Box(new Color("#2d6847"), 6, Style.Gold));
+            b.AddThemeStyleboxOverride("normal", Style.Box(Style.P.ButtonHover, 6, Style.P.Accent));
         }
         else if (tag == "your turn" || tag == "join")
         {
-            b.AddThemeColorOverride("font_color", Style.Gold);
+            b.AddThemeColorOverride("font_color", Style.P.Accent);
         }
         return b;
     }
@@ -736,107 +847,161 @@ public partial class Main : Control
         }
     }
 
-    void RenderTable()
+    // RenderTable draws the selected game's view; with animate, what is new
+    // since the last render arrives with an animation.
+    void RenderTable(bool animate = false)
     {
         var gs = selected != null && games.TryGetValue(selected, out var s) ? s : null;
         tableView.Visible = gs != null;
-        emptyView.Visible = gs == null;
+        emptyView.Visible = gs == null && me != null;
         RenderLog(gs);
         if (gs == null)
         {
-            banner.Visible = false;
+            Clear(bannerLayer);
+            bannerFor = null;
             return;
         }
+        var v = gs.V;
         var g = gs.Game;
-        var o = gs.Obs;
         var meSeat = gs.Me;
         var opp = 1 - meSeat;
+        var finished = g.Status == GameStatus.Finished;
         var oppPlayer = opp < g.Players.Count ? g.Players[opp] : null;
-        var oppLabel = Text.Opponent(g);
+        var theirName = Text.Opponent(g);
         oppName.Text = oppPlayer is { Bot: not "" } ? Text.BotLabel(oppPlayer.Bot) :
-            oppPlayer is { UserId: not 0 } ? $"{oppLabel}  ·  {(oppPlayer.Connected ? "online" : "away")}" : oppLabel;
+            oppPlayer is { UserId: not 0 } ? $"{theirName}  ·  {(oppPlayer.Connected ? "online" : "away")}" : theirName;
         meName.Text = me != null ? $"{me.Nickname}  ·  you" : "You";
-        oppScore.Text = gs.Scores[opp].ToString();
-        meScore.Text = gs.Scores[meSeat].ToString();
-        board.Set(meSeat, gs.Scores, gs.Trail);
+        oppScore.Text = v.Scores[opp].ToString();
+        meScore.Text = v.Scores[meSeat].ToString();
+        board.Set(g.GameId, meSeat, v.Scores, v.Trail, animate);
+        phaseLabel.Text = finished ? "Game over" : g.Status == GameStatus.Waiting ? "Waiting" :
+            v.HandNumber > 0 ? $"Hand {v.HandNumber} · {(v.Showing ? "The show" : v.Phase == Phase.Pegging ? "Pegging" : "Discard")}" : "";
+        resignButton.Text = g.Status == GameStatus.Waiting ? "Cancel game" : "Resign";
+        resignButton.Visible = !finished;
 
+        // Their hand: backs, or their cards once shown.
         Clear(oppHand);
-        Clear(cribCards);
-        Clear(sequence);
-        Clear(earlier);
-        Clear(shows);
-        Clear(starterSlot);
-        Clear(myHand);
-        countLabel.Text = "";
-        discardButton.Visible = false;
-        resignButton.Visible = g.Status == GameStatus.Active;
-        RenderBanner(gs);
-        if (o == null)
+        if (v.OppReveal != null)
         {
-            prompt.Text = g.Status == GameStatus.Waiting ? "Waiting for an opponent to join…" : "";
-            cribLabel.Text = "Crib";
-            return;
-        }
-
-        var theirName = Text.SeatName(g, opp);
-        for (var i = 0; i < o.OppHandSize; i++)
-        {
-            oppHand.AddChild(new CardFace(null, CardFace.Small));
-        }
-        var myCrib = o.Dealer == meSeat;
-        cribLabel.Text = myCrib ? "Your crib" : $"{theirName}'s crib";
-        var inCrib = (o.Discarded ? 2 : 0) + (o.OppDiscarded ? 2 : 0);
-        for (var i = 0; i < inCrib; i++)
-        {
-            cribCards.AddChild(new CardFace(null, CardFace.Small));
-        }
-        if (o.HasStarter)
-        {
-            starterSlot.AddChild(new CardFace(o.Starter, CardFace.Normal));
+            foreach (var c in v.OppReveal)
+            {
+                oppHand.AddChild(new CardFace(c, CardFace.Small));
+            }
         }
         else
         {
-            starterSlot.AddChild(new CardFace(null, CardFace.Normal));
-        }
-
-        var legal = awaiting ? new List<Action>() : gs.Update!.Legal.ToList();
-        var myTurn = o.MustAct && !awaiting && g.Status == GameStatus.Active;
-
-        if (o.Phase == Phase.Pegging)
-        {
-            countLabel.Text = $"Count {o.Count}";
-            for (var i = 0; i < o.Played.Count; i++)
+            for (var i = 0; i < v.OppHandSize; i++)
             {
-                var pc = o.Played[i];
-                var current = i >= o.SeqStart;
-                var c = PlayedCard(pc, meSeat, current ? CardFace.Normal : CardFace.Small);
-                (current ? sequence : earlier).AddChild(c);
-            }
-        }
-        else if (gs.Shows.Count > 0)
-        {
-            countLabel.Text = "Last hand";
-            foreach (var e in gs.Shows)
-            {
-                shows.AddChild(ShowRow(g, e));
+                var f = new CardFace(null, CardFace.Small);
+                oppHand.AddChild(f);
+                if (animate && v.FreshOpp)
+                {
+                    f.Enter(CardFace.Entry.DealInOpp, i * .06);
+                }
             }
         }
 
-        // My cards: the hand, or after discarding, the cards still held.
-        var hand = o.Hand.ToList();
-        foreach (var c in hand)
+        // The deck, with the starter on top.
+        Clear(starterSlot);
+        starterSlot.AddChild(new CardFace(null, CardFace.Normal));
+        var top = new CardFace(v.Starter, CardFace.Normal);
+        starterSlot.AddChild(top);
+        if (animate && v.FreshStarter)
         {
+            top.Enter(CardFace.Entry.FlipIn);
+        }
+
+        // The crib: my discards face up, theirs face down, until it is shown.
+        var cribMine = v.Dealer == meSeat;
+        cribLabel.Text = v.Dealer < 0 ? "Crib" : cribMine ? "Your crib" : $"{theirName}'s crib";
+        cribLabel.AddThemeColorOverride("font_color", v.Dealer < 0 ? Style.P.Muted : cribMine ? Style.P.Mine : Style.P.Theirs);
+        Clear(cribCards);
+        if (v.CribOpen != null)
+        {
+            foreach (var c in v.CribOpen)
+            {
+                cribCards.AddChild(new CardFace(c, CardFace.Small));
+            }
+        }
+        else
+        {
+            var cards = new List<uint?>();
+            if (v.OppDiscarded)
+            {
+                cards.Add(null);
+                cards.Add(null);
+            }
+            cards.AddRange(v.MyDiscards.Select(c => (uint?)c));
+            for (var i = 0; i < cards.Count; i++)
+            {
+                var f = new CardFace(cards[i], CardFace.Small);
+                cribCards.AddChild(f);
+                if (animate && v.FreshCrib && i >= cards.Count - 2)
+                {
+                    f.Enter(cards[i] == null ? CardFace.Entry.DealInOpp : CardFace.Entry.DealIn);
+                }
+            }
+        }
+
+        // Middle: pegging, or the show.
+        var showing = v.Shows.Count > 0 && (v.Showing || v.Phase == Phase.Discard || finished);
+        countLabel.Text = showing ? (v.Showing ? "The show" : "Last hand") : v.Phase == Phase.Pegging ? $"Count {v.Count}" : "";
+        if (animate && v.Hot)
+        {
+            countLabel.PivotOffset = countLabel.Size / 2;
+            var tw = countLabel.CreateTween();
+            countLabel.Scale = new Vector2(1.35f, 1.35f);
+            tw.TweenProperty(countLabel, "scale", Vector2.One, .45).SetTrans(Tween.TransitionType.Elastic).SetEase(Tween.EaseType.Out);
+        }
+        Clear(sequence);
+        Clear(earlier);
+        Clear(shows);
+        if (showing)
+        {
+            foreach (var e in v.Shows)
+            {
+                var row = ShowRow(g, e);
+                shows.AddChild(row);
+                if (animate && v.FreshShows.Contains(e))
+                {
+                    row.Modulate = row.Modulate with { A = 0 };
+                    row.CreateTween().TweenProperty(row, "modulate:a", 1f, .3);
+                }
+            }
+        }
+        else
+        {
+            for (var i = 0; i < v.Played.Count; i++)
+            {
+                var pc = v.Played[i];
+                var current = i >= v.SeqStart;
+                var (box, face) = PlayedCard(pc, meSeat, current ? CardFace.Normal : CardFace.Small);
+                (current ? sequence : earlier).AddChild(box);
+                if (animate && v.Fresh.Contains(pc.Card))
+                {
+                    face.Enter(pc.Seat == meSeat ? CardFace.Entry.DealIn : CardFace.Entry.DealInOpp);
+                }
+            }
+        }
+
+        // My hand, by rank.
+        Clear(myHand);
+        var discarding = v.Phase == Phase.Discard && v.MustAct && !v.Busy;
+        var myPlay = v.Phase == Phase.Pegging && v.MustAct && !v.Busy;
+        var hand = v.Hand.OrderBy(c => c % 13).ThenBy(c => c).ToList();
+        for (var i = 0; i < hand.Count; i++)
+        {
+            var c = hand[i];
             var face = new CardFace(c, CardFace.Normal);
-            if (o.Phase == Phase.Discard && myTurn && !o.Discarded)
+            if (discarding)
             {
                 face.Clickable = true;
                 face.Selected = picked.Contains(c);
-                var card = c;
-                face.Clicked += () => TogglePick(card);
+                face.Clicked += () => TogglePick(c);
             }
-            else if (o.Phase == Phase.Pegging && myTurn)
+            else if (myPlay)
             {
-                var play = legal.FirstOrDefault(a => a.Kind == ActionKind.Play && a.Cards[0] == c);
+                var play = v.Legal.FirstOrDefault(a => a.Kind == ActionKind.Play && a.Cards[0] == c);
                 face.Clickable = play != null;
                 face.Dim = play == null;
                 if (play != null)
@@ -845,57 +1010,70 @@ public partial class Main : Control
                 }
             }
             myHand.AddChild(face);
-        }
-        if (o.Phase == Phase.Discard && o.Discarded)
-        {
-            foreach (var c in o.Discards)
+            if (animate && v.Fresh.Contains(c) && !v.Played.Any(p => p.Card == c))
             {
-                var f = new CardFace(c, CardFace.Small) { Dim = true };
-                myHand.AddChild(f);
+                face.Enter(CardFace.Entry.DealIn, i * .07);
             }
         }
+        discardButton.Visible = discarding;
+        discardButton.Disabled = picked.Count != 2;
+        discardButton.Text = picked.Count == 2 ? "Discard" : $"Pick {2 - picked.Count} more";
 
-        if (g.Status == GameStatus.Finished)
+        var go = false;
+        if (finished)
         {
             prompt.Text = Text.GameOver(g);
         }
-        else if (o.Phase == Phase.Discard)
+        else if (g.Status == GameStatus.Waiting)
         {
-            if (myTurn && !o.Discarded)
-            {
-                prompt.Text = myCrib ? "Choose two cards for your crib" : $"Choose two cards for {theirName}'s crib";
-                discardButton.Visible = true;
-                discardButton.Disabled = picked.Count != 2;
-                discardButton.Text = picked.Count == 2 ? "Discard" : $"Pick {2 - picked.Count} more";
-            }
-            else
-            {
-                prompt.Text = o.OppDiscarded ? "" : $"Waiting for {theirName} to discard…";
-            }
+            prompt.Text = "Waiting for someone to join…";
         }
-        else if (o.Phase == Phase.Pegging)
+        else if (v.Busy)
         {
-            prompt.Text = myTurn ? "Your turn — play a card" : awaiting ? "" : $"{theirName}'s turn";
+            prompt.Text = "";
+        }
+        else if (discarding)
+        {
+            prompt.Text = cribMine ? "Choose two cards for your crib" : $"Choose two cards for {theirName}'s crib";
+            go = true;
+        }
+        else if (v.Phase == Phase.Discard)
+        {
+            prompt.Text = awaiting || v.Discarded ? $"Waiting for {theirName} to discard…" : "";
+        }
+        else if (myPlay)
+        {
+            prompt.Text = "Your turn — play a card";
+            go = true;
+        }
+        else if (v.Phase == Phase.Pegging)
+        {
+            prompt.Text = $"{theirName} to play…";
         }
         else
         {
             prompt.Text = "";
         }
+        prompt.AddThemeColorOverride("font_color", go ? Style.P.Accent : Style.P.Ink);
+
+        RenderBanner(gs, animate);
+        v.ClearHints();
     }
 
-    static Control PlayedCard(PlayedCard pc, int meSeat, Vector2 size)
+    static (Control, CardFace) PlayedCard(PlayedCard pc, int meSeat, Vector2 size)
     {
         var box = new VBoxContainer();
         box.AddThemeConstantOverride("separation", 3);
-        box.AddChild(new CardFace(pc.Card, size));
+        var face = new CardFace(pc.Card, size);
+        box.AddChild(face);
         var bar = new ColorRect
         {
-            Color = pc.Seat == meSeat ? Style.Mine : Style.Theirs,
+            Color = pc.Seat == meSeat ? Style.P.Mine : Style.P.Theirs,
             CustomMinimumSize = new Vector2(size.X - 16, 3),
             SizeFlagsHorizontal = SizeFlags.ShrinkCenter,
         };
         box.AddChild(bar);
-        return box;
+        return (box, face);
     }
 
     static Control ShowRow(GameSummary g, Event e)
@@ -904,7 +1082,8 @@ public partial class Main : Control
         row.AddThemeConstantOverride("separation", 8);
         var who = Text.SeatName(g, e.Seat);
         var whose = who == "You" ? "Your" : who + "'s";
-        var label = Style.Label($"{whose} {(e.Kind == EventKind.ShowCrib ? "crib" : "hand")}", 14, e.Seat == g.Seat ? Style.Mine : Style.Theirs);
+        var mine = e.Seat == g.Seat;
+        var label = Style.Label($"{whose} {(e.Kind == EventKind.ShowCrib ? "crib" : "hand")}", 14, mine ? Style.P.Mine : Style.P.Theirs);
         label.CustomMinimumSize = new Vector2(120, 0);
         row.AddChild(label);
         var fan = Fan(-14);
@@ -913,10 +1092,13 @@ public partial class Main : Control
             fan.AddChild(new CardFace(c, CardFace.Small));
         }
         row.AddChild(fan);
-        row.AddChild(new CardFace(e.Card, CardFace.Small) { Dim = true });
-        var pts = Style.Label($"+{e.Points}", 20, Style.Gold);
+        row.AddChild(Style.Label("+", 16, Style.P.Muted));
+        row.AddChild(new CardFace(e.Card, CardFace.Small));
+        var pts = Style.Label($"{e.Points}", 22, mine ? Style.P.Mine : Style.P.Theirs);
+        pts.CustomMinimumSize = new Vector2(30, 0);
+        pts.HorizontalAlignment = HorizontalAlignment.Right;
         row.AddChild(pts);
-        var detail = Style.Label(Text.Breakdown(e.Show), 13, Style.Muted);
+        var detail = Style.Label(Text.Breakdown(e.Show), 13, Style.P.Muted);
         detail.SizeFlagsHorizontal = SizeFlags.ExpandFill;
         detail.CustomMinimumSize = new Vector2(150, 0);
         detail.AutowrapMode = TextServer.AutowrapMode.WordSmart;
@@ -924,36 +1106,149 @@ public partial class Main : Control
         return row;
     }
 
+    // RenderLog appends the selected game's new log lines, starting over
+    // when the game changes.
     void RenderLog(GameState? gs)
     {
-        log.Clear();
         if (gs == null)
         {
+            log.Clear();
+            logGame = null;
             return;
         }
-        foreach (var l in gs.Log.TakeLast(300))
+        if (logGame != gs.Game.GameId || logShown > gs.Log.Count)
         {
-            var color = l.Points > 0 ? (l.Mine ? Style.Mine : Style.Theirs).ToHtml(false) : "d8ddd6";
-            log.AppendText($"[color=#{color}]{Escape(l.Text)}[/color]" + (l.Points > 0 ? $" [b][color=#e8c46a]+{l.Points}[/color][/b]" : "") + "\n");
+            log.Clear();
+            logGame = gs.Game.GameId;
+            logShown = System.Math.Max(0, gs.Log.Count - 300);
+        }
+        var p = Style.P;
+        foreach (var l in gs.Log.Skip(logShown))
+        {
+            var color = l.Neutral ? p.Muted : l.Mine ? p.Mine : p.Theirs;
+            if (!l.Neutral && l.Points == 0)
+            {
+                color = color.Lerp(p.Ink, .55f);
+            }
+            log.AppendText($"[color=#{color.ToHtml(false)}]{Escape(l.Text)}[/color]" +
+                (l.Points > 0 ? $" [b][color=#{p.Accent.ToHtml(false)}]+{l.Points}[/color][/b]" : "") + "\n");
+        }
+        logShown = gs.Log.Count;
+        while (log.GetParagraphCount() > 400)
+        {
+            log.RemoveParagraph(0);
         }
     }
 
     static string Escape(string s) => s.Replace("[", "[lb]");
 
-    void RenderBanner(GameState gs)
+    void RenderBanner(GameState gs, bool animate)
     {
+        var v = gs.V;
         var g = gs.Game;
-        if (!gs.Finished || bannerClosedFor == g.GameId)
+        if (v.Over is not { } over || v.BannerClosed || v.Busy)
         {
-            banner.Visible = false;
+            Clear(bannerLayer);
+            bannerFor = null;
             return;
         }
-        bannerText.Text = Text.GameOver(g);
-        var opp = 1 - gs.Me;
-        bannerAgain.Visible = opp < g.Players.Count && g.Players[opp].Bot != "";
-        banner.Visible = true;
-        banner.ResetSize();
-        banner.Position = (Size - banner.GetCombinedMinimumSize()) / 2 + new Vector2(lobbyView.Size.X / 2, 0);
+        if (bannerFor == g.GameId)
+        {
+            return;
+        }
+        bannerFor = g.GameId;
+        Clear(bannerLayer);
+        var meSeat = gs.Me;
+        var won = over.Winner == meSeat;
+        var loser = v.Scores[1 - over.Winner];
+        var skunk = over.Resigned ? 0 : loser < 61 ? 2 : loser < 91 ? 1 : 0;
+        var opp = 1 - meSeat;
+        var bot = opp < g.Players.Count ? g.Players[opp].Bot : "";
+
+        var panel = new PanelContainer { MouseFilter = MouseFilterEnum.Stop };
+        var sb = Style.Box(Style.P.Panel, 16, Style.P.Accent, 2);
+        sb.ContentMarginLeft = sb.ContentMarginRight = 36;
+        sb.ContentMarginTop = sb.ContentMarginBottom = 22;
+        sb.ShadowColor = new Color(0, 0, 0, .5f);
+        sb.ShadowSize = 18;
+        panel.AddThemeStyleboxOverride("panel", sb);
+        var box = new VBoxContainer();
+        box.AddThemeConstantOverride("separation", 8);
+        panel.AddChild(box);
+        Label Centered(string text, int size, Color c)
+        {
+            var l = Style.Label(text, size, c);
+            l.HorizontalAlignment = HorizontalAlignment.Center;
+            box.AddChild(l);
+            return l;
+        }
+        Centered(won ? "You win!" : "You lose", 34, won ? Style.P.Accent : Style.P.Ink);
+        Centered($"{v.Scores[meSeat]} – {v.Scores[opp]}", 26, Style.P.Ink);
+        if (skunk > 0)
+        {
+            Centered(skunk == 2 ? "Double skunk!" : "Skunk!", 18, Style.P.Theirs);
+        }
+        if (over.Resigned)
+        {
+            Centered(won ? "Your opponent resigned." : "You resigned.", 15, Style.P.Muted);
+        }
+        var row = new HBoxContainer { Alignment = BoxContainer.AlignmentMode.Center };
+        row.AddThemeConstantOverride("separation", 12);
+        if (bot != "")
+        {
+            row.AddChild(Style.Primary("Play again", () => { v.BannerClosed = true; RenderTable(); CreateGame(bot); }));
+        }
+        row.AddChild(Style.Button("View table", () => { v.BannerClosed = true; RenderTable(); }));
+        box.AddChild(Style.Expand());
+        box.AddChild(row);
+        bannerLayer.AddChild(panel);
+
+        if (animate && v.OverFresh)
+        {
+            panel.Scale = new Vector2(.7f, .7f);
+            panel.Modulate = panel.Modulate with { A = 0 };
+            panel.Resized += () => panel.PivotOffset = panel.Size / 2;
+            var tw = panel.CreateTween().SetParallel();
+            tw.TweenProperty(panel, "scale", Vector2.One, .45).SetTrans(Tween.TransitionType.Back).SetEase(Tween.EaseType.Out);
+            tw.TweenProperty(panel, "modulate:a", 1f, .25);
+            Sfx.Play(won ? "win" : "lose");
+            if (won)
+            {
+                Confetti();
+            }
+        }
+        v.OverFresh = false;
+    }
+
+    void Confetti()
+    {
+        var p = Style.P;
+        var c = new CpuParticles2D
+        {
+            Amount = 140,
+            Lifetime = 2.6,
+            OneShot = true,
+            Explosiveness = .92f,
+            Direction = Vector2.Up,
+            Spread = 70,
+            InitialVelocityMin = 320,
+            InitialVelocityMax = 620,
+            Gravity = new Vector2(0, 700),
+            ScaleAmountMin = 4,
+            ScaleAmountMax = 8,
+            AngularVelocityMin = -360,
+            AngularVelocityMax = 360,
+            ColorInitialRamp = new Gradient
+            {
+                Offsets = new[] { 0f, .25f, .5f, .75f, 1f },
+                Colors = new[] { p.Accent, p.Mine, p.Theirs, new Color("#ffffff"), p.Accent },
+            },
+        };
+        fxLayer.AddChild(c);
+        var r = bannerLayer.GetGlobalRect();
+        c.Position = new Vector2(r.GetCenter().X, r.Position.Y + r.Size.Y * .55f) - fxLayer.GetGlobalRect().Position;
+        c.Emitting = true;
+        GetTree().CreateTimer(3.5).Timeout += c.QueueFree;
     }
 
     // ---------------------------------------------------------------
@@ -965,6 +1260,7 @@ public partial class Main : Control
         {
             picked.Add(c);
         }
+        Sfx.Play("card");
         RenderTable();
     }
 
@@ -982,23 +1278,17 @@ public partial class Main : Control
         }
     }
 
-    void PlayAgain()
-    {
-        if (selected == null)
-        {
-            return;
-        }
-        var g = games[selected].Game;
-        var opp = 1 - games[selected].Me;
-        bannerClosedFor = selected;
-        CreateGame(g.Players[opp].Bot);
-    }
-
     void ConfirmResign()
     {
         var id = selected;
-        var d = new ConfirmationDialog { DialogText = "Resign this game?", OkButtonText = "Resign" };
-        AddChild(d);
+        var waiting = id != null && games[id].Game.Status == GameStatus.Waiting;
+        var d = new ConfirmationDialog
+        {
+            DialogText = waiting ? "Cancel this game?" : "Resign this game?",
+            OkButtonText = waiting ? "Cancel game" : "Resign",
+            CancelButtonText = "Keep playing",
+        };
+        ui.AddChild(d);
         d.Confirmed += () => Send(new ClientMessage { Resign = new Resign { GameId = id } });
         d.VisibilityChanged += () => { if (!d.Visible) d.QueueFree(); };
         d.PopupCentered();

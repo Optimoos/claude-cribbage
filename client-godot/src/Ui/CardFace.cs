@@ -9,8 +9,12 @@ public partial class CardFace : Control
     public static readonly Vector2 Normal = new(78, 110);
     public static readonly Vector2 Small = new(46, 66);
 
+    public enum Entry { DealIn, DealInOpp, FlipIn }
+
     uint? card;
     bool selected, dim, clickable, hover;
+    Vector2 slide;      // drawing offset while dealing in
+    float flip = 1;     // horizontal scale while flipping over
 
     public event Action? Clicked;
 
@@ -38,6 +42,27 @@ public partial class CardFace : Control
         }
     }
 
+    // Enter animates the card arriving: dealt in from below (mine) or
+    // above (theirs), or flipped face up.
+    public void Enter(Entry how, double delay = 0)
+    {
+        var tw = CreateTween();
+        if (how == Entry.FlipIn)
+        {
+            flip = 0;
+            tw.TweenMethod(Callable.From<float>(f => { flip = f; QueueRedraw(); }), 0f, 1f, .55)
+                .SetDelay(delay).SetTrans(Tween.TransitionType.Cubic).SetEase(Tween.EaseType.Out);
+            return;
+        }
+        var from = new Vector2(0, how == Entry.DealIn ? 60 : -60);
+        slide = from;
+        Modulate = Modulate with { A = 0 };
+        tw.SetParallel();
+        tw.TweenMethod(Callable.From<Vector2>(v => { slide = v; QueueRedraw(); }), from, Vector2.Zero, .38)
+            .SetDelay(delay).SetTrans(Tween.TransitionType.Back).SetEase(Tween.EaseType.Out);
+        tw.TweenProperty(this, "modulate:a", 1f, .2).SetDelay(delay);
+    }
+
     public override void _Ready()
     {
         MouseEntered += () => { hover = true; QueueRedraw(); };
@@ -57,18 +82,23 @@ public partial class CardFace : Control
     {
         var size = CustomMinimumSize;
         var lift = selected ? -18f : clickable && hover ? -6f : 0f;
-        var rect = new Rect2(new Vector2(0, lift), size);
+        if (flip < 1)
+        {
+            // Scale about the centre: shows the back for the first half.
+            var sx = Math.Abs(1 - 2 * flip);
+            DrawSetTransform(new Vector2(size.X * (1 - sx) / 2, 0), 0, new Vector2(Math.Max(sx, .02f), 1));
+        }
+        var rect = new Rect2(new Vector2(0, lift) + slide, size);
         var small = size.X < 60;
         var radius = small ? 4 : 7;
+        var p = Style.P;
 
-        // Shadow, then the card.
-        Style.Box(new Color(0, 0, 0, 0.35f), radius).Draw(GetCanvasItem(), new Rect2(rect.Position + new Vector2(1, 3), size));
-        if (card is not { } c)
+        Style.Box(new Color(0, 0, 0, 0.3f), radius).Draw(GetCanvasItem(), new Rect2(rect.Position + new Vector2(1, 3), size));
+        if (card is not { } c || flip < .5f)
         {
-            var back = Style.Box(new Color("#7a1f2b"), radius, new Color("#f4ecd8"), small ? 2 : 3);
-            back.Draw(GetCanvasItem(), rect);
+            Style.Box(p.Back, radius, p.BackEdge, small ? 2 : 3).Draw(GetCanvasItem(), rect);
             var inner = rect.Grow(small ? -5 : -8);
-            DrawRect(inner, new Color("#9a2a38"), false, 1);
+            DrawRect(inner, p.Back.Lightened(.15f), false, 1);
             for (var x = inner.Position.X + 4; x < inner.End.X; x += 8)
             {
                 DrawLine(new Vector2(x, inner.Position.Y), new Vector2(x, inner.End.Y), new Color(1, 1, 1, 0.07f), 2);
@@ -76,9 +106,9 @@ public partial class CardFace : Control
             return;
         }
 
-        var border = selected ? Style.Gold : clickable && hover ? Style.Gold with { A = 0.7f } : new Color("#c9c2b0");
-        Style.Box(new Color("#fbf8f0"), radius, border, selected ? 3 : 1).Draw(GetCanvasItem(), rect);
-        var ink = Text.IsRed(c) ? Style.Red : new Color("#1d1d1f");
+        var border = selected ? p.Accent : clickable && hover ? p.Accent with { A = 0.7f } : new Color("#c9c2b0");
+        Style.Box(new Color("#fffdf6"), radius, border, selected ? 3 : 1).Draw(GetCanvasItem(), rect);
+        var ink = Text.IsRed(c) ? Style.CardRed : new Color("#1d1d1f");
         var font = ThemeDB.FallbackFont;
         var rank = Text.Rank(c);
         var suit = Text.Suit(c);
@@ -95,7 +125,7 @@ public partial class CardFace : Control
         }
         if (dim)
         {
-            Style.Box(new Color(0.05f, 0.12f, 0.08f, 0.55f), radius).Draw(GetCanvasItem(), rect);
+            Style.Box(new Color(0.05f, 0.08f, 0.06f, 0.5f), radius).Draw(GetCanvasItem(), rect);
         }
     }
 }

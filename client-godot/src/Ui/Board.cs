@@ -4,14 +4,18 @@ namespace Cribbage.Ui;
 
 // Board draws a cribbage board: three streets of 40 holes for each player,
 // with a front peg at the score and a back peg at the score before it.
+// When a score changes the back peg leapfrogs to the new hole.
 public partial class Board : Control
 {
     const int PerRow = 40, Rows = 3;
-    const float Step = 15, GroupGap = 7, Lane = 13, RowGap = 14, Margin = 34;
+    const float Step = 14, GroupGap = 6, Lane = 13, RowGap = 14, Margin = 34;
 
     readonly int[] score = new int[2], back = new int[2];
-    readonly Color[] colors = { Style.Mine, Style.Theirs };
+    // Where each player's moving peg is drawn, and how far through its hop.
+    readonly int[] from = new int[2];
+    readonly float[] hop = { 1, 1 };
     int mine;
+    string game = "";
 
     public Board()
     {
@@ -20,13 +24,30 @@ public partial class Board : Control
         CustomMinimumSize = new Vector2(w, h);
     }
 
-    // Set shows seat `me`'s pegs in the mine colour on the lower lane of
-    // each street.
-    public void Set(int me, int[] scores, int[] trail)
+    // Set shows seat `me`'s pegs on the lower lane of each street. With
+    // animate, a peg that moved hops from its old hole.
+    public void Set(string gameId, int me, int[] scores, int[] trail, bool animate)
     {
+        var same = gameId == game;
+        game = gameId;
         mine = me;
         for (var s = 0; s < 2; s++)
         {
+            var moved = same && scores[s] != score[s];
+            if (moved && animate)
+            {
+                from[s] = back[s] == trail[s] ? score[s] : back[s];
+                var seat = s;
+                hop[s] = 0;
+                var tw = CreateTween();
+                tw.TweenMethod(Callable.From<float>(t => { hop[seat] = t; QueueRedraw(); }), 0f, 1f, .45)
+                    .SetTrans(Tween.TransitionType.Sine).SetEase(Tween.EaseType.InOut);
+                Sfx.Play("peg");
+            }
+            else if (!animate || !same)
+            {
+                hop[s] = 1;
+            }
             score[s] = scores[s];
             back[s] = trail[s];
         }
@@ -55,33 +76,47 @@ public partial class Board : Control
 
     public override void _Draw()
     {
+        var p = Style.P;
         var rect = new Rect2((Size.X - CustomMinimumSize.X) / 2, 0, CustomMinimumSize.X, CustomMinimumSize.Y);
-        Style.Box(Style.Wood, 12, Style.WoodDark, 2).Draw(GetCanvasItem(), rect);
+        Style.Box(p.Wood, 12, p.WoodDark, 2).Draw(GetCanvasItem(), rect);
         var font = ThemeDB.FallbackFont;
-        for (var row = 0; row < Rows; row++)
+        for (var row = 1; row < Rows; row++)
         {
             var y = 16 + row * (2 * Lane + RowGap) - 4;
             DrawString(font, new Vector2(rect.Position.X + 6, y + 2 * Lane - 2), $"{row * PerRow}",
-                HorizontalAlignment.Left, -1, 10, new Color(1, 1, 1, 0.45f));
+                HorizontalAlignment.Left, -1, 10, p.BoardInk with { A = 0.6f });
         }
-        var hole = new Color(0.12f, 0.07f, 0.03f);
         for (var s = 0; s < 2; s++)
         {
             for (var n = 1; n <= 120; n++)
             {
-                DrawCircle(Hole(s, n), 2.6f, hole);
+                DrawCircle(Hole(s, n), 2.6f, p.Hole);
             }
-            DrawCircle(Hole(s, 0), 3.2f, hole);
+            DrawCircle(Hole(s, 0), 3.2f, p.Hole);
         }
-        DrawCircle(Hole(0, 121), 5, hole);
+        DrawCircle(Hole(0, 121), 5, p.Hole);
 
         for (var s = 0; s < 2; s++)
         {
+            var c = s == mine ? p.Mine : p.Theirs;
+            if (hop[s] < 1)
+            {
+                // The peg that was behind jumps over the other one.
+                var a = Hole(s, from[s]);
+                var b = Hole(s, score[s]);
+                var at = a.Lerp(b, hop[s]) + new Vector2(0, -18 * Mathf.Sin(hop[s] * Mathf.Pi));
+                if (back[s] != score[s])
+                {
+                    Peg(Hole(s, back[s]), c.Darkened(0.25f));
+                }
+                Peg(at, c);
+                continue;
+            }
             if (back[s] != score[s])
             {
-                Peg(Hole(s, back[s]), colors[s == mine ? 0 : 1].Darkened(0.25f));
+                Peg(Hole(s, back[s]), c.Darkened(0.25f));
             }
-            Peg(Hole(s, score[s]), colors[s == mine ? 0 : 1]);
+            Peg(Hole(s, score[s]), c);
         }
     }
 

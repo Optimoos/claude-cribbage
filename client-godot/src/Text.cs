@@ -72,7 +72,7 @@ public static class Text
         return parts.Count > 0 ? string.Join(", ", parts) : "nineteen (nothing)";
     }
 
-    static string PegDetail(PegScore? p)
+    public static string PegDetail(PegScore? p)
     {
         var parts = new List<string>();
         if (p != null)

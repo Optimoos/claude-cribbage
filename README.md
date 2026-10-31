@@ -159,6 +159,12 @@ godot --path .          # or open project.godot in the editor
   starter, the count and cards played, your hand, and a game log. Click two
   cards and **Discard**; in pegging, click a card to play it (cards that
   would pass 31 are dimmed). After the show, the table lists each count.
+- **Animation and sound,** as in the web client: each update's events
+  replay one at a time, so cards deal in, the starter flips, pegs hop and
+  points float up. Click the table to skip ahead. Sounds are synthesized at
+  startup, so there are no audio files.
+- **Settings** (the ⚙ button): theme (card room, parchment or midnight),
+  rapid play (no animation or sound) and mute; the 🔊 button also mutes.
 - **Sessions:** the server URL and session token are kept in
   `user://<profile>.cfg`. Reopening the client resumes its games; it also
   reconnects by itself if the connection drops.
@@ -173,7 +179,18 @@ godot --headless --path . -- --server ws://127.0.0.1:8080/rtc --profile t1 \
   Autoplay plays random legal moves through the UI code and quits when the
   game ends. `--quit-after N` kills the client after N moves (rerun with the
   same `--profile` to resume), `--pace S` slows it down, and
-  `--screenshot FILE --after S` saves the window and quits.
+  `--screenshot FILE --after S` saves the window and quits. Autoplay runs
+  in rapid play unless given `--animate`; `--theme NAME` picks a theme.
+
+**Exported builds.** `./export.sh` writes release builds to
+`build/linux/Cribbage.x86_64` and `build/windows/Cribbage.exe` (each with
+its `.pck`, the webrtc-native library and a self-contained .NET runtime in
+the `data_*` folder, so players need nothing installed). It needs the Godot
+4.7.2 .NET export templates in
+`~/.local/share/godot/export_templates/4.7.2.stable.mono/` (from the
+`Godot_v4.7.2-stable_mono_export_templates.tpz` release asset; only
+`linux_*.x86_64`, `windows_*_x86_64*.exe` and `version.txt` are used).
+Set `GODOT` to the editor binary if it is not in the repo root.
 
 ## Persistence
 

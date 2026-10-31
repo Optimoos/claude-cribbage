@@ -747,3 +747,63 @@ points from rules; this is 2.7.
 The lobby offers it as its own level, "Heuristic bot (strong)", listed
 between Expert (medium) and Expert (easy). Unlike the expert levels it
 needs no bundle, so it is always shown, like `heuristic`.
+
+---
+
+# Godot polish and builds (M22)
+
+Added 2026-10-30, after every planned milestone was built. M8's client
+played correctly but showed each update at once, had no sound and one
+theme, and there was no exported build.
+
+### M22: Bring the Godot client up to the web client, and export it
+- Replay each update's events one at a time, as the web client does:
+  cards deal in, the starter flips, pegs hop, points float up, and a click
+  skips ahead.
+- Synthesized sound effects, the three web themes, rapid play and mute,
+  saved between runs.
+- Release exports for Linux and Windows.
+
+**Verify:** themes and animations look right in windowed screenshots; full
+games still pass with autoplay, rapid and animated; the exported builds
+play a full game.
+
+**Built (2026-10-30):**
+- **Replay** (`Main.Replay.cs`) ports the web client's `replay`,
+  `applyEvent` and `syncView`. The table now draws a view that each event
+  changes (`GameState.View`) rather than the raw observation. Pauses use
+  the web client's timings. The last pause before my move ends as soon as
+  I act, and clicking the table or switching games skips to the end.
+- **Effects:** cards slide in from the dealer's side, the starter flips,
+  the peg that was behind hops over the other, and "+N" labels rise from
+  the score, the play area or the deck, stacked when they come together.
+  A count of 15 or 31 bounces. The game-over banner pops in with the
+  final score, a skunk note, "Play again" against a bot, "View table", and
+  confetti on a win.
+- **Sound** (`Ui/Sfx.cs`) renders the web client's eight Web Audio
+  recipes into 16-bit WAV streams at startup: enveloped sine and triangle
+  tones with pitch slides, and band-passed noise.
+- **Themes:** card room, parchment and midnight use the web client's
+  colours. Changing theme rebuilds the interface in place. Theme, rapid
+  play and mute are stored in the profile file.
+- **Exports:** `export_presets.cfg` (Linux and Windows x86_64),
+  `export.sh` and `Cribbage.sln` (Godot's .NET export requires one). Each
+  build is about 150–190 MB, most of it a self-contained .NET runtime.
+  Only the x86_64 Linux and Windows templates were installed (350 MB of
+  the 1.2 GB download, whose SHA-512 checked out).
+- **Fixed on the way:** the log was rebuilt from scratch on every render,
+  which made each move slower as a game went on. A rapid autoplay game
+  took 23 s; with the log appended to instead, it takes 3 s. The table
+  also no longer slides under the log at the base 1280-pixel width.
+
+**Verified:**
+- Rapid and animated autoplay games complete.
+- An animated game that switched theme every 10 moves completed with no
+  errors.
+- Windowed screenshots in all three themes show a floating "pair royal",
+  the show rows and the board.
+- The exported Linux build played a full game headless and rendered
+  correctly in a window. The exported Windows build played a full game
+  under Wine.
+- Not done: the web client's second board style ("long") and its phone
+  layout.
