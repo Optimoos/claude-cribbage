@@ -88,3 +88,12 @@ func (c *Conn) Flush() error { return c.w.Flush() }
 func (c *Conn) Close() error { return c.nc.Close() }
 
 func (c *Conn) String() string { return "tcp:" + c.nc.RemoteAddr().String() }
+
+// RemoteIP is the client's IP address.
+func (c *Conn) RemoteIP() string {
+	host, _, err := net.SplitHostPort(c.nc.RemoteAddr().String())
+	if err != nil {
+		return ""
+	}
+	return host
+}

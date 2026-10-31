@@ -10,6 +10,8 @@ import (
 	"log/slog"
 	"math/rand/v2"
 	"net"
+	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -39,6 +41,33 @@ type Config struct {
 	Games      store.GameStore // defaults to an in-memory store
 	Logger     *slog.Logger
 	OutboxSize int // per-connection outbound queue; default 4096
+	// AuthLimits bounds login and registration attempts; nil uses
+	// DefaultAuthLimits.
+	AuthLimits *AuthLimits
+}
+
+// AuthLimits bounds password attempts from remote clients, as token buckets
+// (a burst, then one more per interval). Connections from loopback or with
+// no address (in-process transports) are not limited.
+type AuthLimits struct {
+	AttemptsPerIP   int // logins and registrations from one address
+	AttemptEvery    time.Duration
+	RegistersPerIP  int // registrations from one address
+	RegisterEvery   time.Duration
+	FailuresPerUser int // failed logins to one username
+	FailureEvery    time.Duration
+	// Hashing is how many bcrypt operations may run at once (default
+	// GOMAXPROCS), so a flood of logins cannot starve the games.
+	Hashing int
+}
+
+// DefaultAuthLimits allows 20 quick attempts per address then 10 a minute,
+// 5 registrations then 5 an hour, and 10 failed logins per username then 1 a
+// minute.
+var DefaultAuthLimits = AuthLimits{
+	AttemptsPerIP: 20, AttemptEvery: 6 * time.Second,
+	RegistersPerIP: 5, RegisterEvery: 12 * time.Minute,
+	FailuresPerUser: 10, FailureEvery: time.Minute,
 }
 
 // Server routes client requests to game actors.
@@ -66,6 +95,9 @@ type Server struct {
 	qmu   sync.Mutex
 	queue []matchRequest
 
+	attempts, registers, failures *limiter
+	hashing                       chan struct{}
+
 	stats struct {
 		gamesStarted, gamesFinished, actions, conns atomic.Int64
 	}
@@ -87,7 +119,18 @@ func New(cfg Config) *Server {
 	if cfg.Games == nil {
 		cfg.Games = store.NewMemory()
 	}
+	lim := DefaultAuthLimits
+	if cfg.AuthLimits != nil {
+		lim = *cfg.AuthLimits
+	}
+	if lim.Hashing <= 0 {
+		lim.Hashing = runtime.GOMAXPROCS(0)
+	}
 	return &Server{
+		attempts:  newLimiter(lim.AttemptsPerIP, lim.AttemptEvery),
+		registers: newLimiter(lim.RegistersPerIP, lim.RegisterEvery),
+		failures:  newLimiter(lim.FailuresPerUser, lim.FailureEvery),
+		hashing:   make(chan struct{}, lim.Hashing),
 		auth:      cfg.Auth,
 		gameStore: cfg.Games,
 		log:       cfg.Logger,
@@ -168,13 +211,28 @@ func (s *Server) handle(c *Conn, m *pb.ClientMessage) {
 	id := m.RequestId
 	switch b := m.Body.(type) {
 	case *pb.ClientMessage_Register:
+		if !s.allowAuth(c, id, "", true) {
+			return
+		}
 		s.authenticate(c, id, func(ctx context.Context) (*auth.Result, error) {
-			return s.auth.Register(ctx, b.Register.Username, b.Register.Password, b.Register.Nickname)
+			return s.hashed(ctx, func() (*auth.Result, error) {
+				return s.auth.Register(ctx, b.Register.Username, b.Register.Password, b.Register.Nickname)
+			})
 		})
 		return
 	case *pb.ClientMessage_Login:
+		user := strings.ToLower(b.Login.Username)
+		if !s.allowAuth(c, id, user, false) {
+			return
+		}
 		s.authenticate(c, id, func(ctx context.Context) (*auth.Result, error) {
-			return s.auth.Login(ctx, b.Login.Username, b.Login.Password)
+			res, err := s.hashed(ctx, func() (*auth.Result, error) {
+				return s.auth.Login(ctx, b.Login.Username, b.Login.Password)
+			})
+			if errors.Is(err, auth.ErrInvalidCredentials) && limited(c) {
+				s.failures.take(user, time.Now())
+			}
+			return res, err
 		})
 		return
 	case *pb.ClientMessage_Resume:
@@ -217,6 +275,49 @@ func (s *Server) handle(c *Conn, m *pb.ClientMessage) {
 	default:
 		c.sendError(id, pb.ErrorCode_ERROR_CODE_BAD_REQUEST, "", "unsupported message")
 	}
+}
+
+// remoteIP is the address of the client at the other end of a transport,
+// if the transport knows it.
+func remoteIP(t Transport) string {
+	if r, ok := t.(interface{ RemoteIP() string }); ok {
+		return r.RemoteIP()
+	}
+	return ""
+}
+
+// limited reports whether c is subject to AuthLimits.
+func limited(c *Conn) bool {
+	ip := net.ParseIP(remoteIP(c.t))
+	return ip != nil && !ip.IsLoopback()
+}
+
+// allowAuth checks the rate limits for a login (to user) or registration,
+// sending an error if c is over them.
+func (s *Server) allowAuth(c *Conn, id uint32, user string, register bool) bool {
+	if c.user != nil || !limited(c) {
+		return true // authenticate reports "already logged in"
+	}
+	now := time.Now()
+	ip := remoteIP(c.t)
+	ok := s.attempts.take(ip, now) &&
+		(!register || s.registers.take(ip, now)) &&
+		(register || s.failures.allow(user, now))
+	if !ok {
+		c.sendError(id, pb.ErrorCode_ERROR_CODE_RATE_LIMITED, "", "too many attempts; try again later")
+	}
+	return ok
+}
+
+// hashed runs fn, which hashes a password, once a hashing slot is free.
+func (s *Server) hashed(ctx context.Context, fn func() (*auth.Result, error)) (*auth.Result, error) {
+	select {
+	case s.hashing <- struct{}{}:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	defer func() { <-s.hashing }()
+	return fn()
 }
 
 func (s *Server) authenticate(c *Conn, id uint32, fn func(context.Context) (*auth.Result, error)) {

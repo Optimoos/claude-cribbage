@@ -1,0 +1,47 @@
+# systemd unit for the cribbage server. Install as
+# /etc/systemd/system/cribbage.service (see README.md).
+[Unit]
+Description=Cribbage game server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=cribbage
+Group=cribbage
+WorkingDirectory=/var/lib/cribbage
+# HTTP and the bot TCP port listen on localhost only: Caddy serves HTTPS,
+# and only WebRTC (UDP 7778) faces the internet. Add
+# -public-ip <address> on clouds whose public IP is NATed (AWS, GCP, Azure).
+ExecStart=/opt/cribbage/cribserver \
+	-http 127.0.0.1:8080 \
+	-tcp 127.0.0.1:7777 \
+	-rtc-port 7778 \
+	-db /var/lib/cribbage/cribbage.db \
+	-backup-dir /var/lib/cribbage/backups \
+	-backup-every 24h -backup-keep 14 \
+	-expert /opt/cribbage/expert.bin \
+	-stats 5m
+Restart=always
+RestartSec=2
+TimeoutStopSec=15
+
+# Hardening: the server needs only its data directory and the network.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ReadWritePaths=/var/lib/cribbage
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

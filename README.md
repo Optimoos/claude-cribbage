@@ -192,6 +192,13 @@ the `data_*` folder, so players need nothing installed). It needs the Godot
 `linux_*.x86_64`, `windows_*_x86_64*.exe` and `version.txt` are used).
 Set `GODOT` to the editor binary if it is not in the repo root.
 
+## Deployment
+
+See [deploy/README.md](deploy/README.md): one VPS running `cribserver` under
+systemd behind Caddy for HTTPS, with UDP 7778 open for WebRTC, daily
+database backups (`-backup-dir`, `-backup-every`, `-backup-keep`) and
+login rate limits. The server stops cleanly on SIGINT or SIGTERM.
+
 ## Persistence
 
 The server keeps users, sessions and games in SQLite (`-db`, default

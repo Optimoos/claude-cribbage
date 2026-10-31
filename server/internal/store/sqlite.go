@@ -68,9 +68,10 @@ CREATE TABLE IF NOT EXISTS action_log (
 // through one goroutine that groups queued writes into a single transaction
 // ("group commit").
 type SQLite struct {
-	db     *sql.DB
-	writes chan *writeOp
-	done   chan struct{}
+	db      *sql.DB
+	writes  chan *writeOp
+	backups chan backupReq
+	done    chan struct{}
 
 	insertAction *sql.Stmt
 
@@ -144,7 +145,7 @@ func OpenSQLite(path string) (*SQLite, error) {
 		return nil, err
 	}
 	s := &SQLite{
-		db: db, writes: make(chan *writeOp, 4*maxBatch), done: make(chan struct{}),
+		db: db, writes: make(chan *writeOp, 4*maxBatch), backups: make(chan backupReq), done: make(chan struct{}),
 		insertAction: ins, live: map[string]*liveGame{},
 	}
 	go s.writer()
@@ -190,6 +191,9 @@ func (s *SQLite) writer() {
 			s.commit(batch)
 			s.batches.Add(1)
 			s.ops.Add(int64(len(batch)))
+		case b := <-s.backups:
+			_, err := s.db.Exec(`VACUUM INTO ?`, b.path)
+			b.err <- err
 		case <-gc.C:
 			if s.loaded.Load() {
 				if err := s.collect(); err != nil {

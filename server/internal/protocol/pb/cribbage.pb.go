@@ -35,6 +35,7 @@ const (
 	ErrorCode_ERROR_CODE_ILLEGAL_ACTION        ErrorCode = 8
 	ErrorCode_ERROR_CODE_GAME_UNAVAILABLE      ErrorCode = 9
 	ErrorCode_ERROR_CODE_INTERNAL              ErrorCode = 10
+	ErrorCode_ERROR_CODE_RATE_LIMITED          ErrorCode = 11 // too many attempts; try again later
 )
 
 // Enum value maps for ErrorCode.
@@ -51,6 +52,7 @@ var (
 		8:  "ERROR_CODE_ILLEGAL_ACTION",
 		9:  "ERROR_CODE_GAME_UNAVAILABLE",
 		10: "ERROR_CODE_INTERNAL",
+		11: "ERROR_CODE_RATE_LIMITED",
 	}
 	ErrorCode_value = map[string]int32{
 		"ERROR_CODE_UNSPECIFIED":           0,
@@ -64,6 +66,7 @@ var (
 		"ERROR_CODE_ILLEGAL_ACTION":        8,
 		"ERROR_CODE_GAME_UNAVAILABLE":      9,
 		"ERROR_CODE_INTERNAL":              10,
+		"ERROR_CODE_RATE_LIMITED":          11,
 	}
 )
 
@@ -2575,7 +2578,7 @@ const file_cribbage_v1_cribbage_proto_rawDesc = "" +
 	"\x06scores\x18\t \x03(\x05R\x06scores\x12\x14\n" +
 	"\x05skunk\x18\n" +
 	" \x01(\x05R\x05skunkB\a\n" +
-	"\x05_card*\xdb\x02\n" +
+	"\x05_card*\xf8\x02\n" +
 	"\tErrorCode\x12\x1a\n" +
 	"\x16ERROR_CODE_UNSPECIFIED\x10\x00\x12\x1a\n" +
 	"\x16ERROR_CODE_BAD_REQUEST\x10\x01\x12\x1e\n" +
@@ -2588,7 +2591,8 @@ const file_cribbage_v1_cribbage_proto_rawDesc = "" +
 	"\x19ERROR_CODE_ILLEGAL_ACTION\x10\b\x12\x1f\n" +
 	"\x1bERROR_CODE_GAME_UNAVAILABLE\x10\t\x12\x17\n" +
 	"\x13ERROR_CODE_INTERNAL\x10\n" +
-	"*t\n" +
+	"\x12\x1b\n" +
+	"\x17ERROR_CODE_RATE_LIMITED\x10\v*t\n" +
 	"\n" +
 	"GameStatus\x12\x1b\n" +
 	"\x17GAME_STATUS_UNSPECIFIED\x10\x00\x12\x17\n" +

@@ -7,7 +7,6 @@ package rtc
 
 import (
 	"errors"
-	"fmt"
 	"io"
 	"sync"
 
@@ -141,7 +140,21 @@ func (c *Conn) Close() error {
 	return nil
 }
 
-func (c *Conn) String() string { return fmt.Sprintf("webrtc:%s", c.dc.Label()) }
+func (c *Conn) String() string { return "webrtc:" + c.RemoteIP() }
+
+// RemoteIP is the client's address on the ICE candidate pair in use: where
+// its packets actually come from, even when signaling went through a proxy.
+func (c *Conn) RemoteIP() string {
+	sctp := c.pc.SCTP()
+	if sctp == nil || sctp.Transport() == nil {
+		return ""
+	}
+	pair, err := sctp.Transport().ICETransport().GetSelectedCandidatePair()
+	if err != nil || pair == nil || pair.Remote == nil {
+		return ""
+	}
+	return pair.Remote.Address
+}
 
 // Done is closed when the connection closes.
 func (c *Conn) Done() <-chan struct{} { return c.closed }

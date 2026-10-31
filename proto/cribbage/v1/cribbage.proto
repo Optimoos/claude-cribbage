@@ -116,6 +116,7 @@ enum ErrorCode {
   ERROR_CODE_ILLEGAL_ACTION = 8;
   ERROR_CODE_GAME_UNAVAILABLE = 9;
   ERROR_CODE_INTERNAL = 10;
+  ERROR_CODE_RATE_LIMITED = 11; // too many attempts; try again later
 }
 
 message Error {

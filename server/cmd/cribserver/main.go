@@ -13,6 +13,7 @@ import (
 	"os/signal"
 	"runtime"
 	"strings"
+	"syscall"
 	"time"
 
 	"golang.org/x/crypto/bcrypt"
@@ -39,6 +40,9 @@ func main() {
 	bcryptCost := flag.Int("bcrypt-cost", bcrypt.DefaultCost, "bcrypt cost for password hashes")
 	pprofAddr := flag.String("pprof", "", "serve net/http/pprof on this address (e.g. localhost:6060)")
 	model := flag.String("model", "", "neural network model to offer as the \"nn\" bot (e.g. models/best.bin)")
+	backupDir := flag.String("backup-dir", "", "write database backups here (empty disables)")
+	backupEvery := flag.Duration("backup-every", 24*time.Hour, "how often to back up the database (also once at startup)")
+	backupKeep := flag.Int("backup-keep", 7, "how many backups to keep")
 	expertPath := flag.String("expert", "", "expert bundle to offer as the \"expert\" bots (e.g. models-expert/expert.bin)")
 	flag.Parse()
 
@@ -151,9 +155,20 @@ func main() {
 	if *statsEvery > 0 {
 		go logStats(log, srv, sq, *statsEvery)
 	}
+	stopBackups := make(chan struct{})
+	backupsDone := make(chan struct{})
+	if sq != nil && *backupDir != "" {
+		go backups(log, sq, *backupDir, *backupEvery, *backupKeep, stopBackups, backupsDone)
+	} else {
+		close(backupsDone)
+		if *backupDir != "" {
+			log.Warn("no database: -backup-dir ignored")
+		}
+	}
 
+	// systemd and docker stop with SIGTERM; a terminal with SIGINT.
 	sig := make(chan os.Signal, 1)
-	signal.Notify(sig, os.Interrupt)
+	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
 	<-sig
 	log.Info("shutting down")
 	ln.Close()
@@ -161,12 +176,36 @@ func main() {
 		httpSrv.Close()
 	}
 	srv.Shutdown()
+	close(stopBackups)
+	<-backupsDone
 	if rtcAPI != nil {
 		rtcAPI.Close()
 	}
 	if sq != nil {
 		if err := sq.Close(); err != nil {
 			fail("close database", err)
+		}
+	}
+}
+
+// backups writes a database backup now and then every interval until stop
+// is closed.
+func backups(log *slog.Logger, sq *store.SQLite, dir string, every time.Duration, keep int, stop, done chan struct{}) {
+	defer close(done)
+	t := time.NewTicker(every)
+	defer t.Stop()
+	for {
+		start := time.Now()
+		path, err := sq.BackupTo(context.Background(), dir, keep)
+		if err != nil {
+			log.Error("database backup failed", "err", err)
+		} else {
+			log.Info("database backed up", "path", path, "took", time.Since(start).Round(time.Millisecond))
+		}
+		select {
+		case <-t.C:
+		case <-stop:
+			return
 		}
 	}
 }
