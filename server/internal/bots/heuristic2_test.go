@@ -195,3 +195,39 @@ func TestHoldingsLikelihood(t *testing.T) {
 		t.Errorf("log-likelihood %.1f with the model, %.1f by card counting", ll[1], ll[0])
 	}
 }
+
+func TestShapeIndex(t *testing.T) {
+	seen := make([]bool, numShapes)
+	for a := 1; a <= 13; a++ {
+		for b := a; b <= 13; b++ {
+			for c := b; c <= 13; c++ {
+				for d := c; d <= 13; d++ {
+					// Suits and order do not matter.
+					sh := shapeIndex([4]engine.Card{engine.NewCard(d, engine.Hearts), engine.NewCard(b, engine.Clubs),
+						engine.NewCard(a, engine.Spades), engine.NewCard(c, engine.Diamonds)})
+					if seen[sh] {
+						t.Fatalf("%d %d %d %d: shape %d seen twice", a, b, c, d, sh)
+					}
+					seen[sh] = true
+				}
+			}
+		}
+	}
+	if sh := shapeIndex([4]engine.Card(cards("AC AD AH AS"))); sh != 0 {
+		t.Errorf("AAAA is shape %d", sh)
+	}
+	if sh := shapeIndex([4]engine.Card(cards("KC KD KH KS"))); sh != numShapes-1 {
+		t.Errorf("KKKK is shape %d", sh)
+	}
+}
+
+// Low cards and pairs peg better than ten-cards, on either side.
+func TestH2PegShape(t *testing.T) {
+	low := shapeIndex([4]engine.Card(cards("2C 2D 3H 3S")))
+	high := shapeIndex([4]engine.Card(cards("TC JD QH KS")))
+	for side := range h2PegShape {
+		if l, h := h2PegShape[side][low], h2PegShape[side][high]; l <= h+1 {
+			t.Errorf("side %d: 2233 pegs %.2f, TJQK %.2f", side, l, h)
+		}
+	}
+}

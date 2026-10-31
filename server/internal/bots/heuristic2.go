@@ -2,6 +2,7 @@ package bots
 
 import (
 	"math"
+	"slices"
 	"sync"
 
 	"cribbage/internal/engine"
@@ -16,8 +17,9 @@ const DefaultEndgame = 90
 // Heuristic2 is Heuristic with score-aware discards: once either player
 // has Endgame points or more, it keeps the four cards that maximize its
 // probability of winning the game rather than its expected points. Before
-// that it maximizes points as Heuristic does, but values the crib by side:
-// the other two crib cards are what the opponent tends to throw. That
+// that it maximizes points as Heuristic does, but values the crib by side
+// (the other two crib cards are what the opponent tends to throw) and
+// counts how well the kept cards tend to peg. That
 // probability follows the counting order (pegging, the pone's show, the
 // dealer's show, the crib) and then a win table for the hands after,
 // all built from heuristic self-play statistics (h2stats.go). Pegging
@@ -83,7 +85,7 @@ func (h *Heuristic2) chooseWinDiscard(o *engine.Observation, legal []engine.Acti
 }
 
 // chooseDiscard2 keeps the four cards with the most expected points: their
-// show plus (dealer) or minus (pone) the crib by side.
+// show and pegging plus (dealer) or minus (pone) the crib by side.
 func chooseDiscard2(o *engine.Observation, legal []engine.Action) engine.Action {
 	h2Once.Do(buildH2)
 	hand := o.HandCards()
@@ -101,7 +103,12 @@ func chooseDiscard2(o *engine.Observation, legal []engine.Action) engine.Action 
 	return best
 }
 
-// discardEV2 is discardEV with the crib valued by side.
+// pegWeight scales the kept shape's pegging value (h2PegShape) in
+// discardEV2. Paired against heuristic, 0.5 to 1 did best; 1.5 overshot.
+const pegWeight = 0.75
+
+// discardEV2 is discardEV with the crib valued by side, plus how well the
+// kept cards tend to peg.
 func discardEV2(kept [4]engine.Card, a engine.Action, held *[52]bool, dealer bool) float64 {
 	side := cribSide(dealer)
 	means := &h2CribMean[side][a.Cards[0].Rank()][a.Cards[1].Rank()]
@@ -112,10 +119,11 @@ func discardEV2(kept [4]engine.Card, a engine.Action, held *[52]bool, dealer boo
 		}
 	}
 	crib /= 46
+	v := HandEV(kept, held) + pegWeight*float64(h2PegShape[side][shapeIndex(kept)])
 	if dealer {
-		return HandEV(kept, held) + crib
+		return v + crib
 	}
-	return HandEV(kept, held) - crib
+	return v - crib
 }
 
 // cribSide indexes the crib tables: 0 for the dealer's discards, 1 for the
@@ -422,4 +430,32 @@ func buildH2Win() {
 			s1[d][p] = v
 		}
 	}
+}
+
+// numShapes is the number of shapes: multisets of four ranks.
+const numShapes = 1820
+
+// shapeIdx numbers each sorted shape, keyed in base 14, in order: AAAA,
+// AAA2, ... KKKK.
+var shapeIdx = func() []int16 {
+	idx := make([]int16, 14*14*14*14)
+	n := int16(0)
+	for a := 1; a <= 13; a++ {
+		for b := a; b <= 13; b++ {
+			for c := b; c <= 13; c++ {
+				for d := c; d <= 13; d++ {
+					idx[((a*14+b)*14+c)*14+d] = n
+					n++
+				}
+			}
+		}
+	}
+	return idx
+}()
+
+// shapeIndex is the shape of four kept cards.
+func shapeIndex(kept [4]engine.Card) int {
+	r := [4]int{kept[0].Rank(), kept[1].Rank(), kept[2].Rank(), kept[3].Rank()}
+	slices.Sort(r[:])
+	return int(shapeIdx[((r[0]*14+r[1])*14+r[2])*14+r[3]])
 }

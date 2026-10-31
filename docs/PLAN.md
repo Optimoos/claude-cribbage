@@ -665,3 +665,43 @@ points minus theirs by side and shape), to the discard value.
 **Verify:** paired gain; combined `heuristic2` lands between
 `heuristic` and `expert-easy` in the level table, and is offered in the
 lobby if so.
+
+**Built (2026-10-29):** `heuristic2`'s points rule for discards adds
+0.75 × the kept shape's pegging value: the mean of my pegging less the
+opponent's, by side and by shape (the 1820 multisets of four ranks).
+It comes from the same heuristic self-play hands (`h2PegShape` in
+`h2stats.go`) and is shrunk toward a per-rank estimate with the weight
+of 200 hands. Heuristic self-play keeps the generator independent of
+`heuristic2`, so regenerating is stable. Low cards and pairs peg best
+(dealer 2-2-3-3: +2.13), ten-cards worst (pone 10-J-Q-K: −2.41). The
+endgame rule is unchanged.
+
+| Variant (200k games, paired vs `heuristic`) | Win % | Margin | Pegging per hand |
+|---|---|---|---|
+| M20 (weight 0) | 52.22 ± 0.13 | +0.91 | +0.100 |
+| Weight 0.5 | 52.65 ± 0.13 | +1.12 | +0.133 |
+| Weight 0.75 (shipped) | 52.71 ± 0.13 | +1.16 | +0.152 |
+| Weight 1 | 52.61 ± 0.14 | +1.13 | +0.170 |
+| Weight 1.5 | 52.23 ± 0.14 | +0.96 | +0.196 |
+
+With weight 0.75, starting the endgame at 100 or 110 instead of 90 gave
+the same win rate (52.70, 52.69), so the endgame rule's lack of a
+pegging value costs little.
+
+## Where heuristic2 ended up
+
+| Milestone | vs `heuristic` |
+|---|---|
+| M17 score-aware endgame discards | 50.30 ± 0.07 |
+| M18 three-play pegging lookahead | 51.78 ± 0.12 |
+| M19 weighted opponent holdings | 52.23 ± 0.12 |
+| M20 crib by side | 52.22 ± 0.13 |
+| M21 pegging value of the kept hand | 52.71 ± 0.13 |
+
+Paired over 200k games, the final `heuristic2` wins 51.57% ± 0.14
+against `expert-easy` and 47.86% ± 0.14 against `expert-medium`. It
+lands between those two levels, not below `expert-easy` as planned,
+with 0.5 ms discards (mean; p99 5 ms) and 10 µs pegging decisions.
+Pegging gave most of the gain (M18, M19, M21: +2.4 points), and the
+discard ideas alone (M17, M20) gave +0.3. The plan expected 3 to 4
+points from rules; this is 2.7.
