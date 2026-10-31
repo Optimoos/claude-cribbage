@@ -90,4 +90,25 @@ type GameStore interface {
 	// RecentGames returns a user's most recently finished games, newest
 	// first.
 	RecentGames(ctx context.Context, userID int64, limit int) ([]Game, error)
+	// LoadGame returns an unfinished game with its actions, to wake a game
+	// that was put to sleep.
+	LoadGame(ctx context.Context, id string) (*GameWithActions, error)
+
+	CreateInvite(ctx context.Context, inv *Invite) error
+	DeleteInvite(ctx context.Context, id string) error
+	// LoadInvites returns every stored invite, expired or not.
+	LoadInvites(ctx context.Context) ([]Invite, error)
+}
+
+// Invite is a pending invitation to a game, from one user to another or,
+// with a code and no To, to whoever enters the code.
+type Invite struct {
+	ID       string
+	From     int64
+	FromName string // nickname when sent
+	To       int64  // 0 for a code invite
+	ToName   string
+	Code     string // "" unless a code invite
+	Created  time.Time
+	Expires  time.Time
 }

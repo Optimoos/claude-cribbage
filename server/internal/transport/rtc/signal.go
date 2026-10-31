@@ -112,6 +112,9 @@ func readSignal(ctx context.Context, ws *websocket.Conn) (signal, error) {
 	return m, json.Unmarshal(b, &m)
 }
 
+// maxMessage is the largest data channel message accepted.
+const maxMessage = 64 << 10
+
 // Options configure WebRTC networking.
 type Options struct {
 	// UDPPort, if non-zero, carries all WebRTC traffic on one UDP port
@@ -147,6 +150,11 @@ func NewAPI(o Options) (*API, error) {
 	}
 	var se webrtc.SettingEngine
 	se.SetIncludeLoopbackCandidate(true) // lets a browser on the same machine connect
+	// Every protocol message is small. Advertise that, and bound what a
+	// peer can make us buffer (pion's defaults: 1 GiB messages, 1 MiB
+	// receive buffer); conn.go closes a peer that sends more anyway.
+	se.SetSCTPMaxMessageSize(maxMessage)
+	se.SetSCTPMaxReceiveBufferSize(4 * maxMessage)
 	a := &API{log: o.Logger}
 	if o.UDPPort != 0 {
 		mux, err := ice.NewMultiUDPMuxFromPort(o.UDPPort, ice.UDPMuxFromPortWithLoopback())

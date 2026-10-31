@@ -44,6 +44,41 @@ type Config struct {
 	// AuthLimits bounds login and registration attempts; nil uses
 	// DefaultAuthLimits.
 	AuthLimits *AuthLimits
+	// GameLimits bounds games and invites per player and sets how long
+	// they last; nil uses DefaultGameLimits.
+	GameLimits *GameLimits
+}
+
+// GameLimits bounds what one player can hold open, and when idle games
+// sleep and expire.
+type GameLimits struct {
+	Games    int // unfinished games (waiting or active) per player
+	BotGames int // of which against server bots
+	Open     int // open games waiting for anyone to join
+
+	InvitesOut int // invites a player has sent awaiting an answer
+	InvitesIn  int // invites waiting for one player's answer
+
+	InviteFor  time.Duration // an invite nobody answers is withdrawn
+	OpenFor    time.Duration // an open game nobody joins is cancelled
+	HumanIdle  time.Duration // a game between people with no move expires
+	BotIdle    time.Duration // a game against a bot with no move expires
+	SleepAfter time.Duration // a game with no activity leaves memory
+	SweepEvery time.Duration // how often to look for expired games and invites
+}
+
+// DefaultGameLimits suit slow family games: up to 20 games each, games
+// between people last 60 days without a move, and a game sleeps (costing
+// only its database rows) after 10 minutes without activity.
+var DefaultGameLimits = GameLimits{
+	Games: 20, BotGames: 5, Open: 1,
+	InvitesOut: 5, InvitesIn: 20,
+	InviteFor:  48 * time.Hour,
+	OpenFor:    48 * time.Hour,
+	HumanIdle:  60 * 24 * time.Hour,
+	BotIdle:    30 * 24 * time.Hour,
+	SleepAfter: 10 * time.Minute,
+	SweepEvery: time.Hour,
 }
 
 // AuthLimits bounds password attempts from remote clients, as token buckets
@@ -56,18 +91,25 @@ type AuthLimits struct {
 	RegisterEvery   time.Duration
 	FailuresPerUser int // failed logins to one username
 	FailureEvery    time.Duration
+	// Connections: at most ConnsPerAddr from one address (as limited
+	// above) and Conns in all; one that has not logged in after
+	// LoginWithin is closed.
+	ConnsPerAddr int
+	Conns        int
+	LoginWithin  time.Duration
 	// Hashing is how many bcrypt operations may run at once (default
-	// GOMAXPROCS), so a flood of logins cannot starve the games.
+	// GOMAXPROCS-1), so a flood of logins cannot starve the games.
 	Hashing int
 }
 
 // DefaultAuthLimits allows 20 quick attempts per address then 10 a minute,
-// 5 registrations then 5 an hour, and 10 failed logins per username then 1 a
-// minute.
+// 5 registrations then 5 an hour, and 10 failed logins per username from
+// one address then 1 a minute. IPv6 addresses count by their /64.
 var DefaultAuthLimits = AuthLimits{
 	AttemptsPerIP: 20, AttemptEvery: 6 * time.Second,
 	RegistersPerIP: 5, RegisterEvery: 12 * time.Minute,
 	FailuresPerUser: 10, FailureEvery: time.Minute,
+	ConnsPerAddr: 20, Conns: 5000, LoginWithin: 30 * time.Second,
 }
 
 // Server routes client requests to game actors.
@@ -98,6 +140,19 @@ type Server struct {
 	attempts, registers, failures *limiter
 	hashing                       chan struct{}
 
+	limits  GameLimits
+	authLim AuthLimits // connection limits (cmu guards connsByAddr)
+
+	connsByAddr map[string]int
+	// reserved counts games being created for each user, not yet in
+	// userGames, so concurrent creations cannot pass the limits. Guarded
+	// by gmu.
+	reserved map[int64]reservation
+
+	imu                    sync.Mutex
+	inv                    invites
+	invitesSent, codeTries *limiter
+
 	stats struct {
 		gamesStarted, gamesFinished, actions, conns atomic.Int64
 	}
@@ -119,29 +174,44 @@ func New(cfg Config) *Server {
 	if cfg.Games == nil {
 		cfg.Games = store.NewMemory()
 	}
+	gl := DefaultGameLimits
+	if cfg.GameLimits != nil {
+		gl = *cfg.GameLimits
+	}
 	lim := DefaultAuthLimits
 	if cfg.AuthLimits != nil {
 		lim = *cfg.AuthLimits
 	}
 	if lim.Hashing <= 0 {
-		lim.Hashing = runtime.GOMAXPROCS(0)
+		lim.Hashing = max(1, runtime.GOMAXPROCS(0)-1) // leave a core for the games
 	}
-	return &Server{
-		attempts:  newLimiter(lim.AttemptsPerIP, lim.AttemptEvery),
-		registers: newLimiter(lim.RegistersPerIP, lim.RegisterEvery),
-		failures:  newLimiter(lim.FailuresPerUser, lim.FailureEvery),
-		hashing:   make(chan struct{}, lim.Hashing),
-		auth:      cfg.Auth,
-		gameStore: cfg.Games,
-		log:       cfg.Logger,
-		outbox:    cfg.OutboxSize,
-		quit:      make(chan struct{}),
-		allConns:  map[*Conn]struct{}{},
-		games:     map[string]*game{},
-		userGames: map[int64]map[string]*game{},
-		open:      map[string]*game{},
-		conns:     map[int64]map[*Conn]struct{}{},
+	s := &Server{
+		attempts:    newLimiter(lim.AttemptsPerIP, lim.AttemptEvery),
+		registers:   newLimiter(lim.RegistersPerIP, lim.RegisterEvery),
+		failures:    newLimiter(lim.FailuresPerUser, lim.FailureEvery),
+		hashing:     make(chan struct{}, lim.Hashing),
+		limits:      gl,
+		authLim:     lim,
+		connsByAddr: map[string]int{},
+		reserved:    map[int64]reservation{},
+		inv:         newInvites(),
+		// Ten invites, then one every six minutes; ten code guesses, then
+		// one a minute.
+		invitesSent: newLimiter(10, 6*time.Minute),
+		codeTries:   newLimiter(10, time.Minute),
+		auth:        cfg.Auth,
+		gameStore:   cfg.Games,
+		log:         cfg.Logger,
+		outbox:      cfg.OutboxSize,
+		quit:        make(chan struct{}),
+		allConns:    map[*Conn]struct{}{},
+		games:       map[string]*game{},
+		userGames:   map[int64]map[string]*game{},
+		open:        map[string]*game{},
+		conns:       map[int64]map[*Conn]struct{}{},
 	}
+	go s.sweep()
+	return s
 }
 
 // Stats is a point-in-time snapshot of server activity.
@@ -183,14 +253,30 @@ func (s *Server) ServeTCP(ln net.Listener) error {
 // ServeConn handles one client until its transport fails or is closed.
 func (s *Server) ServeConn(t Transport) {
 	c := &Conn{srv: s, t: t, out: make(chan *pb.ServerMessage, s.outbox), done: make(chan struct{}), drain: make(chan struct{})}
+	if limited(c) {
+		c.addr = addrKey(remoteIP(t))
+	}
 	s.cmu.Lock()
-	if s.shuttingDown() {
+	if s.shuttingDown() || len(s.allConns) >= s.authLim.Conns ||
+		(c.addr != "" && s.connsByAddr[c.addr] >= s.authLim.ConnsPerAddr) {
 		s.cmu.Unlock()
 		t.Close()
 		return
 	}
 	s.allConns[c] = struct{}{}
+	if c.addr != "" {
+		s.connsByAddr[c.addr]++
+	}
 	s.cmu.Unlock()
+	if c.addr != "" {
+		// Remote connections must log in promptly.
+		t := time.AfterFunc(s.authLim.LoginWithin, func() {
+			if !c.authed.Load() {
+				c.close()
+			}
+		})
+		defer t.Stop()
+	}
 	s.stats.conns.Add(1)
 	go c.writeLoop()
 	defer func() {
@@ -221,8 +307,16 @@ func (s *Server) handle(c *Conn, m *pb.ClientMessage) {
 		})
 		return
 	case *pb.ClientMessage_Login:
-		user := strings.ToLower(b.Login.Username)
-		if !s.allowAuth(c, id, user, false) {
+		// A name that cannot exist is refused before it costs a hash, a
+		// lookup or a place in the limiter's table.
+		if c.user == nil && !auth.ValidUsername(b.Login.Username) {
+			c.sendError(id, pb.ErrorCode_ERROR_CODE_INVALID_CREDENTIALS, "", auth.ErrInvalidCredentials.Error())
+			return
+		}
+		// Failures count per username and address together, so nobody can
+		// lock a player out by guessing wrong from elsewhere.
+		key := strings.ToLower(b.Login.Username) + "|" + addrKey(remoteIP(c.t))
+		if !s.allowAuth(c, id, key, false) {
 			return
 		}
 		s.authenticate(c, id, func(ctx context.Context) (*auth.Result, error) {
@@ -230,7 +324,7 @@ func (s *Server) handle(c *Conn, m *pb.ClientMessage) {
 				return s.auth.Login(ctx, b.Login.Username, b.Login.Password)
 			})
 			if errors.Is(err, auth.ErrInvalidCredentials) && limited(c) {
-				s.failures.take(user, time.Now())
+				s.failures.take(key, time.Now())
 			}
 			return res, err
 		})
@@ -258,7 +352,14 @@ func (s *Server) handle(c *Conn, m *pb.ClientMessage) {
 	case *pb.ClientMessage_CreateGame:
 		s.createGame(c, id, b.CreateGame.Bot)
 	case *pb.ClientMessage_JoinGame:
-		s.withGame(c, id, b.JoinGame.GameId, func(g *game) { g.join(c, id) })
+		release, err := s.reserve(gameKind{}, reserveFor{id: c.user.ID, self: true})
+		if err != nil {
+			s.sendLimit(c, id, err)
+			return
+		}
+		if !s.withGame(c, id, b.JoinGame.GameId, func(g *game) { defer release(); g.join(c, id) }) {
+			release()
+		}
 	case *pb.ClientMessage_ListGames:
 		s.listGames(c, id)
 	case *pb.ClientMessage_FindMatch:
@@ -270,6 +371,12 @@ func (s *Server) handle(c *Conn, m *pb.ClientMessage) {
 		s.withGame(c, id, b.SyncGame.GameId, func(g *game) { g.sync(c, id) })
 	case *pb.ClientMessage_Act:
 		s.withGame(c, id, b.Act.GameId, func(g *game) { g.act(c, id, b.Act.Action) })
+	case *pb.ClientMessage_SendInvite:
+		s.sendInvite(c, id, b.SendInvite.Username)
+	case *pb.ClientMessage_RespondInvite:
+		s.respondInvite(c, id, b.RespondInvite.InviteId, b.RespondInvite.Accept)
+	case *pb.ClientMessage_RedeemCode:
+		s.redeemCode(c, id, b.RedeemCode.Code)
 	case *pb.ClientMessage_Resign:
 		s.withGame(c, id, b.Resign.GameId, func(g *game) { g.resign(c, id) })
 	default:
@@ -286,10 +393,29 @@ func remoteIP(t Transport) string {
 	return ""
 }
 
-// limited reports whether c is subject to AuthLimits.
+// limited reports whether c is subject to AuthLimits: every connection
+// over a transport that reports addresses (TCP, WebRTC), except from
+// loopback. One whose address is not known yet is limited, as "unknown".
 func limited(c *Conn) bool {
+	if _, ok := c.t.(interface{ RemoteIP() string }); !ok {
+		return false // in-process
+	}
 	ip := net.ParseIP(remoteIP(c.t))
-	return ip != nil && !ip.IsLoopback()
+	return ip == nil || !ip.IsLoopback()
+}
+
+// addrKey is the limiter key for an address: IPv4 addresses as they are,
+// IPv6 by their /64, since one household or server usually has a whole /64.
+func addrKey(addr string) string {
+	ip := net.ParseIP(addr)
+	switch {
+	case ip == nil:
+		return "unknown"
+	case ip.To4() != nil:
+		return ip.String()
+	default:
+		return ip.Mask(net.CIDRMask(64, 128)).String() + "/64"
+	}
 }
 
 // allowAuth checks the rate limits for a login (to user) or registration,
@@ -299,7 +425,7 @@ func (s *Server) allowAuth(c *Conn, id uint32, user string, register bool) bool 
 		return true // authenticate reports "already logged in"
 	}
 	now := time.Now()
-	ip := remoteIP(c.t)
+	ip := addrKey(remoteIP(c.t))
 	ok := s.attempts.take(ip, now) &&
 		(!register || s.registers.take(ip, now)) &&
 		(register || s.failures.allow(user, now))
@@ -345,6 +471,7 @@ func (s *Server) authenticate(c *Conn, id uint32, fn func(context.Context) (*aut
 		return
 	}
 	c.user = res.User
+	c.authed.Store(true)
 	s.registerConn(c)
 	c.send(&pb.ServerMessage{RequestId: id, Body: &pb.ServerMessage_AuthOk{AuthOk: &pb.AuthOk{
 		UserId: res.User.ID, Username: res.User.Username, Nickname: res.User.Nickname, Token: res.Token,
@@ -356,20 +483,28 @@ func (s *Server) authenticate(c *Conn, id uint32, fn func(context.Context) (*aut
 	}
 }
 
-func (s *Server) withGame(c *Conn, id uint32, gameID string, fn func(*game)) {
+// withGame runs fn on the game's actor and reports whether it was queued.
+func (s *Server) withGame(c *Conn, id uint32, gameID string, fn func(*game)) bool {
 	s.gmu.RLock()
 	g := s.games[gameID]
 	s.gmu.RUnlock()
 	if g == nil || !g.submit(func() { fn(g) }) {
-		if s.shuttingDown() {
-			return // the connection is about to close; the client will resync
+		if !s.shuttingDown() { // else the connection is about to close and the client will resync
+			c.sendError(id, pb.ErrorCode_ERROR_CODE_NOT_FOUND, gameID, "no such active game")
 		}
-		c.sendError(id, pb.ErrorCode_ERROR_CODE_NOT_FOUND, gameID, "no such active game")
+		return false
 	}
+	return true
 }
 
 func (s *Server) createGame(c *Conn, id uint32, botName string) {
 	creator := seat{userID: c.user.ID, nickname: c.user.Nickname}
+	release, err := s.reserve(gameKind{bot: botName != "", open: botName == ""}, reserveFor{id: c.user.ID, self: true})
+	if err != nil {
+		s.sendLimit(c, id, err)
+		return
+	}
+	defer release()
 	if botName == "" {
 		g, err := s.newGame([2]seat{creator, {}}, false)
 		if err != nil {
@@ -399,11 +534,37 @@ func (s *Server) createGame(c *Conn, id uint32, botName string) {
 }
 
 func (s *Server) findMatch(c *Conn, id uint32) {
+	// Requests already queued count as games, so a player's places in the
+	// queue are bounded by the game limit; check before queueing so a
+	// player at it is told now rather than when someone else turns up.
+	s.qmu.Lock()
+	queued := 0
+	for _, q := range s.queue {
+		if q.conn.user.ID == c.user.ID {
+			queued++
+		}
+	}
+	s.qmu.Unlock()
+	release, err := s.reserve(gameKind{}, reserveFor{id: c.user.ID, self: true, extra: queued})
+	if err != nil {
+		s.sendLimit(c, id, err)
+		return
+	}
+	release()
 	s.qmu.Lock()
 	for i, q := range s.queue {
 		if q.conn.user.ID != c.user.ID && !q.conn.closed() {
 			s.queue = append(s.queue[:i], s.queue[i+1:]...)
 			s.qmu.Unlock()
+			release, err := s.reserve(gameKind{},
+				reserveFor{id: q.conn.user.ID, name: q.conn.user.Nickname},
+				reserveFor{id: c.user.ID, self: true})
+			if err != nil {
+				s.sendLimit(c, id, err)
+				s.sendLimit(q.conn, q.reqID, err)
+				return
+			}
+			defer release()
 			a := seat{userID: q.conn.user.ID, nickname: q.conn.user.Nickname}
 			b := seat{userID: c.user.ID, nickname: c.user.Nickname}
 			g, err := s.newGame([2]seat{a, b}, true)
@@ -465,6 +626,7 @@ func (s *Server) listGames(c *Conn, id uint32) {
 		}
 	}
 	s.gmu.RUnlock()
+	list.Invites = s.invitesOf(c.user.ID)
 	c.send(&pb.ServerMessage{RequestId: id, Body: &pb.ServerMessage_GameList{GameList: list}})
 }
 
@@ -503,11 +665,14 @@ func (s *Server) newGame(seats [2]seat, ready bool) (*game, error) {
 		status:  pb.GameStatus_GAME_STATUS_WAITING,
 		winner:  -1,
 		created: time.Now(),
+		loaded:  true,
 	}
 	if ready {
 		g.status = pb.GameStatus_GAME_STATUS_ACTIVE
 	}
+	g.lastMove.Store(g.created.UnixMilli())
 	rec := g.record()
+	g.savedAt = rec.Updated
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	if err := s.gameStore.CreateGame(ctx, &rec); err != nil {
@@ -538,15 +703,29 @@ func (s *Server) register(g *game) error {
 	if g.status == pb.GameStatus_GAME_STATUS_WAITING {
 		s.open[g.id] = g
 	}
-	s.actors.Add(1) // under gmu, so never concurrent with Shutdown's Wait
 	s.gmu.Unlock()
-	go g.run()
 	return nil
+}
+
+// startActor starts g's goroutine unless the server is stopping. The
+// caller holds g.amu.
+func (s *Server) startActor(g *game) bool {
+	s.gmu.RLock() // so Add is never concurrent with Shutdown's Wait
+	defer s.gmu.RUnlock()
+	if s.shuttingDown() {
+		return false
+	}
+	s.actors.Add(1)
+	go g.run()
+	return true
 }
 
 // Restore loads unfinished games from the store and resumes them. Call it
 // once, before serving connections.
 func (s *Server) Restore(ctx context.Context) (int, error) {
+	if err := s.loadInvites(ctx); err != nil {
+		return 0, err
+	}
 	recs, err := s.gameStore.LoadUnfinished(ctx)
 	if err != nil {
 		return 0, err
@@ -689,6 +868,11 @@ func (s *Server) notifyPresence(userID int64) {
 func (s *Server) unregisterConn(c *Conn) {
 	s.cmu.Lock()
 	delete(s.allConns, c)
+	if c.addr != "" {
+		if s.connsByAddr[c.addr]--; s.connsByAddr[c.addr] <= 0 {
+			delete(s.connsByAddr, c.addr)
+		}
+	}
 	last := false
 	if c.user != nil {
 		if m := s.conns[c.user.ID]; m != nil {

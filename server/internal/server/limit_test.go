@@ -4,6 +4,8 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -53,6 +55,18 @@ func (r remoteTransport) RemoteIP() string { return r.ip }
 // the given address.
 func startRemote(t *testing.T, ip string, lim AuthLimits) string {
 	t.Helper()
+	var addr atomic.Value
+	addr.Store(ip)
+	return startRemoteFrom(t, &addr, lim)
+}
+
+// startRemoteFrom is startRemote with an address that may change between
+// connections.
+func startRemoteFrom(t *testing.T, ip *atomic.Value, lim AuthLimits) string {
+	t.Helper()
+	if lim.ConnsPerAddr == 0 {
+		lim.ConnsPerAddr, lim.Conns, lim.LoginWithin = 100, 100, time.Minute
+	}
 	srv := New(Config{
 		Auth:       &auth.Service{Store: store.NewMemory(), BcryptCost: bcrypt.MinCost},
 		Logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -68,7 +82,7 @@ func startRemote(t *testing.T, ip string, lim AuthLimits) string {
 			if err != nil {
 				return
 			}
-			go srv.ServeConn(remoteTransport{tcp.NewConn(nc), ip})
+			go srv.ServeConn(remoteTransport{tcp.NewConn(nc), ip.Load().(string)})
 		}
 	}()
 	t.Cleanup(func() { ln.Close() })
@@ -141,5 +155,92 @@ func TestAuthLimitsSkipLoopback(t *testing.T) {
 	for i := 0; i < 5; i++ {
 		wantError(t, c.next(t, replyTo(c.send(t, authMsg(false, "nobody", "password123")))),
 			pb.ErrorCode_ERROR_CODE_INVALID_CREDENTIALS)
+	}
+}
+
+func TestAddrKey(t *testing.T) {
+	for in, want := range map[string]string{
+		"203.0.113.5":           "203.0.113.5",
+		"::ffff:203.0.113.5":    "203.0.113.5",
+		"2001:db8:1:2:3:4:5:6":  "2001:db8:1:2::/64",
+		"2001:db8:1:2:ffff::1":  "2001:db8:1:2::/64",
+		"2001:db8:1:3::1":       "2001:db8:1:3::/64",
+		"":                      "unknown",
+		"not-an-ip.example.com": "unknown",
+	} {
+		if got := addrKey(in); got != want {
+			t.Errorf("addrKey(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// Failed logins count per username and address: a wrong guess from one
+// place does not lock the player out elsewhere. IPv6 counts by /64.
+func TestFailuresPerAddress(t *testing.T) {
+	var ip atomic.Value
+	ip.Store("2001:db8::1")
+	addr := startRemoteFrom(t, &ip, AuthLimits{
+		AttemptsPerIP: 100, AttemptEvery: time.Hour,
+		RegistersPerIP: 10, RegisterEvery: time.Hour,
+		FailuresPerUser: 2, FailureEvery: time.Hour,
+	})
+	try := func(user, pass string) *pb.ServerMessage {
+		c := connect(t, addr)
+		c.startReading()
+		return c.next(t, replyTo(c.send(t, authMsg(false, user, pass))))
+	}
+	reg := connect(t, addr)
+	reg.startReading()
+	reg.next(t, replyTo(reg.send(t, authMsg(true, "victim", "password123"))))
+
+	wantError(t, try("victim", "wrongpassword"), pb.ErrorCode_ERROR_CODE_INVALID_CREDENTIALS)
+	ip.Store("2001:db8::2") // same /64
+	wantError(t, try("victim", "wrongpassword"), pb.ErrorCode_ERROR_CODE_INVALID_CREDENTIALS)
+	wantError(t, try("victim", "password123"), pb.ErrorCode_ERROR_CODE_RATE_LIMITED)
+	ip.Store("198.51.100.7") // the real player, elsewhere
+	if m := try("victim", "password123"); m.GetAuthOk() == nil {
+		t.Fatalf("player locked out by someone else's guesses: %v", m)
+	}
+	// Names that cannot exist are refused at once.
+	wantError(t, try(strings.Repeat("x", 5000), "password123"), pb.ErrorCode_ERROR_CODE_INVALID_CREDENTIALS)
+}
+
+func TestConnectionLimits(t *testing.T) {
+	addr := startRemote(t, "203.0.113.9", AuthLimits{
+		AttemptsPerIP: 100, AttemptEvery: time.Hour,
+		RegistersPerIP: 10, RegisterEvery: time.Hour,
+		FailuresPerUser: 10, FailureEvery: time.Hour,
+		ConnsPerAddr: 2, Conns: 100, LoginWithin: 200 * time.Millisecond,
+	})
+	closed := func(c *tclient) bool {
+		select {
+		case _, ok := <-c.msgs:
+			return !ok
+		case <-time.After(time.Second):
+			return false
+		}
+	}
+	a, b := connect(t, addr), connect(t, addr)
+	a.startReading()
+	b.startReading()
+	time.Sleep(50 * time.Millisecond) // let the server count them
+	c := connect(t, addr)
+	c.startReading()
+	if !closed(c) {
+		t.Fatal("third connection from one address was accepted")
+	}
+	// a logs in; b never does and is cut off.
+	if a.next(t, replyTo(a.send(t, authMsg(true, "prompt", "password123")))).GetAuthOk() == nil {
+		t.Fatal("login failed")
+	}
+	if !closed(b) {
+		t.Fatal("connection that never logged in was kept")
+	}
+	select {
+	case _, ok := <-a.msgs:
+		if !ok {
+			t.Fatal("logged-in connection was closed")
+		}
+	case <-time.After(400 * time.Millisecond):
 	}
 }

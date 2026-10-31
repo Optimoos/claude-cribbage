@@ -165,11 +165,16 @@ godot --path .          # or open project.godot in the editor
   startup, so there are no audio files.
 - **Settings** (the ⚙ button): theme (card room, parchment or midnight),
   rapid play (no animation or sound) and mute; the 🔊 button also mutes.
+- **Invites:** "Play someone you know" invites a player by username, or
+  makes an invite code (like `K7M-Q2X`) to text or read to someone; whoever
+  enters it joins. Invites last 48 hours and appear with Play / No thanks
+  buttons for the person invited.
 - **Sessions:** the server URL and session token are kept in
   `user://<profile>.cfg`. Reopening the client resumes its games; it also
   reconnects by itself if the connection drops.
 - **Command line** (after `--`): `--server URL`, `--profile NAME` for several
-  clients on one machine, and a self-play test mode:
+  clients on one machine, and a self-play test mode (`--invite USER` and
+  `--accept` test invites between two clients):
 
 ```sh
 godot --headless --path . -- --server ws://127.0.0.1:8080/rtc --profile t1 \

@@ -96,6 +96,29 @@ func TestRemoteIP(t *testing.T) {
 	}
 }
 
+// A message over the advertised limit is refused.
+func TestMessageSizeLimit(t *testing.T) {
+	ts := httptest.NewServer(newTestAPI(t).Handler(func(c *Conn) {
+		var m pb.ClientMessage
+		for c.Read(&m) == nil {
+		}
+	}))
+	defer ts.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	c, err := newTestAPI(t).Dial(ctx, "ws"+strings.TrimPrefix(ts.URL, "http"), Binary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	if err := c.dc.Send(make([]byte, maxMessage+1)); err == nil {
+		t.Fatal("sent a message over the limit")
+	}
+	if err := c.dc.Send(make([]byte, 1000)); err != nil {
+		t.Fatalf("small message: %v", err)
+	}
+}
+
 func TestDialRejectsAuto(t *testing.T) {
 	if _, err := newTestAPI(t).Dial(context.Background(), "ws://unused", Auto); err == nil {
 		t.Fatal("Auto accepted for a client")

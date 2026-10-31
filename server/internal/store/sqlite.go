@@ -52,6 +52,16 @@ CREATE TABLE IF NOT EXISTS games (
 CREATE INDEX IF NOT EXISTS games_unfinished ON games(status) WHERE status != 3;
 CREATE INDEX IF NOT EXISTS games_seat0 ON games(seat0_user, updated) WHERE status = 3;
 CREATE INDEX IF NOT EXISTS games_seat1 ON games(seat1_user, updated) WHERE status = 3;
+CREATE TABLE IF NOT EXISTS invites (
+	id        TEXT PRIMARY KEY,
+	from_user INTEGER NOT NULL,
+	from_nick TEXT NOT NULL,
+	to_user   INTEGER NOT NULL, -- 0 for a code invite
+	to_nick   TEXT NOT NULL,
+	code      TEXT NOT NULL,
+	created   INTEGER NOT NULL,
+	expires   INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS action_log (
 	id      INTEGER PRIMARY KEY,
 	game_id TEXT NOT NULL,
@@ -661,4 +671,39 @@ func (s *SQLite) LoadGame(ctx context.Context, id string) (*GameWithActions, err
 	}
 	s.lmu.Unlock()
 	return out, nil
+}
+
+func (s *SQLite) CreateInvite(ctx context.Context, inv *Invite) error {
+	return s.write(ctx, func(tx *writeTx) error {
+		_, err := tx.Exec(`INSERT INTO invites (id, from_user, from_nick, to_user, to_nick, code, created, expires)
+			VALUES (?,?,?,?,?,?,?,?)`, inv.ID, inv.From, inv.FromName, inv.To, inv.ToName, inv.Code,
+			inv.Created.UnixMilli(), inv.Expires.UnixMilli())
+		return err
+	}, nil)
+}
+
+func (s *SQLite) DeleteInvite(ctx context.Context, id string) error {
+	return s.write(ctx, func(tx *writeTx) error {
+		_, err := tx.Exec(`DELETE FROM invites WHERE id = ?`, id)
+		return err
+	}, nil)
+}
+
+func (s *SQLite) LoadInvites(ctx context.Context) ([]Invite, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, from_user, from_nick, to_user, to_nick, code, created, expires FROM invites`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Invite
+	for rows.Next() {
+		var inv Invite
+		var created, expires int64
+		if err := rows.Scan(&inv.ID, &inv.From, &inv.FromName, &inv.To, &inv.ToName, &inv.Code, &created, &expires); err != nil {
+			return nil, err
+		}
+		inv.Created, inv.Expires = time.UnixMilli(created), time.UnixMilli(expires)
+		out = append(out, inv)
+	}
+	return out, rows.Err()
 }

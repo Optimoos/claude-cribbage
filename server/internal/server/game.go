@@ -3,7 +3,9 @@ package server
 import (
 	"context"
 	"fmt"
+	"runtime/debug"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"cribbage/internal/bots"
@@ -26,11 +28,27 @@ type seat struct {
 // Every command that changes the game commits the change to the GameStore
 // before publishing it (write-ahead), so a client never sees a state that a
 // restart would lose. If the commit fails the change is rolled back.
+//
+// A game with nothing to do for a while goes to sleep: its goroutine exits
+// and it drops its engine and bots, keeping only its summary. The next
+// command wakes it, rebuilding the game by replaying its stored actions, so
+// a game that waits weeks for a move costs almost nothing.
 type game struct {
-	id    string
-	srv   *Server
-	inbox chan func()
-	done  chan struct{}
+	id       string
+	srv      *Server
+	inbox    chan func()
+	done     chan struct{} // closed when the game finishes or the server stops
+	doneOnce sync.Once
+
+	// amu guards whether the actor goroutine is running and how many
+	// submitted commands it has not yet taken from the inbox.
+	amu     sync.Mutex
+	awake   bool
+	pending int
+
+	// lastMove is when the game was created or last had a move (Unix ms),
+	// for expiry.
+	lastMove atomic.Int64
 
 	// Owned by the actor.
 	seats    [2]seat
@@ -45,6 +63,8 @@ type game struct {
 	dirty    bool           // header changed since the last commit
 	obs      engine.Observation
 	legal    []engine.Action
+	loaded   bool      // eng and bots reflect the stored game
+	savedAt  time.Time // the stored header's Updated time
 
 	// Snapshot for other goroutines (ListGames), guarded by smu.
 	smu sync.Mutex
@@ -62,36 +82,165 @@ type summary struct {
 
 func (g *game) run() {
 	defer g.srv.actors.Done()
-	defer close(g.done)
+	idle := time.NewTimer(g.srv.limits.SleepAfter)
+	defer idle.Stop()
 	for {
 		select {
 		case f := <-g.inbox:
-			f()
-			if g.status == pb.GameStatus_GAME_STATUS_FINISHED {
-				g.srv.removeGame(g)
+			g.amu.Lock()
+			g.pending--
+			g.amu.Unlock()
+			if !g.loaded {
+				if err := g.load(); err != nil {
+					g.srv.log.Error("cannot load game; dropping it", "game", g.id, "err", err)
+					g.end()
+					return
+				}
+			}
+			g.do(f)
+			if g.loaded && g.status == pb.GameStatus_GAME_STATUS_FINISHED {
 				g.srv.stats.gamesFinished.Add(1)
+				g.end()
 				return
 			}
+			idle.Reset(g.srv.limits.SleepAfter)
+		case <-idle.C:
+			g.amu.Lock()
+			if g.pending > 0 {
+				g.amu.Unlock()
+				idle.Reset(g.srv.limits.SleepAfter)
+				continue
+			}
+			g.drop()
+			g.awake = false
+			g.amu.Unlock()
+			return
 		case <-g.srv.quit:
+			g.doneOnce.Do(func() { close(g.done) })
 			return
 		}
 	}
 }
 
-// submit queues f to run on the actor. It reports false if the game has
-// already finished.
+// do runs one command. If it panics, the game's state in memory may be
+// half-changed, so it is dropped and rebuilt from the store (where only
+// committed changes are) before the next command.
+func (g *game) do(f func()) {
+	defer func() {
+		if r := recover(); r != nil {
+			g.srv.log.Error("game command panicked; reloading the game", "game", g.id, "panic", r, "stack", string(debug.Stack()))
+			g.drop()
+		}
+	}()
+	f()
+}
+
+// end retires a finished or broken game.
+func (g *game) end() {
+	g.doneOnce.Do(func() { close(g.done) })
+	g.srv.removeGame(g)
+	g.amu.Lock()
+	g.awake = false
+	g.amu.Unlock()
+}
+
+// submit queues f to run on the actor, waking the game if it is asleep. It
+// reports false if the game has finished or the server is stopping.
 func (g *game) submit(f func()) bool {
 	select {
 	case <-g.done:
 		return false
 	default:
 	}
+	g.amu.Lock()
+	if !g.awake {
+		if !g.srv.startActor(g) {
+			g.amu.Unlock()
+			return false
+		}
+		g.awake = true
+	}
+	// Counted before queueing, so the actor cannot fall asleep between
+	// here and the send.
+	g.pending++
+	g.amu.Unlock()
 	select {
 	case g.inbox <- f:
 		return true
 	case <-g.done:
+		g.amu.Lock()
+		g.pending--
+		g.amu.Unlock()
 		return false
 	}
+}
+
+// drop releases the engine and bots of a sleeping or broken game.
+func (g *game) drop() {
+	g.eng = nil
+	for i := range g.seats {
+		g.seats[i].bot = nil
+	}
+	g.obs = engine.Observation{}
+	g.legal = nil
+	g.unsaved = nil
+	g.loaded = false
+}
+
+// load rebuilds the game from the store: header, engine (by replaying its
+// actions) and bots.
+func (g *game) load() error {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	rec, err := g.srv.gameStore.LoadGame(ctx, g.id)
+	if err != nil {
+		return err
+	}
+	if err := g.restore(*rec); err != nil {
+		return err
+	}
+	g.updateSummary()
+	return nil
+}
+
+// restore sets the game's state from its stored record.
+func (g *game) restore(rec store.GameWithActions) error {
+	r := rec.Game
+	g.seed = r.Seed
+	g.status = pb.GameStatus(r.Status)
+	g.winner = r.Winner
+	g.resigned = r.Resigned
+	g.created = r.Created
+	g.savedAt = r.Updated
+	for i, st := range r.Seats {
+		g.seats[i] = seat{userID: st.UserID, nickname: st.Nickname, botName: st.Bot}
+		if st.Bot != "" {
+			b, err := bots.New(st.Bot, newSeed())
+			if err != nil {
+				return err
+			}
+			g.seats[i].bot = b
+		}
+	}
+	g.eng = nil
+	g.seq = 0
+	if g.status == pb.GameStatus_GAME_STATUS_ACTIVE {
+		g.eng = engine.NewGame(r.Seed)
+		g.eng.SetQuiet(true)
+		for _, a := range rec.Actions {
+			if err := g.eng.Apply(a.Seat, a.Action); err != nil {
+				return fmt.Errorf("replaying action %d (%v by seat %d): %w", a.Seq, a.Action, a.Seat, err)
+			}
+		}
+		g.eng.SetQuiet(false)
+		g.seq = uint32(len(rec.Actions))
+	} else if len(rec.Actions) > 0 {
+		return fmt.Errorf("waiting game has %d actions", len(rec.Actions))
+	}
+	g.unsaved = nil
+	g.dirty = false
+	g.loaded = true
+	return nil
 }
 
 func (g *game) creator() int64 { return g.seats[0].userID } // immutable
@@ -145,6 +294,11 @@ func (g *game) rollback(s snapshot) {
 
 // save commits unsaved actions and header changes.
 func (g *game) save() error {
+	// Refresh the stored Updated time about daily while moves are made, so
+	// expiry after a restart is accurate to a day.
+	if len(g.unsaved) > 0 && time.Since(g.savedAt) > 24*time.Hour {
+		g.dirty = true
+	}
 	var hdr *store.Game
 	if g.dirty {
 		r := g.record()
@@ -157,6 +311,9 @@ func (g *game) save() error {
 	defer cancel()
 	if err := g.srv.gameStore.CommitGame(ctx, g.id, hdr, g.unsaved); err != nil {
 		return err
+	}
+	if hdr != nil {
+		g.savedAt = hdr.Updated
 	}
 	g.unsaved = g.unsaved[:0]
 	g.dirty = false
@@ -185,6 +342,7 @@ func (g *game) apply(p int, a engine.Action) error {
 	}
 	g.seq++
 	g.unsaved = append(g.unsaved, store.Action{Seq: g.seq, Seat: p, Action: a})
+	g.lastMove.Store(time.Now().UnixMilli())
 	g.srv.stats.actions.Add(1)
 	return nil
 }
@@ -193,6 +351,7 @@ func (g *game) apply(p int, a engine.Action) error {
 func (g *game) start(replies ...reply) {
 	snap := g.snapshot()
 	g.eng = engine.NewGame(g.seed)
+	g.lastMove.Store(time.Now().UnixMilli())
 	if g.status != pb.GameStatus_GAME_STATUS_ACTIVE {
 		g.status = pb.GameStatus_GAME_STATUS_ACTIVE
 		g.dirty = true
@@ -221,6 +380,7 @@ func (g *game) join(c *Conn, id uint32) {
 	g.dirty = true
 	g.eng = engine.NewGame(g.seed)
 	g.status = pb.GameStatus_GAME_STATUS_ACTIVE
+	g.lastMove.Store(time.Now().UnixMilli())
 	if err := g.save(); err != nil {
 		g.srv.log.Error("commit failed", "game", g.id, "err", err)
 		g.rollback(snap)
@@ -268,8 +428,11 @@ func (g *game) driveBots(events []*pb.Event) []*pb.Event {
 			}
 			g.eng.ObserveInto(p, &g.obs)
 			g.legal = g.eng.AppendLegal(p, g.legal[:0])
-			a := b.Choose(&g.obs, g.legal)
-			if err := g.apply(p, a); err != nil {
+			a, err := g.choose(b, p)
+			if err == nil {
+				err = g.apply(p, a)
+			}
+			if err != nil {
 				// A bot bug must not wedge the game: resign on its behalf.
 				g.srv.log.Error("bot chose illegal action", "game", g.id, "bot", g.seats[p].botName, "action", a, "err", err)
 				return append(events, g.resignSeat(p))
@@ -287,6 +450,19 @@ func (g *game) driveBots(events []*pb.Event) []*pb.Event {
 		g.dirty = true
 	}
 	return events
+}
+
+// choose asks bot b for seat p's move. A bot that panics is treated like one
+// that chose an illegal move: bots are deterministic, so after a restart it
+// would panic again on the same position.
+func (g *game) choose(b bots.Bot, p int) (a engine.Action, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			g.srv.log.Error("bot panicked", "game", g.id, "bot", g.seats[p].botName, "panic", r, "stack", string(debug.Stack()))
+			err = fmt.Errorf("bot panicked: %v", r)
+		}
+	}()
+	return b.Choose(&g.obs, g.legal), nil
 }
 
 // resume runs after a restart: bots may owe a move that was never made.
@@ -407,7 +583,7 @@ func (g *game) summaryFor(userID int64) *pb.GameSummary {
 			UserId:    st.userID,
 			Nickname:  st.nickname,
 			Bot:       st.botName,
-			Connected: st.bot != nil || (st.userID != 0 && g.srv.connected(st.userID)),
+			Connected: st.botName != "" || (st.userID != 0 && g.srv.connected(st.userID)),
 		})
 		if st.userID == userID && userID != 0 {
 			out.Seat = int32(i)
@@ -419,41 +595,16 @@ func (g *game) summaryFor(userID int64) *pb.GameSummary {
 
 // restoreGame rebuilds a game from its stored record by replaying actions.
 func (s *Server) restoreGame(rec store.GameWithActions) (*game, error) {
-	r := rec.Game
 	g := &game{
-		id:       r.ID,
-		srv:      s,
-		inbox:    make(chan func(), 64),
-		done:     make(chan struct{}),
-		seed:     r.Seed,
-		status:   pb.GameStatus(r.Status),
-		winner:   r.Winner,
-		resigned: r.Resigned,
-		created:  r.Created,
+		id:    rec.Game.ID,
+		srv:   s,
+		inbox: make(chan func(), 64),
+		done:  make(chan struct{}),
 	}
-	for i, st := range r.Seats {
-		g.seats[i] = seat{userID: st.UserID, nickname: st.Nickname, botName: st.Bot}
-		if st.Bot != "" {
-			b, err := bots.New(st.Bot, newSeed())
-			if err != nil {
-				return nil, err
-			}
-			g.seats[i].bot = b
-		}
+	if err := g.restore(rec); err != nil {
+		return nil, err
 	}
-	if g.status == pb.GameStatus_GAME_STATUS_ACTIVE {
-		g.eng = engine.NewGame(r.Seed)
-		g.eng.SetQuiet(true)
-		for _, a := range rec.Actions {
-			if err := g.eng.Apply(a.Seat, a.Action); err != nil {
-				return nil, fmt.Errorf("replaying action %d (%v by seat %d): %w", a.Seq, a.Action, a.Seat, err)
-			}
-		}
-		g.eng.SetQuiet(false)
-		g.seq = uint32(len(rec.Actions))
-	} else if len(rec.Actions) > 0 {
-		return nil, fmt.Errorf("waiting game has %d actions", len(rec.Actions))
-	}
+	g.lastMove.Store(rec.Game.Updated.UnixMilli())
 	g.updateSummary()
 	return g, nil
 }

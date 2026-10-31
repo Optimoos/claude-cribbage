@@ -35,9 +35,10 @@ func startPersistent(t *testing.T, path, addr string) *instance {
 		t.Fatal(err)
 	}
 	srv := New(Config{
-		Auth:   &auth.Service{Store: db, BcryptCost: bcrypt.MinCost},
-		Games:  db,
-		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Auth:       &auth.Service{Store: db, BcryptCost: bcrypt.MinCost},
+		Games:      db,
+		Logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
+		GameLimits: loadLimits,
 	})
 	if _, err := srv.Restore(context.Background()); err != nil {
 		t.Fatal(err)

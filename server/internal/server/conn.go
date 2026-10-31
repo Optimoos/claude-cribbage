@@ -2,6 +2,7 @@ package server
 
 import (
 	"sync"
+	"sync/atomic"
 
 	"cribbage/internal/protocol/pb"
 	"cribbage/internal/store"
@@ -21,7 +22,9 @@ type Conn struct {
 
 	// user is set once by the reader goroutine during authentication, before
 	// the connection is registered or used in any game command.
-	user *store.User
+	user   *store.User
+	authed atomic.Bool // user is set (readable from other goroutines)
+	addr   string      // limiter key of a remote address; "" if not limited
 }
 
 func (c *Conn) send(m *pb.ServerMessage) {

@@ -26,6 +26,9 @@ message ClientMessage {
     FindMatch find_match = 23;
     CancelMatch cancel_match = 24;
     SyncGame sync_game = 25;
+    SendInvite send_invite = 26;
+    RespondInvite respond_invite = 27;
+    RedeemCode redeem_code = 28;
     Act act = 30;
     Resign resign = 31;
     Ping ping = 40;
@@ -68,6 +71,29 @@ message FindMatch {}
 // CancelMatch removes all of this user's queued FindMatch requests.
 message CancelMatch {}
 
+// SendInvite invites a player, by username, to a game. With no username it
+// makes an invite code instead, for the sender to pass on; whoever enters it
+// with RedeemCode joins the game. Invites last 48 hours. The reply is
+// Invites, or an error (NOT_FOUND for an unknown player, TOO_MANY_GAMES at
+// a limit on invites).
+message SendInvite {
+  string username = 1;
+}
+
+// RespondInvite accepts or declines an invite to the user, or (accept
+// false) cancels one from them. Accepting starts the game: the reply is its
+// first GameUpdate.
+message RespondInvite {
+  string invite_id = 1;
+  bool accept = 2;
+}
+
+// RedeemCode accepts the invite with this code ("ABC-DEF"; case, spaces and
+// dashes are ignored). The reply is the game's first GameUpdate.
+message RedeemCode {
+  string code = 1;
+}
+
 // SyncGame requests a full GameUpdate for one game.
 message SyncGame {
   string game_id = 1;
@@ -100,6 +126,7 @@ message ServerMessage {
     GameUpdate game_update = 21;
     MatchQueued match_queued = 22;
     Ack ack = 23;
+    Invites invites = 24; // the user's pending invites, whenever they change
     Pong pong = 40;
   }
 }
@@ -117,6 +144,7 @@ enum ErrorCode {
   ERROR_CODE_GAME_UNAVAILABLE = 9;
   ERROR_CODE_INTERNAL = 10;
   ERROR_CODE_RATE_LIMITED = 11; // too many attempts; try again later
+  ERROR_CODE_TOO_MANY_GAMES = 12; // a player is at a limit on games or invites
 }
 
 message Error {
@@ -168,12 +196,27 @@ message GameSummary {
   bool resigned = 8; // the game ended by resignation
 }
 
+// Invite is a pending invitation to a game.
+message Invite {
+  string invite_id = 1;
+  PlayerInfo from = 2;
+  PlayerInfo to = 3; // unset for a code nobody has entered yet
+  string code = 4; // only for the sender of a code invite
+  int64 expires = 5; // Unix milliseconds
+  bool incoming = 6; // the user is the one invited
+}
+
+message Invites {
+  repeated Invite invites = 1;
+}
+
 message GameList {
   repeated GameSummary mine = 1; // the user's waiting and active games
   repeated GameSummary open = 2; // other users' games waiting for a player
   // The user's most recently finished games, newest first. Lets a client
   // that was disconnected learn how a game ended.
   repeated GameSummary recent = 3;
+  repeated Invite invites = 4; // pending invites to and from the user
 }
 
 // GameUpdate is sent to each player after every change to a game.
@@ -250,6 +293,7 @@ enum EventKind {
   EVENT_KIND_SHOW_CRIB = 11;
   EVENT_KIND_GAME_OVER = 12; // seat won
   EVENT_KIND_RESIGN = 13; // seat resigned
+  EVENT_KIND_EXPIRED = 14; // the game ended unfinished after a long time without a move
 }
 
 message PegScore {

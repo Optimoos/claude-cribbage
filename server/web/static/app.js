@@ -467,6 +467,7 @@ const state = {
   logs: new Map(),    // gameId -> [{text, cls}]
   open: [],
   recent: [],
+  invites: [],        // pending invites to and from me
   selected: null,
   picked: new Set(),  // cards selected for discard
   logShown: { id: null, n: 0 },
@@ -573,8 +574,11 @@ function onMessage(m) {
     onError(m.error);
   } else if (m.gameUpdate) {
     onUpdate(m.gameUpdate);
+  } else if (m.invites) {
+    setInvites(m.invites.invites || [], true);
   } else if (m.gameList) {
     const l = m.gameList;
+    setInvites(l.invites || [], false);
     for (const g of l.mine || []) {
       if (!state.games.has(g.gameId)) state.games.set(g.gameId, { game: g });
     }
@@ -888,6 +892,7 @@ function describe(g, e) {
     case 'EVENT_KIND_SHOW_CRIB': return `${who === 'You' ? 'Your' : who + "'s"} crib ${cards} + ${cardName(e.card)}: ${breakdown(e.show || {})}`;
     case 'EVENT_KIND_GAME_OVER': return `${who} win${s} ${e.scores[e.seat]}–${e.scores[1 - e.seat]}` + (e.skunk === 2 ? ' — double skunk!' : e.skunk === 1 ? ' — skunk!' : '');
     case 'EVENT_KIND_RESIGN': return `${who} resign${s}`;
+    case 'EVENT_KIND_EXPIRED': return 'The game expired: no moves for too long';
   }
   return e.kind;
 }
@@ -978,6 +983,60 @@ function renderLobby() {
     const res = g.winner === g.seat ? 'won' : g.winner < 0 ? 'cancelled' : 'lost';
     return gameItem(g, () => { if (state.games.has(g.gameId)) select(g.gameId); }, res, res);
   }), 'None yet');
+}
+
+// ---------------------------------------------------------------------------
+// Invites
+// ---------------------------------------------------------------------------
+
+function setInvites(list, pushed) {
+  const known = new Set(state.invites.map(i => i.inviteId));
+  if (pushed) {
+    for (const i of list) if (i.incoming && !known.has(i.inviteId)) toast(`${i.from.nickname} invited you to a game`);
+  }
+  state.invites = list;
+  renderInvites();
+}
+
+function timeLeft(expires) {
+  const ms = Number(expires) - Date.now();
+  const h = Math.floor(ms / 3600000);
+  return h >= 1 ? `${h} h left` : `${Math.max(1, Math.ceil(ms / 60000))} min left`;
+}
+
+function renderInvites() {
+  const ul = $('invites');
+  ul.replaceChildren();
+  $('invites-title').hidden = state.invites.length === 0;
+  for (const inv of state.invites) {
+    const li = document.createElement('li');
+    const respond = accept => conn.send({ respondInvite: { inviteId: inv.inviteId, accept } });
+    const button = (label, primary, fn) => {
+      const b = document.createElement('button');
+      b.className = `btn btn-small${primary ? ' btn-primary' : ''}`;
+      b.textContent = label;
+      b.onclick = fn;
+      return b;
+    };
+    const acts = document.createElement('span');
+    acts.className = 'acts';
+    if (inv.incoming) {
+      li.className = 'incoming';
+      li.innerHTML = `<span class="name"><b>${esc(inv.from.nickname)}</b> invited you</span>`;
+      acts.append(button('Play', true, () => respond(true)), button('No thanks', false, () => respond(false)));
+    } else if (inv.code) {
+      li.innerHTML = `<span class="name">Code <span class="code" title="Give this to the person you want to play">${esc(inv.code)}</span></span>`;
+      acts.append(button('Cancel', false, () => respond(false)));
+    } else {
+      li.innerHTML = `<span class="name">Waiting for <b>${esc(inv.to.nickname)}</b></span>`;
+      acts.append(button('Cancel', false, () => respond(false)));
+    }
+    const when = document.createElement('span');
+    when.className = 'when';
+    when.textContent = timeLeft(inv.expires);
+    li.append(when, acts);
+    ul.appendChild(li);
+  }
 }
 
 function select(id) {
@@ -1262,6 +1321,22 @@ fetch('api/bots').then(r => r.json()).then(names => {
   for (const b of document.querySelectorAll('[data-create]')) b.hidden = !names.includes(b.dataset.create);
 }).catch(() => { /* keep the defaults */ });
 $('create-open').onclick = () => conn.send({ createGame: { bot: '' } });
+$('invite-form').onsubmit = ev => {
+  ev.preventDefault();
+  const username = $('invite-user').value.trim();
+  if (!username) return;
+  conn.send({ sendInvite: { username } });
+  $('invite-user').value = '';
+};
+$('invite-code').onclick = () => conn.send({ sendInvite: {} });
+$('code-form').onsubmit = ev => {
+  ev.preventDefault();
+  const code = $('code-input').value.trim();
+  if (!code) return;
+  conn.send({ redeemCode: { code } });
+  $('code-input').value = '';
+};
+setInterval(() => { if (state.invites.length) renderInvites(); }, 60000);
 $('find-match').onclick = () => conn.send({ findMatch: {} });
 $('refresh').onclick = () => conn.send({ listGames: {} });
 $('discard').onclick = () => {

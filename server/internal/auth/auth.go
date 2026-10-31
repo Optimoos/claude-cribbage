@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -30,6 +31,9 @@ type Service struct {
 	Store      store.Store
 	BcryptCost int           // bcrypt.DefaultCost if zero
 	SessionTTL time.Duration // 30 days if zero
+
+	dummyOnce sync.Once
+	dummy     []byte
 }
 
 // Result of a successful authentication.
@@ -37,6 +41,9 @@ type Result struct {
 	User  *store.User
 	Token string
 }
+
+// ValidUsername reports whether s could be a username.
+func ValidUsername(s string) bool { return usernameRE.MatchString(s) }
 
 func validate(username, password, nickname string) error {
 	if !usernameRE.MatchString(username) {
@@ -85,6 +92,9 @@ func (s *Service) Register(ctx context.Context, username, password, nickname str
 func (s *Service) Login(ctx context.Context, username, password string) (*Result, error) {
 	u, err := s.Store.UserByUsername(ctx, username)
 	if errors.Is(err, store.ErrNotFound) {
+		// Take as long as a wrong password would, so the time taken does
+		// not reveal which usernames exist.
+		bcrypt.CompareHashAndPassword(s.dummyHash(), []byte(password))
 		return nil, ErrInvalidCredentials
 	}
 	if err != nil {
@@ -94,6 +104,18 @@ func (s *Service) Login(ctx context.Context, username, password string) (*Result
 		return nil, ErrInvalidCredentials
 	}
 	return s.newSession(ctx, u)
+}
+
+// dummyHash is a hash of nothing in particular at the service's cost.
+func (s *Service) dummyHash() []byte {
+	s.dummyOnce.Do(func() {
+		cost := s.BcryptCost
+		if cost == 0 {
+			cost = bcrypt.DefaultCost
+		}
+		s.dummy, _ = bcrypt.GenerateFromPassword([]byte(RandomID(16)), cost)
+	})
+	return s.dummy
 }
 
 // Resume authenticates with an existing session token.

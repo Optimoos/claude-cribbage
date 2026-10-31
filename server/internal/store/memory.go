@@ -18,6 +18,7 @@ type Memory struct {
 	sessions map[string]session
 	games    map[string]*GameWithActions
 	recent   map[int64][]Game // newest last, capped at maxRecent
+	invites  map[string]Invite
 }
 
 const maxRecent = 50
@@ -34,7 +35,32 @@ func NewMemory() *Memory {
 		sessions: map[string]session{},
 		games:    map[string]*GameWithActions{},
 		recent:   map[int64][]Game{},
+		invites:  map[string]Invite{},
 	}
+}
+
+func (m *Memory) CreateInvite(_ context.Context, inv *Invite) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.invites[inv.ID] = *inv
+	return nil
+}
+
+func (m *Memory) DeleteInvite(_ context.Context, id string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.invites, id)
+	return nil
+}
+
+func (m *Memory) LoadInvites(context.Context) ([]Invite, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	out := make([]Invite, 0, len(m.invites))
+	for _, inv := range m.invites {
+		out = append(out, inv)
+	}
+	return out, nil
 }
 
 func (m *Memory) CreateUser(_ context.Context, u *User) error {
@@ -141,6 +167,16 @@ func (m *Memory) RecentGames(_ context.Context, userID int64, limit int) ([]Game
 		out = append(out, r[i])
 	}
 	return out, nil
+}
+
+func (m *Memory) LoadGame(_ context.Context, id string) (*GameWithActions, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	g, ok := m.games[id]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	return &GameWithActions{Game: g.Game, Actions: append([]Action(nil), g.Actions...)}, nil
 }
 
 func (m *Memory) LoadUnfinished(context.Context) ([]GameWithActions, error) {

@@ -3,6 +3,7 @@ package expert
 import (
 	"math"
 	"sort"
+	"sync"
 
 	"cribbage/internal/bots"
 	"cribbage/internal/engine"
@@ -44,20 +45,24 @@ type searcher struct {
 	pegTemp   float64
 	keepKey   keepCacheKey
 	keepCache map[int16]float64
-	// end-of-hand values by (opponent show, my pegging, their pegging),
-	// valid when stamp matches gen.
-	endVal   []float64
-	endStamp []uint32
-	gen      uint32
+	ends      *endCache // borrowed from endCaches during choose
 }
 
+// endCache holds end-of-hand values by (opponent show, my pegging, their
+// pegging), valid when stamp matches gen. At about 370 KB it is borrowed
+// only while choosing, so idle bots (one per game) do not each hold one.
+type endCache struct {
+	val   []float64
+	stamp []uint32
+	gen   uint32
+}
+
+var endCaches = sync.Pool{New: func() any {
+	return &endCache{val: make([]float64, maxShow*maxPeg*maxPeg), stamp: make([]uint32, maxShow*maxPeg*maxPeg)}
+}}
+
 func newSearcher(win *WinTable, effort int) *searcher {
-	return &searcher{
-		win:      win,
-		effort:   effort,
-		endVal:   make([]float64, maxShow*maxPeg*maxPeg),
-		endStamp: make([]uint32, maxShow*maxPeg*maxPeg),
-	}
+	return &searcher{win: win, effort: effort}
 }
 
 // choose returns the pegging play in legal with the highest expected win
@@ -67,10 +72,15 @@ func (s *searcher) choose(o *engine.Observation, legal []engine.Action) engine.A
 	s.base = [2]int{o.Scores[me], o.Scores[1-me]}
 	s.iDeal = o.Dealer == me
 	s.myShow = engine.ScoreHand(o.Kept, o.Starter, false).Total()
-	s.gen++
-	if s.gen == 0 { // wrapped: clear the stamps
-		clear(s.endStamp)
-		s.gen = 1
+	s.ends = endCaches.Get().(*endCache)
+	defer func() {
+		endCaches.Put(s.ends)
+		s.ends = nil
+	}()
+	s.ends.gen++
+	if s.ends.gen == 0 { // wrapped: clear the stamps
+		clear(s.ends.stamp)
+		s.ends.gen = 1
 	}
 
 	var seen [52]bool
@@ -207,8 +217,8 @@ func (s *searcher) end(myPeg, oppPeg int) float64 {
 	k := -1
 	if myPeg < maxPeg && oppPeg < maxPeg {
 		k = (s.show*maxPeg+myPeg)*maxPeg + oppPeg
-		if s.endStamp[k] == s.gen {
-			return s.endVal[k]
+		if s.ends.stamp[k] == s.ends.gen {
+			return s.ends.val[k]
 		}
 	}
 	me, opp := s.base[0]+myPeg, s.base[1]+oppPeg
@@ -219,7 +229,7 @@ func (s *searcher) end(myPeg, oppPeg int) float64 {
 		v = s.showThenCrib(me+s.myShow, opp+s.show, true)
 	}
 	if k >= 0 {
-		s.endVal[k], s.endStamp[k] = v, s.gen
+		s.ends.val[k], s.ends.stamp[k] = v, s.ends.gen
 	}
 	return v
 }

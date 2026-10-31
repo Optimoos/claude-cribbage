@@ -37,7 +37,10 @@ public partial class Main : Control
     // Lobby
     Control lobbyView = null!;
     Label status = null!, who = null!, notice = null!;
-    VBoxContainer botPicks = null!, myList = null!, openList = null!, recentList = null!;
+    VBoxContainer botPicks = null!, myList = null!, openList = null!, recentList = null!, inviteList = null!;
+    Label invitesHeading = null!;
+    LineEdit inviteUser = null!, codeEdit = null!;
+    List<Invite> invites = new();
     Button muteButton = null!;
 
     // Table
@@ -212,7 +215,11 @@ public partial class Main : Control
             case ServerMessage.BodyOneofCase.GameUpdate:
                 OnUpdate(m.GameUpdate);
                 break;
+            case ServerMessage.BodyOneofCase.Invites:
+                SetInvites(m.Invites.Invites_, true);
+                break;
             case ServerMessage.BodyOneofCase.GameList:
+                SetInvites(m.GameList.Invites, false);
                 foreach (var g in m.GameList.Mine)
                 {
                     if (!games.TryGetValue(g.GameId, out var gs))
@@ -528,6 +535,28 @@ public partial class Main : Control
         notice.AutowrapMode = TextServer.AutowrapMode.WordSmart;
         box.AddChild(notice);
 
+        box.AddChild(Heading("Play someone you know"));
+        var inviteRow = new HBoxContainer();
+        inviteUser = new LineEdit { PlaceholderText = "Their username", MaxLength = 32, SizeFlagsHorizontal = SizeFlags.ExpandFill };
+        inviteUser.TextSubmitted += _ => SendInvite();
+        inviteRow.AddChild(inviteUser);
+        inviteRow.AddChild(Style.Button("Invite", SendInvite));
+        box.AddChild(inviteRow);
+        var codeButton = Style.Button("Get an invite code", () => Send(new ClientMessage { SendInvite = new SendInvite() }));
+        codeButton.TooltipText = "A code to text or read to someone; it lasts 48 hours";
+        box.AddChild(codeButton);
+        var codeRow = new HBoxContainer();
+        codeEdit = new LineEdit { PlaceholderText = "Have a code? ABC-DEF", MaxLength = 12, SizeFlagsHorizontal = SizeFlags.ExpandFill };
+        codeEdit.TextSubmitted += _ => RedeemCode();
+        codeRow.AddChild(codeEdit);
+        codeRow.AddChild(Style.Button("Join", RedeemCode));
+        box.AddChild(codeRow);
+        invitesHeading = Heading("Invites");
+        box.AddChild(invitesHeading);
+        inviteList = new VBoxContainer();
+        inviteList.AddThemeConstantOverride("separation", 6);
+        box.AddChild(inviteList);
+
         box.AddChild(Heading("Your games"));
         myList = new VBoxContainer();
         box.AddChild(myList);
@@ -541,6 +570,105 @@ public partial class Main : Control
     }
 
     static Label Heading(string text) => Style.Label(text.ToUpperInvariant(), 12, Style.P.Muted);
+
+    // ---------------------------------------------------------------
+    // Invites
+
+    void SendInvite()
+    {
+        var name = inviteUser.Text.Trim();
+        if (name == "")
+        {
+            return;
+        }
+        Send(new ClientMessage { SendInvite = new SendInvite { Username = name } });
+        inviteUser.Text = "";
+    }
+
+    void RedeemCode()
+    {
+        var code = codeEdit.Text.Trim();
+        if (code == "")
+        {
+            return;
+        }
+        Send(new ClientMessage { RedeemCode = new RedeemCode { Code = code } });
+        codeEdit.Text = "";
+    }
+
+    void Respond(Invite inv, bool accept) =>
+        Send(new ClientMessage { RespondInvite = new RespondInvite { InviteId = inv.InviteId, Accept = accept } });
+
+    void SetInvites(IEnumerable<Invite> list, bool pushed)
+    {
+        var known = invites.Select(i => i.InviteId).ToHashSet();
+        var next = list.ToList();
+        if (pushed && next.Any(i => i.Incoming && !known.Contains(i.InviteId)))
+        {
+            var from = next.First(i => i.Incoming && !known.Contains(i.InviteId)).From.Nickname;
+            Notice($"{from} invited you to a game");
+            Sfx.Play("turn");
+        }
+        invites = next;
+        RenderInvites();
+    }
+
+    static string TimeLeft(long expires)
+    {
+        var left = System.DateTimeOffset.FromUnixTimeMilliseconds(expires) - System.DateTimeOffset.UtcNow;
+        return left.TotalHours >= 1 ? $"{(int)left.TotalHours} h left" : $"{System.Math.Max(1, (int)System.Math.Ceiling(left.TotalMinutes))} min left";
+    }
+
+    void RenderInvites()
+    {
+        Clear(inviteList);
+        invitesHeading.Visible = invites.Count > 0;
+        foreach (var inv in invites)
+        {
+            var panel = new PanelContainer();
+            panel.AddThemeStyleboxOverride("panel", Style.Box(Style.P.Button, 6, inv.Incoming ? Style.P.Accent : Style.P.Line));
+            var col = new VBoxContainer();
+            panel.AddChild(col);
+            var top = new HBoxContainer();
+            col.AddChild(top);
+            Label text;
+            if (inv.Incoming)
+            {
+                text = Style.Label($"{inv.From.Nickname} invited you", 14);
+            }
+            else if (inv.Code != "")
+            {
+                text = Style.Label($"Code  {inv.Code}", 16, Style.P.Accent);
+                text.TooltipText = "Give this to the person you want to play";
+                text.MouseFilter = MouseFilterEnum.Pass;
+            }
+            else
+            {
+                text = Style.Label($"Waiting for {inv.To.Nickname}", 14);
+            }
+            text.SizeFlagsHorizontal = SizeFlags.ExpandFill;
+            text.ClipText = true;
+            top.AddChild(text);
+            top.AddChild(Style.Label(TimeLeft(inv.Expires), 12, Style.P.Muted));
+            var acts = new HBoxContainer { Alignment = BoxContainer.AlignmentMode.End };
+            col.AddChild(acts);
+            var i = inv;
+            if (inv.Incoming)
+            {
+                acts.AddChild(Style.Primary("Play", () => Respond(i, true)));
+                acts.AddChild(Style.Button("No thanks", () => Respond(i, false)));
+            }
+            else
+            {
+                if (inv.Code != "")
+                {
+                    acts.AddChild(Style.Button("Copy", () => DisplayServer.ClipboardSet(i.Code)));
+                }
+                acts.AddChild(Style.Button("Cancel", () => Respond(i, false)));
+            }
+            inviteList.AddChild(panel);
+        }
+    }
 
     void ToggleMute()
     {
@@ -612,6 +740,7 @@ public partial class Main : Control
         settings.Token = "";
         me = null;
         games.Clear();
+        invites.Clear();
         selected = null;
         Connect(); // a fresh, unauthenticated connection
         ShowLogin(true);
@@ -739,6 +868,7 @@ public partial class Main : Control
             who.Text = me != null ? $"{me.Nickname} ({me.Username})" : "";
         }
         RenderLobby();
+        RenderInvites();
         RenderTable();
         UpdateTitle();
     }

@@ -109,6 +109,7 @@ public static class Text
             EventKind.GameOver => $"{who} win{s} {e.Scores[e.Seat]}–{e.Scores[1 - e.Seat]}" +
                 (e.Skunk == 2 ? " — double skunk!" : e.Skunk == 1 ? " — skunk!" : ""),
             EventKind.Resign => $"{who} resign{s}",
+            EventKind.Expired => "The game expired: no moves for too long",
             _ => e.Kind.ToString(),
         };
     }

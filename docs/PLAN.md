@@ -807,3 +807,110 @@ play a full game.
   under Wine.
 - Not done: the web client's second board style ("long") and its phone
   layout.
+
+---
+
+# Public hosting (M23)
+
+Added 2026-10-30. A review before hosting publicly (security, concurrency
+and storage, game logic) found no critical problems. It found ways one
+account could exhaust memory or CPU, gaps in the new login limits, and no
+panic recovery. M23 fixes those and adds invites for slow family games.
+
+### M23: Invites, sleeping games and the review's fixes
+
+Decided with you: invite by username and by code, keep open games (one
+per player), games between people expire after 60 days without a move, 20
+games per player of which 5 against the computer.
+
+**Built (2026-10-30):**
+- **Invites** (`internal/server/invites.go`, `invites` table). An invite
+  is a database row: no game, goroutine or bot until it is accepted, which
+  creates the game with both players seated. It goes to a username, or is
+  a code such as `K7M-Q2X` (31 symbols without I, L, O, 0, 1; 6 of them,
+  case, spaces and dashes ignored).
+  - **Lifetime:** 48 hours.
+  - **Limits:** 5 sent and unanswered per player, 20 waiting for one
+    player, one between any two players. Sending is limited to 10 then one
+    every 6 minutes; code guesses to 10 then one a minute.
+  - **Messages:** `SendInvite`, `RespondInvite` and `RedeemCode`, plus
+    `Invites` pushes and `GameList.invites`.
+  - **Clients:** the web lobby and the Godot lobby both show them.
+- **Sleeping games.**
+  - After 10 minutes without activity a game's actor exits and drops its
+    engine and bots, keeping only its summary for the lobby.
+  - The next command restarts it. It rebuilds the game from the store: its
+    header and a replay of its actions. SQLite already keeps each
+    unfinished game's actions in memory (about 3 KB), so waking reads no
+    rows.
+  - A command that panics now drops the half-changed state, and the next
+    command reloads from the store.
+- **Expiry.**
+  - An hourly sweep cancels open games after 48 hours, and ends games
+    after 60 days without a move between people or 30 against a bot
+    (winner −1, `EVENT_KIND_EXPIRED`).
+  - The stored `updated` time is refreshed at most daily while moves are
+    made, so expiry is accurate to a day across restarts.
+  - Games from before M23 date their idle time from their last header
+    write.
+- **Caps.**
+  - 20 unfinished games per player, 5 against bots, 1 open, enforced on
+    create, join, matchmaking and accepting an invite.
+  - Places are reserved under `gmu` while a game is being created, so
+    concurrent requests cannot pass a cap.
+  - Waiting matchmaking requests count toward the cap. That bounds the
+    queue, and a player can still ask for several matches.
+  - New `ERROR_CODE_TOO_MANY_GAMES`, with a message naming who is at which
+    limit.
+- **Review fixes.**
+  - **Panics:** a bot that panics resigns its seat. Bots are
+    deterministic, so a panic would otherwise crash-loop on restart.
+  - **Expert memory:** the expert's 370 KB end-of-hand table comes from a
+    `sync.Pool` during each decision instead of living with every bot.
+  - **WebRTC:**
+    - 64 KB maximum message, advertised and enforced: a larger message
+      closes the connection.
+    - 256 KB SCTP receive buffer.
+  - **Connections:**
+    - 20 per address and 5,000 in total.
+    - Remote connections must log in within 30 s.
+  - **Logins:**
+    - A login name that cannot exist is refused before any lookup.
+    - An unknown user costs a dummy bcrypt, so timing does not reveal
+      usernames.
+    - Failed logins count per username and address, so a stranger cannot
+      lock a player out.
+    - IPv6 addresses count by /64.
+    - An unknown address is limited (it used to be exempt).
+    - bcrypt uses at most GOMAXPROCS−1 cores.
+
+**Verified:**
+- **Unit tests:**
+  - caps
+  - sleeping and waking through a whole game, on both stores
+  - expiry, including a move delaying it
+  - a panicking bot and a panicking command
+  - invites: accept, decline, cancel, codes typed loosely, limits, expiry,
+    persistence across a restart, an offline recipient
+  - addresses grouped by /64
+  - failures counted per address
+  - connection caps and the login deadline
+  - login timing
+  - the WebRTC size limit
+- **Race detector:** the whole suite passes under `-race`.
+- **Godot clients:** two headless Godot clients played a full game from an
+  invite. An earlier run of the inviting client had sent the invite, and the
+  other client accepted it later.
+- **Not tested:** the web client's invite UI in a browser.
+
+**Left for later** (review items 10–18):
+- a cap on concurrent bot CPU and per-connection action rates
+- signaling-session limits and filtering of private ICE candidates
+- skipping the startup backup when a recent one exists
+- hashing session tokens and deleting expired sessions
+- localhost defaults for `-http` and `-tcp`
+- HTTP read and write timeouts
+- the group-commit retry storm
+- WAL size
+- prebuilding the heuristic tables at startup
+- a CSP header

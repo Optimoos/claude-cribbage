@@ -26,11 +26,24 @@ import (
 	"cribbage/internal/store"
 )
 
+// loadLimits lets the load tests play hundreds of games per user.
+var loadLimits = func() *GameLimits {
+	l := DefaultGameLimits
+	l.Games, l.BotGames, l.Open = 1<<20, 1<<20, 1<<20
+	return &l
+}()
+
 func startServer(t *testing.T) (*Server, string) {
 	t.Helper()
+	return startServerWith(t, loadLimits)
+}
+
+func startServerWith(t *testing.T, limits *GameLimits) (*Server, string) {
+	t.Helper()
 	srv := New(Config{
-		Auth:   &auth.Service{Store: store.NewMemory(), BcryptCost: bcrypt.MinCost},
-		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Auth:       &auth.Service{Store: store.NewMemory(), BcryptCost: bcrypt.MinCost},
+		Logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
+		GameLimits: limits,
 	})
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

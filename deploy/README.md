@@ -91,7 +91,7 @@ ssh root@SERVER 'install -m 0755 /tmp/cribserver /opt/cribbage/ && systemctl res
 
 The server writes a compacted copy of the database to
 `/var/lib/cribbage/backups/cribbage-<UTC time>.db` at startup and every
-24 hours, keeping the newest 14 (`-backup-dir`, `-backup-every`,
+24 hours, keeping the newest 7 (`-backup-dir`, `-backup-every`,
 `-backup-keep`). Writes pause while a backup runs; for a database of tens
 of MB that is well under a second.
 
@@ -119,16 +119,37 @@ chown cribbage:cribbage cribbage.db
 systemctl start cribbage
 ```
 
-## Login limits
+## Limits
 
-Remote clients get 20 login or registration attempts, then 10 a minute;
-5 registrations per address, then 5 an hour; and 10 failed logins per
-username, then 1 a minute. Over the limit, the server answers "too many
-attempts; try again later". The address is the one WebRTC packets come
-from, so it is the player's real address even though signaling passes
-through Caddy. Connections from localhost (bots on the server) are not
-limited. At most one bcrypt hash per CPU runs at a time, so a flood of
-logins cannot slow the games.
+All built in; the numbers are in `internal/server` (`DefaultAuthLimits`,
+`DefaultGameLimits`).
+
+**Logins.** Remote clients get 20 login or registration attempts, then 10
+a minute; 5 registrations per address, then 5 an hour; and 10 failed
+logins per username *from one address*, then 1 a minute, so a stranger's
+wrong guesses cannot lock a player out. IPv6 addresses count by their /64.
+The address is the one WebRTC packets come from, so it is the player's
+real address even though signaling passes through Caddy. Connections from
+localhost (bots on the server) are not limited. Password hashing uses all
+but one CPU at most, so a flood of logins cannot stall the games.
+
+**Connections.** At most 20 per address and 5,000 in all; one that has
+not logged in within 30 seconds is closed. Messages over 64 KB are
+refused.
+
+**Games and invites, per player.**
+- 20 unfinished games, of which 5 against the computer, and 1 open game.
+  Waiting "Find a match" requests count as games.
+- 5 invites sent and awaiting an answer; 20 waiting for one player's
+  answer; one at a time between two players. Invites and open games
+  nobody takes up are withdrawn after 48 hours.
+- A game between people with no move for 60 days, or against the computer
+  for 30, ends unfinished.
+
+**Memory.** A game nobody has touched for 10 minutes goes to sleep: it
+leaves memory and is rebuilt from the database the moment anyone opens it
+or moves. Slow games, such as a move every few days, cost only their
+database rows, so memory follows how many people are playing right now.
 
 ## TURN (optional)
 

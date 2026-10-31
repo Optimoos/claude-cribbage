@@ -58,8 +58,12 @@ type Conn struct {
 }
 
 func newConn(pc *webrtc.PeerConnection, dc *webrtc.DataChannel, codec Codec, release func()) *Conn {
-	c := &Conn{pc: pc, dc: dc, in: make(chan inbound, 256), closed: make(chan struct{}), codec: codec, release: release}
+	c := &Conn{pc: pc, dc: dc, in: make(chan inbound, 64), closed: make(chan struct{}), codec: codec, release: release}
 	dc.OnMessage(func(m webrtc.DataChannelMessage) {
+		if len(m.Data) > maxMessage {
+			c.Close() // no protocol message is this big
+			return
+		}
 		select {
 		case c.in <- inbound{data: m.Data, text: m.IsString}:
 		case <-c.closed:

@@ -79,6 +79,20 @@
       <button id="refresh" class="icon-btn" title="Refresh"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.6-6.4L21 8"/><path d="M21 3v5h-5"/></svg></button>
     </div>
     <p id="notice" class="notice"></p>
+    <h3>Play someone you know</h3>
+    <form id="invite-form" class="row invite-row">
+      <input id="invite-user" class="text" placeholder="Their username" autocomplete="off" maxlength="32" aria-label="Username to invite">
+      <button class="btn" type="submit">Invite</button>
+    </form>
+    <div class="row invite-row">
+      <button id="invite-code" class="btn" type="button" title="A code to text or read to someone; it lasts 48 hours">Get an invite code</button>
+    </div>
+    <form id="code-form" class="row invite-row">
+      <input id="code-input" class="text" placeholder="Have a code? ABC-DEF" autocomplete="off" maxlength="12" aria-label="Invite code">
+      <button class="btn" type="submit">Join</button>
+    </form>
+    <h3 id="invites-title" hidden>Invites</h3>
+    <ul id="invites" class="games invites"></ul>
     <h3>Your games</h3>
     <ul id="my-games" class="games"></ul>
     <h3>Open games</h3>

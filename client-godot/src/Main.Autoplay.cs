@@ -9,7 +9,8 @@ namespace Cribbage;
 //   - it registers --user (or logs in if the name is taken), unless a
 //     stored session resumes;
 //   - it carries on a game already in progress, or else starts one with
-//     --vs BOT, --open (an open game) or --join (the first open game);
+//     --vs BOT, --open (an open game), --join (the first open game),
+//     --invite USER or --accept (the first invite to it);
 //   - it plays random legal moves and quits when the game ends, printing
 //     the result, or kills itself after --quit-after moves.
 public partial class Main
@@ -37,6 +38,20 @@ public partial class Main
                 Send(new ClientMessage { Register = new Register { Username = opts.User, Password = opts.Password, Nickname = opts.User } });
             }
             return;
+        }
+        if (decided && autoGame == null && opts.Mode == "accept" && Now >= nextPoll)
+        {
+            nextPoll = Now + 1;
+            var inv = invites.FirstOrDefault(i => i.Incoming);
+            if (inv != null)
+            {
+                Say($"accepting {inv.From.Nickname}'s invite");
+                Respond(inv, true);
+            }
+            else
+            {
+                Send(new ClientMessage { ListGames = new ListGames() });
+            }
         }
         if (decided && autoGame == null && opts.Mode == "join" && Now >= nextPoll)
         {
@@ -142,6 +157,11 @@ public partial class Main
                 {
                     Say($"starting a game against {opts.Vs}");
                     CreateGame(opts.Vs);
+                }
+                else if (opts.Mode == "invite")
+                {
+                    Say($"inviting {opts.Invite}");
+                    Send(new ClientMessage { SendInvite = new SendInvite { Username = opts.Invite } });
                 }
                 else if (opts.Mode == "open")
                 {

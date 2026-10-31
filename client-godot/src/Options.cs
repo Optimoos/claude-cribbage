@@ -13,6 +13,7 @@ namespace Cribbage;
 //	--autoplay                    play by itself, for testing (see Autoplay)
 //	--user NAME --password PW     the account autoplay uses
 //	--vs BOT | --open | --join    what game autoplay starts
+//	--invite USER | --accept      or invite USER, or accept the first invite
 //	--quit-after N                stop abruptly after N moves
 //	--pace S                      wait S seconds between moves
 //	--animate                     animate while autoplaying (rapid otherwise)
@@ -23,7 +24,7 @@ public sealed class Options
     public string Profile = "default";
     public bool Autoplay;
     public string User = "", Password = "";
-    public string Vs = "", Mode = "";
+    public string Vs = "", Mode = "", Invite = "";
     public int QuitAfter;
     public double Pace = 0.02;
     public bool Animate;
@@ -48,6 +49,8 @@ public sealed class Options
                 case "--vs": o.Vs = Next(); o.Mode = "vs"; break;
                 case "--open": o.Mode = "open"; break;
                 case "--join": o.Mode = "join"; break;
+                case "--invite": o.Invite = Next(); o.Mode = "invite"; break;
+                case "--accept": o.Mode = "accept"; break;
                 case "--quit-after": o.QuitAfter = int.Parse(Next(), CultureInfo.InvariantCulture); break;
                 case "--animate": o.Animate = true; break;
                 case "--pace": o.Pace = double.Parse(Next(), CultureInfo.InvariantCulture); break;
