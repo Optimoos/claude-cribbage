@@ -482,6 +482,44 @@ button.card:disabled { cursor: default; }
 @keyframes toast { 0% { opacity: 0; transform: translateY(-8px); } 8%, 85% { opacity: 1; transform: none; } 100% { opacity: 0; } }
 @keyframes fall { to { transform: translateY(110vh) rotate(720deg); } }
 
+/* ---- Account and history ----------------------------------------------- */
+.link-btn {
+  background: none; border: 0; padding: 0; margin-top: .4rem; font: inherit; font-size: .9rem; color: var(--accent);
+  text-decoration: underline; text-underline-offset: 2px; cursor: pointer;
+}
+.login h2 { margin: 0 0 .4rem; }
+.login > .muted { margin: 0 0 1rem; }
+.error.ok { color: var(--accent); }
+.menu .row .btn { flex: 1; }
+.history-btn { margin-top: .7rem; width: 100%; }
+.history { min-width: 0; }
+.history-head { display: flex; align-items: center; gap: .6rem; }
+.history-head h2 { margin: 0; }
+.history-total { font-size: 1.05rem; margin: .6rem 0 0; }
+.history-total b { font-variant-numeric: tabular-nums; }
+.records-wrap { overflow-x: auto; }
+.records { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+.records th, .records td { padding: .4rem .5rem; text-align: right; border-bottom: 1px solid var(--line); white-space: nowrap; }
+.records th { font-size: .78rem; color: var(--muted); font-weight: 600; }
+.records th:first-child, .records td:first-child { text-align: left; white-space: normal; }
+.records tbody tr:last-child td { border-bottom: 0; }
+.history-games li { cursor: default; }
+.history-games li:hover { background: none; }
+.history-games .when { color: var(--muted); font-size: .85rem; min-width: 4.6rem; font-variant-numeric: tabular-nums; }
+#history-more { margin-top: .6rem; }
+.dialog {
+  width: min(92vw, 26rem); max-height: 90dvh; padding: 1.2rem; border: 1px solid var(--line); border-radius: var(--radius);
+  background: var(--surface); color: var(--ink); box-shadow: var(--shadow);
+}
+.dialog::backdrop { background: #0009; }
+.dialog-head { display: flex; align-items: center; }
+.dialog-head h2 { margin: 0; font-size: 1.2rem; }
+.dialog .icon-btn { color: var(--ink); }
+.dialog .icon-btn:hover { background: var(--surface-2); }
+.dialog h3 { margin: 1.1rem 0 .5rem; font-size: .78rem; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); font-family: inherit; }
+.dialog .hint { margin: 0 0 .6rem; font-size: .85rem; }
+.callout { margin: .8rem 0 0; padding: .6rem .75rem; border-radius: 8px; background: color-mix(in srgb, var(--accent) 16%, transparent); font-weight: 600; }
+
 /* ---- Games drawer ------------------------------------------------------ */
 /* With a game open, the lobby slides out from the left on demand and the
    table takes the full width. */

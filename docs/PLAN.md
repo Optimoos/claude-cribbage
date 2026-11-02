@@ -980,3 +980,116 @@ games per player of which 5 against the computer.
 - **Load test fix:** WebRTC test connections can use the LAN address
   rather than loopback, so they are rate limited; the load-test server
   raises the request limit.
+
+---
+
+# History and accounts (M25, M26)
+
+Added 2026-11-01, before deploying. Decided with you:
+- History: a list of all finished games and a record against each
+  opponent, without replays.
+- Forgotten passwords: optional, confirmed email addresses with reset
+  links.
+- Admin resets: a command that reaches the running server over a local
+  socket.
+
+### M25: Game history and records
+
+**Built (2026-11-01):**
+- `GetHistory` returns a page of finished games, newest first (default 50,
+  at most 100), with a cursor (`<updated ms>:<game id>`) for the next page.
+  The first page also carries `Record`s: games, wins, losses and unfinished
+  (expired or cancelled) games against each person (by user id, with their
+  latest nickname) and each bot, plus a total.
+- Open games that nobody joined are left out. `GameSummary.updated` gives
+  each game's end time.
+- SQLite queries use the existing `(seatN_user, updated)` indexes. The
+  memory store pages through the 50 games it keeps per player.
+- Web: "History and records" in the lobby opens a pane in place of the
+  table, with a records table, the games, and "Load more". Godot: the same
+  in a window.
+
+### M26: Passwords, email resets and admin resets
+
+**Built (2026-11-01):**
+- **Schema migration 2:** `users.email` and `users.must_change`. A new
+  `account_tokens` table holds SHA-256 hashes of single-use tokens: one
+  reset and one verification token per user, which a new one replaces.
+  The hourly sweep deletes expired ones.
+- **ChangePassword:** needs the old password and a different new one. It
+  ends every other session and closes their connections. Wrong guesses
+  count against the login failure limit.
+- **SetEmail:** needs the password. It mails a confirmation link
+  (`#verify=`) that works for 48 hours; the address is used once the link
+  is opened, and until then it shows as `pending_email`. An empty address
+  removes it.
+- **RequestPasswordReset:** takes a username or an address. It answers
+  `Ack` at once and mails in the background, so neither the reply nor its
+  timing shows whether the account exists. The link (`#reset=`) works for
+  an hour.
+- **ResetPassword:** a new password that is too short does not use up the
+  link. A good one ends every session and logs this connection in.
+- **Mail limits:** each account gets 3 emails, then 1 every 20 minutes.
+  Each address may ask for 5 resets, then 1 every 10 minutes. The token
+  buckets moved to `internal/ratelimit` so `auth` can use them.
+- **Links** put the token in the URL fragment, which browsers do not send to
+  the server. The web client reads it and removes it from the address bar.
+  If the link opens in a tab already showing the client, the page reloads
+  so the link is read.
+- **`internal/mail`:** SMTP with implicit TLS on 465, otherwise STARTTLS
+  required except on loopback. Plain text, quoted-printable, header
+  injection refused. `mail.Log` (`-mail-log`) logs mail instead, for testing.
+- **Flags:** `-smtp`, `-smtp-user`, `-smtp-password-file` (or
+  `CRIBBAGE_SMTP_PASSWORD`), `-mail-from`, `-mail-from-name` and
+  `-public-url` (https unless local; required with `-smtp`).
+- **Admin:** `-admin-socket` serves one JSON command per connection on a
+  Unix socket of mode 0600. The deploy unit puts it in
+  `/run/cribbage` (`RuntimeDirectory`, mode 0700).
+  `cribserver admin reset-password <user>` sets a temporary password like
+  `k7mq-x2r9-pd4h`, ends all of the player's sessions and closes their
+  connections. With `must_change` set, the server refuses everything but
+  `ChangePassword` and `Logout` (`PASSWORD_CHANGE_REQUIRED`), and the
+  clients open a password form that cannot be dismissed.
+- **Clients:** an Account dialog (change password, email address),
+  "Forgot your password?" on the login screen, and a reset form for links
+  (web only; the Godot client points to the browser). Godot gained
+  `--show history|account|forgot` for screenshots.
+
+**Verified:**
+- **Unit tests (memory and SQLite stores):** tokens are single use, expire,
+  are replaced, and are of the right kind; addresses match without regard to
+  case; SetPassword keeps one session and ends the rest; history pages
+  without overlap, including two games with the same end time; records
+  count wins, losses and unfinished games and use the latest nickname;
+  migration 2 on a version-0 database.
+- **Server tests:** change password, email confirmation and reset end to
+  end with a fake mailer, the per-account mail limit, a server without
+  mail, the admin reset with its forced change, and history paging.
+- **Mail:** address checks, a message sent to a fake SMTP server, header
+  injection.
+- **Admin socket:** mode 0600, stale socket replaced, unknown users and
+  commands.
+- **Race detector:** server, store, auth, mail, ratelimit and cmd/cribserver
+  pass.
+- **Web client in headless Firefox (WebDriver BiDi), against a server with
+  `-mail-log`:**
+  - history and records after three bot games
+  - adding an address, a wrong password, and confirming from the logged link
+  - changing the password
+  - "Forgot your password?", the reset link, mismatched passwords, the
+    link refused a second time
+  - the admin reset logging the page out, then the forced change, which
+    cannot be dismissed
+  - no horizontal scroll at 390 px, and no console errors
+  - this found that a link opened in an existing tab changed only the
+    fragment, hence the reload
+- **Godot:** screenshots of the history, account, forgot-password and
+  forced-change windows, which led to fixed-size windows (wrapped labels
+  made content-sized windows far too tall). Typing into these forms in
+  Godot was not exercised; they send the same messages the web client does.
+  On this machine, windowed Godot needs X11 with Mesa's software renderer
+  (`__GLX_VENDOR_LIBRARY_NAME=mesa LIBGL_ALWAYS_SOFTWARE=1`) when the GPU's
+  memory is full.
+
+**Not tested:** sending through a real SMTP provider. That needs your
+account, and then one reset email to yourself after deploying.

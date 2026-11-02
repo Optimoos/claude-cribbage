@@ -469,6 +469,9 @@ const state = {
   recent: [],
   invites: [],        // pending invites to and from me
   selected: null,
+  pane: null,         // 'history' while the history replaces the table
+  account: null,      // Account: email settings, must change password
+  history: null,      // {games, next, records, total} once fetched
   picked: new Set(),  // cards selected for discard
   logShown: { id: null, n: 0 },
 };
@@ -525,9 +528,41 @@ function syncView(v, u) {
 
 const conn = new Connection(onMessage, onOpen, onClose);
 
+// Handlers for replies to particular requests, by request id. A handler
+// returns true if it dealt with the reply completely.
+const replies = new Map();
+function request(body, onReply) {
+  const id = conn.send(body);
+  if (id) replies.set(id, onReply);
+  return id;
+}
+
+// A link from an email: #reset=<token> or #verify=<token>. Read it once and
+// take it out of the address bar and history.
+let emailLink = (() => {
+  const m = /^#(reset|verify)=([0-9a-f]{64})$/.exec(location.hash);
+  if (location.hash) history.replaceState(null, '', location.pathname + location.search);
+  return m ? { kind: m[1], token: m[2] } : null;
+})();
+
+// A link opened in a tab already showing the client changes only the
+// fragment; load the page afresh so it is read like any other.
+addEventListener('hashchange', () => {
+  if (/^#(reset|verify)=/.test(location.hash)) location.reload();
+});
+
 function onOpen() {
   setStatus('online');
   state.me = null; // each connection authenticates afresh
+  if (emailLink && emailLink.kind === 'verify') {
+    const token = emailLink.token;
+    emailLink = null;
+    request({ verifyEmail: { token } }, m => {
+      toast(m.ack ? 'Email address confirmed. Reset links will go there.' : m.error.message);
+      return true;
+    });
+  }
+  if (emailLink && emailLink.kind === 'reset') { show('reset-panel'); return; }
   const token = localStorage.getItem('token');
   if (token) conn.send({ resume: { token } });
   else show('login');
@@ -543,7 +578,7 @@ function setStatus(text) {
 }
 
 function show(...ids) {
-  for (const id of ['login', 'lobby']) $(id).hidden = !ids.includes(id);
+  for (const id of ['login', 'lobby', 'forgot-panel', 'reset-panel']) $(id).hidden = !ids.includes(id);
   if (!ids.includes('lobby')) { $('table').hidden = true; $('empty').hidden = true; }
 }
 
@@ -561,15 +596,28 @@ function toast(text) {
 }
 
 function onMessage(m) {
+  const h = m.requestId && replies.get(m.requestId);
+  if (h) {
+    replies.delete(m.requestId);
+    if (h(m)) return;
+  }
   if (m.authOk) {
     state.me = m.authOk;
+    state.account = m.authOk.account || {};
+    state.history = null;
     localStorage.setItem('token', m.authOk.token);
     $('who').textContent = `Signed in as ${m.authOk.nickname} (${m.authOk.username})`;
     $('account').hidden = false;
     $('login-error').textContent = '';
     show('lobby');
     renderTable();
-    conn.send({ listGames: {} });
+    if (state.account.mustChangePassword) openAccount();
+    else conn.send({ listGames: {} });
+  } else if (m.account) {
+    state.account = m.account;
+    renderAccount();
+  } else if (m.history) {
+    onHistory(m.history);
   } else if (m.error) {
     onError(m.error);
   } else if (m.gameUpdate) {
@@ -601,6 +649,11 @@ function onError(e) {
   if (!state.me) {
     $('login-error').textContent = e.message;
     show('login');
+    return;
+  }
+  if (e.code === 'ERROR_CODE_PASSWORD_CHANGE_REQUIRED') {
+    state.account = Object.assign({}, state.account, { mustChangePassword: true });
+    openAccount();
     return;
   }
   notice(e.message);
@@ -986,6 +1039,225 @@ function renderLobby() {
 }
 
 // ---------------------------------------------------------------------------
+// History
+// ---------------------------------------------------------------------------
+
+function openHistory() {
+  state.pane = 'history';
+  setDrawer(false);
+  renderLobby();
+  renderTable();
+  // Fetch afresh each time: games may have finished since.
+  state.history = null;
+  renderHistory();
+  conn.send({ getHistory: {} });
+}
+
+function closeHistory() {
+  state.pane = null;
+  renderTable();
+}
+
+function onHistory(h) {
+  const first = !state.history;
+  if (first) state.history = { games: [], records: h.records || [], total: h.total || {} };
+  state.history.games.push(...(h.games || []));
+  state.history.next = h.next || '';
+  renderHistory();
+}
+
+// botLabel names a bot as the lobby does ("Expert (medium)").
+function botLabel(bot) {
+  const b = document.querySelector(`[data-create="${CSS.escape(bot)}"] b`);
+  return b ? b.textContent : bot + ' bot';
+}
+
+function playerLabel(p) {
+  return p.bot ? botLabel(p.bot) : p.nickname || 'Unknown';
+}
+
+function shortDate(ms) {
+  const d = new Date(Number(ms));
+  const opts = { month: 'short', day: 'numeric' };
+  if (d.getFullYear() !== new Date().getFullYear()) opts.year = 'numeric';
+  return d.toLocaleDateString(undefined, opts);
+}
+
+function winRate(r) {
+  const n = (r.wins || 0) + (r.losses || 0);
+  return n ? `${Math.round(100 * (r.wins || 0) / n)}%` : '–';
+}
+
+function renderHistory() {
+  const h = state.history;
+  const total = $('history-total');
+  const tbody = $('records').tBodies[0];
+  if (!h) {
+    total.textContent = 'Loading…';
+    tbody.replaceChildren();
+    $('history-games').replaceChildren();
+    $('history-more').hidden = true;
+    return;
+  }
+  const t = h.total;
+  if (!t.games) {
+    total.textContent = 'No finished games yet.';
+  } else {
+    const parts = [`<b>${t.games}</b> ${t.games === 1 ? 'game' : 'games'}`, `<b>${t.wins || 0}</b> won`, `<b>${t.losses || 0}</b> lost`];
+    if (t.unfinished) parts.push(`<b>${t.unfinished}</b> unfinished`);
+    total.innerHTML = parts.join(' · ') + ` · win rate <b>${winRate(t)}</b>`;
+  }
+  $('records').hidden = !h.records.length;
+  tbody.replaceChildren(...h.records.map(r => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td>${esc(playerLabel(r.opponent))}</td><td>${r.games || 0}</td><td>${r.wins || 0}</td>` +
+      `<td>${r.losses || 0}</td><td>${winRate(r)}</td>`;
+    if (r.unfinished) tr.title = `${r.unfinished} unfinished (expired or cancelled)`;
+    return tr;
+  }));
+  fillList($('history-games'), h.games.map(g => {
+    const li = document.createElement('li');
+    const res = g.winner < 0 ? 'unfinished' : g.winner === g.seat ? 'won' : 'lost';
+    const tag = res === 'lost' && g.resigned ? 'resigned' : res;
+    const opp = (g.players || [])[1 - g.seat] || {};
+    li.innerHTML = `<span class="when">${esc(shortDate(g.updated))}</span>` +
+      `<span class="name">vs ${esc(playerLabel(opp))}</span>` +
+      `<span class="score">${g.scores[g.seat] || 0}–${g.scores[1 - g.seat] || 0}</span>` +
+      `<span class="tag ${res}">${tag}</span>`;
+    return li;
+  }), 'None yet');
+  $('history-more').hidden = !h.next;
+  $('history-more').disabled = false;
+}
+
+// ---------------------------------------------------------------------------
+// Account: password, email, and password resets
+// ---------------------------------------------------------------------------
+
+function openAccount() {
+  for (const f of ['password-form', 'email-form']) $(f).reset();
+  for (const m of ['password-msg', 'email-msg']) setMsg(m, '');
+  renderAccount();
+  $('settings').hidden = true;
+  if (!$('account-dialog').open) $('account-dialog').showModal();
+}
+
+function renderAccount() {
+  const a = state.account || {};
+  const must = !!a.mustChangePassword;
+  $('must-change').hidden = !must;
+  $('account-close').hidden = must;
+  $('email-form').hidden = must;
+  $('old-label').textContent = must ? 'Temporary password' : 'Current password';
+  let status;
+  if (!a.emailEnabled) status = "This server can't send email, so whoever runs it resets forgotten passwords.";
+  else if (a.email) status = `Reset links go to ${a.email}.`;
+  else status = 'No address yet. Without one, only whoever runs the server can reset your password.';
+  if (a.emailEnabled && a.pendingEmail) {
+    status += ` We sent a link to ${a.pendingEmail}: open it within 48 hours to start using that address.`;
+  }
+  $('email-status').textContent = status;
+  for (const el of $('email-form').querySelectorAll('input, button')) el.disabled = !a.emailEnabled;
+  $('email-remove').hidden = !a.email && !a.pendingEmail;
+}
+
+function setMsg(id, text, ok = false) {
+  $(id).textContent = text;
+  $(id).classList.toggle('ok', ok);
+}
+
+$('account-btn').onclick = () => openAccount();
+$('account-close').onclick = () => $('account-dialog').close();
+// While a new password is required the dialog cannot be dismissed.
+$('account-dialog').addEventListener('cancel', e => {
+  if (state.account && state.account.mustChangePassword) e.preventDefault();
+});
+
+$('password-form').onsubmit = ev => {
+  ev.preventDefault();
+  const f = new FormData(ev.target);
+  if (f.get('new') !== f.get('again')) return setMsg('password-msg', "The new passwords don't match.");
+  const must = state.account && state.account.mustChangePassword;
+  const sent = request({ changePassword: { oldPassword: f.get('old'), newPassword: f.get('new') } }, m => {
+    if (m.error) { setMsg('password-msg', m.error.message); return true; }
+    state.account = m.account;
+    ev.target.reset();
+    if (must) {
+      $('account-dialog').close();
+      toast('Password changed.');
+      conn.send({ listGames: {} });
+    } else {
+      setMsg('password-msg', 'Password changed. Your other devices have been logged out.', true);
+    }
+    renderAccount();
+    return true;
+  });
+  setMsg('password-msg', sent ? '' : 'Not connected.');
+};
+
+$('email-form').onsubmit = ev => {
+  ev.preventDefault();
+  const f = new FormData(ev.target);
+  const remove = ev.submitter && ev.submitter.value === 'remove';
+  const email = remove ? '' : String(f.get('email')).trim();
+  if (!remove && !email) return setMsg('email-msg', 'Enter an email address.');
+  setMsg('email-msg', remove ? '' : 'Sending…', true);
+  const sent = request({ setEmail: { email, password: f.get('password') } }, m => {
+    if (m.error) { setMsg('email-msg', m.error.message); return true; }
+    state.account = m.account;
+    ev.target.reset();
+    renderAccount();
+    setMsg('email-msg', remove ? 'Address removed.' :
+      m.account.pendingEmail ? `Check ${m.account.pendingEmail} for a link to confirm it.` : 'Saved.', true);
+    return true;
+  });
+  if (!sent) setMsg('email-msg', 'Not connected.');
+};
+
+$('forgot').onclick = () => {
+  const name = $('login-form').elements.username.value;
+  $('forgot-form').elements.name.value = name;
+  setMsg('forgot-msg', '');
+  show('forgot-panel');
+};
+for (const b of document.querySelectorAll('[data-to-login]')) {
+  b.onclick = () => {
+    emailLink = null;
+    show('login');
+    const token = localStorage.getItem('token');
+    if (token && !state.me) conn.send({ resume: { token } });
+  };
+}
+$('forgot-form').onsubmit = ev => {
+  ev.preventDefault();
+  const name = String(new FormData(ev.target).get('name')).trim();
+  const sent = request({ requestPasswordReset: { username: name } }, m => {
+    if (m.error) setMsg('forgot-msg', m.error.message);
+    else setMsg('forgot-msg', 'If that account has a confirmed email address, a link is on its way. It works for an hour.', true);
+    return true;
+  });
+  if (!sent) setMsg('forgot-msg', 'Not connected yet…');
+};
+$('reset-form').onsubmit = ev => {
+  ev.preventDefault();
+  const f = new FormData(ev.target);
+  if (f.get('new') !== f.get('again')) return setMsg('reset-msg', "The passwords don't match.");
+  if (!emailLink) return show('login');
+  const sent = request({ resetPassword: { token: emailLink.token, newPassword: f.get('new') } }, m => {
+    if (m.error) {
+      setMsg('reset-msg', m.error.code === 'ERROR_CODE_NOT_FOUND'
+        ? 'This link has expired or was already used. Ask for a new one from the login page.' : m.error.message);
+      return true;
+    }
+    emailLink = null;
+    ev.target.reset();
+    toast('Password changed. You are logged in.');
+    return false; // the AuthOk logs in as usual
+  });
+  if (!sent) setMsg('reset-msg', 'Not connected yet…');
+};
+
+// ---------------------------------------------------------------------------
 // Invites
 // ---------------------------------------------------------------------------
 
@@ -1042,6 +1314,7 @@ function renderInvites() {
 function select(id) {
   if (state.selected !== id) skipAnimation();
   state.selected = id;
+  state.pane = null;
   state.picked.clear();
   setDrawer(false);
   renderLobby();
@@ -1102,10 +1375,12 @@ function plate(el, v, seat, isMe) {
 }
 
 function renderTable(animate = false) {
-  const has = !!(state.me && state.selected && state.games.has(state.selected));
-  document.body.classList.toggle('has-table', has);
+  const hist = !!(state.me && state.pane === 'history');
+  const has = !hist && !!(state.me && state.selected && state.games.has(state.selected));
+  document.body.classList.toggle('has-table', has || hist);
+  $('history').hidden = !hist;
   $('table').hidden = !has;
-  $('empty').hidden = has || !state.me;
+  $('empty').hidden = has || hist || !state.me;
   if (!has) { setDrawer(false); return; }
   const v = view(state.selected);
   const g = v.g;
@@ -1342,6 +1617,13 @@ $('code-form').onsubmit = ev => {
   $('code-input').value = '';
 };
 setInterval(() => { if (state.invites.length) renderInvites(); }, 60000);
+$('open-history').onclick = () => openHistory();
+$('history-close').onclick = () => closeHistory();
+$('history-more').onclick = () => {
+  if (!state.history || !state.history.next) return;
+  $('history-more').disabled = true;
+  conn.send({ getHistory: { after: state.history.next } });
+};
 $('find-match').onclick = () => conn.send({ findMatch: {} });
 $('refresh').onclick = () => conn.send({ listGames: {} });
 $('discard').onclick = () => {

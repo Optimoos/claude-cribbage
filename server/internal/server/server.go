@@ -23,6 +23,7 @@ import (
 	"cribbage/internal/bots"
 	"cribbage/internal/netkey"
 	"cribbage/internal/protocol/pb"
+	"cribbage/internal/ratelimit"
 	"cribbage/internal/store"
 	"cribbage/internal/transport/tcp"
 )
@@ -152,10 +153,10 @@ type Server struct {
 	qmu   sync.Mutex
 	queue []matchRequest
 
-	attempts, registers, failures *limiter
+	attempts, registers, failures *ratelimit.Limiter
 	hashing                       chan struct{}
-	actions                       *limiter      // requests per user, once logged in
-	botMoves                      chan struct{} // bot decisions in progress
+	actions                       *ratelimit.Limiter // requests per user, once logged in
+	botMoves                      chan struct{}      // bot decisions in progress
 
 	limits  GameLimits
 	authLim AuthLimits // connection limits (cmu guards connsByAddr)
@@ -168,7 +169,10 @@ type Server struct {
 
 	imu                    sync.Mutex
 	inv                    invites
-	invitesSent, codeTries *limiter
+	invitesSent, codeTries *ratelimit.Limiter
+	resetRequests          *ratelimit.Limiter // password reset emails asked for, by address
+
+	bg sync.WaitGroup // background requests, such as sending email
 
 	stats struct {
 		gamesStarted, gamesFinished, actions, conns atomic.Int64
@@ -209,11 +213,11 @@ func New(cfg Config) *Server {
 		gl.BotMoves = max(1, runtime.GOMAXPROCS(0)-1) // leave a core for everything else
 	}
 	s := &Server{
-		attempts:    newLimiter(lim.AttemptsPerIP, lim.AttemptEvery),
-		registers:   newLimiter(lim.RegistersPerIP, lim.RegisterEvery),
-		failures:    newLimiter(lim.FailuresPerUser, lim.FailureEvery),
+		attempts:    ratelimit.New(lim.AttemptsPerIP, lim.AttemptEvery),
+		registers:   ratelimit.New(lim.RegistersPerIP, lim.RegisterEvery),
+		failures:    ratelimit.New(lim.FailuresPerUser, lim.FailureEvery),
 		hashing:     make(chan struct{}, lim.Hashing),
-		actions:     newLimiter(lim.ActionsPerUser, lim.ActionEvery),
+		actions:     ratelimit.New(lim.ActionsPerUser, lim.ActionEvery),
 		botMoves:    make(chan struct{}, gl.BotMoves),
 		limits:      gl,
 		authLim:     lim,
@@ -222,18 +226,21 @@ func New(cfg Config) *Server {
 		inv:         newInvites(),
 		// Ten invites, then one every six minutes; ten code guesses, then
 		// one a minute.
-		invitesSent: newLimiter(10, 6*time.Minute),
-		codeTries:   newLimiter(10, time.Minute),
-		auth:        cfg.Auth,
-		gameStore:   cfg.Games,
-		log:         cfg.Logger,
-		outbox:      cfg.OutboxSize,
-		quit:        make(chan struct{}),
-		allConns:    map[*Conn]struct{}{},
-		games:       map[string]*game{},
-		userGames:   map[int64]map[string]*game{},
-		open:        map[string]*game{},
-		conns:       map[int64]map[*Conn]struct{}{},
+		invitesSent: ratelimit.New(10, 6*time.Minute),
+		codeTries:   ratelimit.New(10, time.Minute),
+		// Five password reset requests from an address, then one every ten
+		// minutes. Each account also gets few emails (auth.Service).
+		resetRequests: ratelimit.New(5, 10*time.Minute),
+		auth:          cfg.Auth,
+		gameStore:     cfg.Games,
+		log:           cfg.Logger,
+		outbox:        cfg.OutboxSize,
+		quit:          make(chan struct{}),
+		allConns:      map[*Conn]struct{}{},
+		games:         map[string]*game{},
+		userGames:     map[int64]map[string]*game{},
+		open:          map[string]*game{},
+		conns:         map[int64]map[*Conn]struct{}{},
 	}
 	go s.sweep()
 	return s
@@ -326,7 +333,7 @@ func (s *Server) handle(c *Conn, m *pb.ClientMessage) {
 			return
 		}
 		s.authenticate(c, id, func(ctx context.Context) (*auth.Result, error) {
-			return s.hashed(ctx, func() (*auth.Result, error) {
+			return hashed(s, ctx, func() (*auth.Result, error) {
 				return s.auth.Register(ctx, b.Register.Username, b.Register.Password, b.Register.Nickname)
 			})
 		})
@@ -345,11 +352,11 @@ func (s *Server) handle(c *Conn, m *pb.ClientMessage) {
 			return
 		}
 		s.authenticate(c, id, func(ctx context.Context) (*auth.Result, error) {
-			res, err := s.hashed(ctx, func() (*auth.Result, error) {
+			res, err := hashed(s, ctx, func() (*auth.Result, error) {
 				return s.auth.Login(ctx, b.Login.Username, b.Login.Password)
 			})
 			if errors.Is(err, auth.ErrInvalidCredentials) && limited(c) {
-				s.failures.take(key, time.Now())
+				s.failures.Take(key, time.Now())
 			}
 			return res, err
 		})
@@ -358,6 +365,15 @@ func (s *Server) handle(c *Conn, m *pb.ClientMessage) {
 		s.authenticate(c, id, func(ctx context.Context) (*auth.Result, error) {
 			return s.auth.Resume(ctx, b.Resume.Token)
 		})
+		return
+	case *pb.ClientMessage_RequestPasswordReset:
+		s.requestReset(c, id, b.RequestPasswordReset.Username)
+		return
+	case *pb.ClientMessage_ResetPassword:
+		s.resetPassword(c, id, b.ResetPassword)
+		return
+	case *pb.ClientMessage_VerifyEmail:
+		s.verifyEmail(c, id, b.VerifyEmail.Token)
 		return
 	case *pb.ClientMessage_Ping:
 		c.send(&pb.ServerMessage{RequestId: id, Body: &pb.ServerMessage_Pong{Pong: &pb.Pong{
@@ -373,11 +389,25 @@ func (s *Server) handle(c *Conn, m *pb.ClientMessage) {
 		c.sendError(id, pb.ErrorCode_ERROR_CODE_UNAUTHENTICATED, "", "log in first")
 		return
 	}
-	if limited(c) && !s.actions.take(c.userKey, time.Now()) {
+	if limited(c) && !s.actions.Take(c.userKey, time.Now()) {
 		c.sendError(id, pb.ErrorCode_ERROR_CODE_RATE_LIMITED, "", "too many requests; slow down")
 		return
 	}
+	if c.mustChange.Load() {
+		switch m.Body.(type) {
+		case *pb.ClientMessage_ChangePassword, *pb.ClientMessage_Logout:
+		default:
+			c.sendError(id, pb.ErrorCode_ERROR_CODE_PASSWORD_CHANGE_REQUIRED, "", "choose a new password first")
+			return
+		}
+	}
 	switch b := m.Body.(type) {
+	case *pb.ClientMessage_GetHistory:
+		s.getHistory(c, id, b.GetHistory)
+	case *pb.ClientMessage_ChangePassword:
+		s.changePassword(c, id, b.ChangePassword)
+	case *pb.ClientMessage_SetEmail:
+		s.setEmail(c, id, b.SetEmail)
 	case *pb.ClientMessage_CreateGame:
 		s.createGame(c, id, b.CreateGame.Bot)
 	case *pb.ClientMessage_JoinGame:
@@ -455,24 +485,13 @@ func (s *Server) allowAuth(c *Conn, id uint32, user string, register bool) bool 
 	}
 	now := time.Now()
 	ip := addrKey(remoteIP(c.t))
-	ok := s.attempts.take(ip, now) &&
-		(!register || s.registers.take(ip, now)) &&
-		(register || s.failures.allow(user, now))
+	ok := s.attempts.Take(ip, now) &&
+		(!register || s.registers.Take(ip, now)) &&
+		(register || s.failures.Allow(user, now))
 	if !ok {
 		c.sendError(id, pb.ErrorCode_ERROR_CODE_RATE_LIMITED, "", "too many attempts; try again later")
 	}
 	return ok
-}
-
-// hashed runs fn, which hashes a password, once a hashing slot is free.
-func (s *Server) hashed(ctx context.Context, fn func() (*auth.Result, error)) (*auth.Result, error) {
-	select {
-	case s.hashing <- struct{}{}:
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	}
-	defer func() { <-s.hashing }()
-	return fn()
 }
 
 func (s *Server) authenticate(c *Conn, id uint32, fn func(context.Context) (*auth.Result, error)) {
@@ -494,16 +513,27 @@ func (s *Server) authenticate(c *Conn, id uint32, fn func(context.Context) (*aut
 	case errors.Is(err, auth.ErrInvalidCredentials):
 		c.sendError(id, pb.ErrorCode_ERROR_CODE_INVALID_CREDENTIALS, "", err.Error())
 		return
+	case errors.Is(err, auth.ErrBadToken):
+		c.sendError(id, pb.ErrorCode_ERROR_CODE_NOT_FOUND, "", err.Error())
+		return
 	default:
 		s.log.Error("authentication failed", "err", err)
 		c.sendError(id, pb.ErrorCode_ERROR_CODE_INTERNAL, "", "internal error")
 		return
 	}
+	acct, err := s.accountMessage(ctx, res.User)
+	if err != nil {
+		s.log.Error("account", "user", res.User.ID, "err", err)
+		c.sendError(id, pb.ErrorCode_ERROR_CODE_INTERNAL, "", "internal error")
+		return
+	}
 	c.user, c.token, c.userKey = res.User, res.Token, strconv.FormatInt(res.User.ID, 10)
+	c.mustChange.Store(res.User.MustChange)
 	c.authed.Store(true)
 	s.registerConn(c)
 	c.send(&pb.ServerMessage{RequestId: id, Body: &pb.ServerMessage_AuthOk{AuthOk: &pb.AuthOk{
 		UserId: res.User.ID, Username: res.User.Username, Nickname: res.User.Nickname, Token: res.Token,
+		Account: acct,
 	}}})
 	// Bring the connection up to date on every game the user is in, so a
 	// reconnecting client can resume immediately.
@@ -668,6 +698,7 @@ func finishedSummary(g store.Game, userID int64) *pb.GameSummary {
 		Scores:   []int32{int32(g.Scores[0]), int32(g.Scores[1])},
 		Winner:   int32(g.Winner),
 		Resigned: g.Resigned,
+		Updated:  g.Updated.UnixMilli(),
 	}
 	for i, st := range g.Seats {
 		out.Players = append(out.Players, &pb.PlayerInfo{UserId: st.UserID, Nickname: st.Nickname, Bot: st.Bot})
@@ -788,6 +819,7 @@ func (s *Server) Shutdown() {
 		s.gmu.Unlock()
 
 		s.actors.Wait()
+		s.bg.Wait()
 
 		s.cmu.RLock()
 		conns := make([]*Conn, 0, len(s.allConns))

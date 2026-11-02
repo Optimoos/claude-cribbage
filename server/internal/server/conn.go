@@ -26,7 +26,10 @@ type Conn struct {
 	token   string      // the session token, for Logout
 	userKey string      // user ID as a limiter key
 	authed  atomic.Bool // user is set (readable from other goroutines)
-	addr    string      // limiter key of a remote address; "" if not limited
+	// mustChange: the admin reset the password, so only ChangePassword
+	// is allowed.
+	mustChange atomic.Bool
+	addr       string // limiter key of a remote address; "" if not limited
 }
 
 func (c *Conn) send(m *pb.ServerMessage) {

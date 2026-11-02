@@ -30,9 +30,15 @@ message ClientMessage {
     SendInvite send_invite = 26;
     RespondInvite respond_invite = 27;
     RedeemCode redeem_code = 28;
+    GetHistory get_history = 29;
     Act act = 30;
     Resign resign = 31;
     Ping ping = 40;
+    ChangePassword change_password = 50;
+    SetEmail set_email = 51;
+    RequestPasswordReset request_password_reset = 52;
+    ResetPassword reset_password = 53;
+    VerifyEmail verify_email = 54;
   }
 }
 
@@ -117,6 +123,56 @@ message Ping {
   uint64 client_time = 1;
 }
 
+// GetHistory asks for a page of the user's finished games, newest first.
+// The first page also carries the user's record against each opponent.
+// Open games that nobody joined are left out. The reply is History.
+message GetHistory {
+  string after = 1; // History.next from the previous page; empty for the first
+  uint32 limit = 2; // games per page: 0 means 50, and at most 100
+}
+
+// ChangePassword sets a new password. The user's other sessions end and
+// their other connections close; this one stays logged in. The reply is
+// Account, or INVALID_CREDENTIALS if old_password is wrong.
+message ChangePassword {
+  string old_password = 1;
+  string new_password = 2;
+}
+
+// SetEmail sets the address that password reset links go to. The server
+// mails a link to it, and the address is used once the link is opened
+// (VerifyEmail); until then it is Account.pending_email. An empty email
+// removes the address. password is the current password. The reply is
+// Account.
+message SetEmail {
+  string email = 1;
+  string password = 2;
+}
+
+// RequestPasswordReset mails a reset link to each account with this
+// username or verified email address. The reply is Ack whether or not any
+// account matched, so it does not reveal who has an account; BAD_REQUEST
+// if the server cannot send mail. Allowed before logging in.
+message RequestPasswordReset {
+  string username = 1; // or an email address
+}
+
+// ResetPassword sets a new password with the token from a reset link, ends
+// every session of the account, and logs this connection in: the reply is
+// AuthOk. NOT_FOUND if the link has expired or was used. Allowed only before
+// logging in.
+message ResetPassword {
+  string token = 1;
+  string new_password = 2;
+}
+
+// VerifyEmail confirms an address with the token from a SetEmail link. The
+// reply is Ack, and connections logged in as that user receive Account.
+// NOT_FOUND if the link has expired or was used. Allowed before logging in.
+message VerifyEmail {
+  string token = 1;
+}
+
 // ---------------------------------------------------------------------------
 // Server -> client
 // ---------------------------------------------------------------------------
@@ -132,6 +188,8 @@ message ServerMessage {
     MatchQueued match_queued = 22;
     Ack ack = 23;
     Invites invites = 24; // the user's pending invites, whenever they change
+    History history = 25;
+    Account account = 12; // the user's account settings, whenever they change
     Pong pong = 40;
   }
 }
@@ -150,6 +208,9 @@ enum ErrorCode {
   ERROR_CODE_INTERNAL = 10;
   ERROR_CODE_RATE_LIMITED = 11; // too many attempts; try again later
   ERROR_CODE_TOO_MANY_GAMES = 12; // a player is at a limit on games or invites
+  // The admin reset this user's password: ChangePassword (or Logout) is
+  // the only request allowed until a new one is chosen.
+  ERROR_CODE_PASSWORD_CHANGE_REQUIRED = 13;
 }
 
 message Error {
@@ -164,6 +225,17 @@ message AuthOk {
   string nickname = 3;
   // Token for Resume on a later connection.
   string token = 4;
+  Account account = 5;
+}
+
+// Account is what a user can change about their account.
+message Account {
+  string email = 1; // verified address for reset links; empty if none
+  string pending_email = 2; // set but not yet verified
+  // The admin reset the password: the user must choose a new one with
+  // ChangePassword before anything else.
+  bool must_change_password = 3;
+  bool email_enabled = 4; // the server can send mail
 }
 
 message MatchQueued {}
@@ -199,6 +271,7 @@ message GameSummary {
   int32 winner = 6;
   bool your_turn = 7;
   bool resigned = 8; // the game ended by resignation
+  int64 updated = 9; // Unix milliseconds of the last change; when a finished game ended
 }
 
 // Invite is a pending invitation to a game.
@@ -213,6 +286,26 @@ message Invite {
 
 message Invites {
   repeated Invite invites = 1;
+}
+
+// History is a page of a user's finished games.
+message History {
+  repeated GameSummary games = 1; // newest first
+  string next = 2; // pass as GetHistory.after for the next page; empty at the end
+  // First page only: the user's record against each opponent, most games
+  // first, and in all.
+  repeated Record records = 3;
+  Record total = 4;
+}
+
+// Record counts a user's finished games against one opponent.
+message Record {
+  PlayerInfo opponent = 1; // a person (user_id and latest nickname) or a bot (bot)
+  uint32 games = 2;
+  uint32 wins = 3;
+  uint32 losses = 4; // including resignations
+  uint32 unfinished = 5; // expired or cancelled, so no winner
+  int64 last = 6; // Unix milliseconds of the latest game
 }
 
 message GameList {

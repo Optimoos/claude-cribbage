@@ -35,7 +35,10 @@
       <p class="hint">Rapid play skips animations and sounds.</p>
       <div id="account" hidden>
         <p class="who" id="who"></p>
-        <button id="logout" class="btn btn-ghost">Log out</button>
+        <div class="row">
+          <button id="account-btn" class="btn btn-ghost">Account…</button>
+          <button id="logout" class="btn btn-ghost">Log out</button>
+        </div>
       </div>
     </div>
   </div>
@@ -59,6 +62,34 @@
         <button type="submit" name="action" value="register" class="btn">Register</button>
       </div>
       <p id="login-error" class="error"></p>
+      <button type="button" id="forgot" class="link-btn">Forgot your password?</button>
+    </form>
+  </section>
+
+  <section id="forgot-panel" class="panel login" hidden>
+    <h2>Forgot your password?</h2>
+    <p class="muted">Enter your username or email address. If the account has a confirmed email address, we'll send it a link to choose a new password.</p>
+    <form id="forgot-form">
+      <label class="field">Username or email <input name="name" autocomplete="username" required maxlength="254"></label>
+      <div class="row">
+        <button class="btn btn-primary">Send link</button>
+        <button type="button" class="btn btn-ghost" data-to-login>Back</button>
+      </div>
+      <p id="forgot-msg" class="error"></p>
+    </form>
+  </section>
+
+  <section id="reset-panel" class="panel login" hidden>
+    <h2>Choose a new password</h2>
+    <p class="muted">You'll be logged out everywhere else.</p>
+    <form id="reset-form">
+      <label class="field">New password <input name="new" type="password" autocomplete="new-password" required minlength="8" maxlength="72"></label>
+      <label class="field">New password again <input name="again" type="password" autocomplete="new-password" required></label>
+      <div class="row">
+        <button class="btn btn-primary">Set password and log in</button>
+        <button type="button" class="btn btn-ghost" data-to-login>Cancel</button>
+      </div>
+      <p id="reset-msg" class="error"></p>
     </form>
   </section>
 
@@ -99,7 +130,27 @@
     <ul id="open-games" class="games"></ul>
     <h3>Recently finished</h3>
     <ul id="recent-games" class="games"></ul>
+    <button id="open-history" class="btn btn-small history-btn">History and records</button>
   </aside>
+
+  <section id="history" class="panel history" hidden>
+    <div class="history-head">
+      <h2>History</h2>
+      <span class="spacer"></span>
+      <button id="history-close" class="btn btn-ghost btn-small">Close</button>
+    </div>
+    <p id="history-total" class="history-total"></p>
+    <h3>Record by opponent</h3>
+    <div class="records-wrap">
+      <table id="records" class="records">
+        <thead><tr><th scope="col">Opponent</th><th scope="col">Played</th><th scope="col">Won</th><th scope="col">Lost</th><th scope="col">Win rate</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <h3>Finished games</h3>
+    <ul id="history-games" class="games history-games"></ul>
+    <button id="history-more" class="btn btn-small" hidden>Load more</button>
+  </section>
 
   <section id="empty" class="panel empty" hidden>
     <span class="suits big"><b>♠</b><b class="r">♥</b><b>♣</b><b class="r">♦</b></span>
@@ -160,6 +211,34 @@
     </details>
   </section>
 </main>
+
+<dialog id="account-dialog" class="dialog" aria-labelledby="account-title">
+  <div class="dialog-head">
+    <h2 id="account-title">Account</h2>
+    <span class="spacer"></span>
+    <button id="account-close" class="icon-btn" aria-label="Close">✕</button>
+  </div>
+  <p id="must-change" class="callout" hidden>Your password was reset. Choose a new password to carry on.</p>
+  <form id="password-form">
+    <h3>Change password</h3>
+    <label class="field"><span id="old-label">Current password</span> <input name="old" type="password" autocomplete="current-password" required></label>
+    <label class="field">New password <input name="new" type="password" autocomplete="new-password" required minlength="8" maxlength="72"></label>
+    <label class="field">New password again <input name="again" type="password" autocomplete="new-password" required></label>
+    <button class="btn btn-primary">Change password</button>
+    <p id="password-msg" class="error"></p>
+  </form>
+  <form id="email-form">
+    <h3>Email for password resets</h3>
+    <p id="email-status" class="hint"></p>
+    <label class="field">Email address <input name="email" type="email" autocomplete="email" maxlength="254"></label>
+    <label class="field">Current password <input name="password" type="password" autocomplete="current-password" required></label>
+    <div class="row">
+      <button class="btn btn-primary" value="save">Save</button>
+      <button id="email-remove" class="btn btn-ghost" value="remove">Remove address</button>
+    </div>
+    <p id="email-msg" class="error"></p>
+  </form>
+</dialog>
 <script src="app.js"></script>
 </body>
 </html>

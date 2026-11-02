@@ -16,6 +16,8 @@ import (
 
 	"golang.org/x/crypto/bcrypt"
 
+	"cribbage/internal/mail"
+	"cribbage/internal/ratelimit"
 	"cribbage/internal/store"
 )
 
@@ -32,8 +34,17 @@ type Service struct {
 	BcryptCost int           // bcrypt.DefaultCost if zero
 	SessionTTL time.Duration // 30 days if zero
 
+	// Mailer sends reset and verification links; nil disables email.
+	// BaseURL is the web client's address, for the links.
+	Mailer    mail.Sender
+	BaseURL   string
+	ResetTTL  time.Duration // how long a reset link works; an hour if zero
+	VerifyTTL time.Duration // how long a verification link works; 48 hours if zero
+
 	dummyOnce sync.Once
 	dummy     []byte
+	mailOnce  sync.Once
+	mailLimit *ratelimit.Limiter // emails per user
 }
 
 // Result of a successful authentication.
@@ -49,8 +60,8 @@ func validate(username, password, nickname string) error {
 	if !usernameRE.MatchString(username) {
 		return fmt.Errorf("%w: username must be 3-32 letters, digits, '_' or '-'", ErrInvalidInput)
 	}
-	if n := len(password); n < 8 || n > 72 { // bcrypt uses at most 72 bytes
-		return fmt.Errorf("%w: password must be 8-72 bytes", ErrInvalidInput)
+	if err := validPassword(password); err != nil {
+		return err
 	}
 	if n := utf8.RuneCountInString(nickname); n < 1 || n > 24 {
 		return fmt.Errorf("%w: nickname must be 1-24 characters", ErrInvalidInput)

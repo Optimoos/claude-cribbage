@@ -64,6 +64,14 @@ CREATE TABLE IF NOT EXISTS invites (
 	created   INTEGER NOT NULL,
 	expires   INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS account_tokens (
+	token   TEXT PRIMARY KEY, -- SHA-256 of the token, like sessions
+	user_id INTEGER NOT NULL REFERENCES users(id),
+	kind    INTEGER NOT NULL,
+	email   TEXT NOT NULL,
+	expires INTEGER NOT NULL,
+	UNIQUE (user_id, kind)
+);
 CREATE TABLE IF NOT EXISTS action_log (
 	id      INTEGER PRIMARY KEY,
 	game_id TEXT NOT NULL,
@@ -407,20 +415,25 @@ func (s *SQLite) CreateUser(ctx context.Context, u *User) error {
 }
 
 func (s *SQLite) scanUser(row *sql.Row) (*User, error) {
-	var u User
-	var created int64
-	err := row.Scan(&u.ID, &u.Username, &u.Nickname, &u.PasswordHash, &created)
+	u, err := scanUserRow(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
-	if err != nil {
+	return u, err
+}
+
+func scanUserRow(row scanner) (*User, error) {
+	var u User
+	var created int64
+	var must int
+	if err := row.Scan(&u.ID, &u.Username, &u.Nickname, &u.PasswordHash, &created, &u.Email, &must); err != nil {
 		return nil, err
 	}
-	u.Created = time.UnixMilli(created)
+	u.Created, u.MustChange = time.UnixMilli(created), must != 0
 	return &u, nil
 }
 
-const userCols = `id, username, nickname, password_hash, created`
+const userCols = `id, username, nickname, password_hash, created, email, must_change`
 
 func (s *SQLite) UserByUsername(ctx context.Context, username string) (*User, error) {
 	return s.scanUser(s.db.QueryRowContext(ctx, `SELECT `+userCols+` FROM users WHERE username = ?`, username))
@@ -469,29 +482,154 @@ func (s *SQLite) DeleteExpiredSessions(ctx context.Context, t time.Time) (int64,
 		if err != nil {
 			return err
 		}
-		n, err = res.RowsAffected()
+		if n, err = res.RowsAffected(); err != nil {
+			return err
+		}
+		_, err = tx.Exec(`DELETE FROM account_tokens WHERE expires < ?`, t.UnixMilli())
 		return err
 	}, nil)
 	return n, err
+}
+
+func (s *SQLite) SetPassword(ctx context.Context, userID int64, hash []byte, mustChange bool, keep string) error {
+	return s.write(ctx, func(tx *writeTx) error {
+		res, err := tx.Exec(`UPDATE users SET password_hash = ?, must_change = ? WHERE id = ?`, hash, boolInt(mustChange), userID)
+		if err != nil {
+			return err
+		}
+		if n, err := res.RowsAffected(); err != nil {
+			return err
+		} else if n == 0 {
+			return ErrNotFound
+		}
+		if _, err := tx.Exec(`DELETE FROM sessions WHERE user_id = ? AND token != ?`, userID, keepKey(keep)); err != nil {
+			return err
+		}
+		_, err = tx.Exec(`DELETE FROM account_tokens WHERE user_id = ? AND kind = ?`, userID, TokenReset)
+		return err
+	}, nil)
+}
+
+// keepKey is the stored key of a session to keep, or one that matches none.
+func keepKey(token string) string {
+	if token == "" {
+		return ""
+	}
+	return tokenKey(token)
+}
+
+func (s *SQLite) SetEmail(ctx context.Context, userID int64, email string) error {
+	return s.write(ctx, func(tx *writeTx) error {
+		res, err := tx.Exec(`UPDATE users SET email = ? WHERE id = ?`, email, userID)
+		if err != nil {
+			return err
+		}
+		if n, err := res.RowsAffected(); err != nil {
+			return err
+		} else if n == 0 {
+			return ErrNotFound
+		}
+		_, err = tx.Exec(`DELETE FROM account_tokens WHERE user_id = ? AND kind = ?`, userID, TokenVerify)
+		return err
+	}, nil)
+}
+
+func (s *SQLite) UsersByEmail(ctx context.Context, email string) ([]*User, error) {
+	if email == "" {
+		return nil, nil
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT `+userCols+` FROM users WHERE email = ? COLLATE NOCASE AND email != '' ORDER BY id`, email)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*User
+	for rows.Next() {
+		u, err := scanUserRow(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, u)
+	}
+	return out, rows.Err()
+}
+
+func (s *SQLite) CreateAccountToken(ctx context.Context, t *AccountToken) error {
+	return s.write(ctx, func(tx *writeTx) error {
+		_, err := tx.Exec(`INSERT OR REPLACE INTO account_tokens (token, user_id, kind, email, expires) VALUES (?, ?, ?, ?, ?)`,
+			tokenKey(t.Token), t.UserID, t.Kind, t.Email, t.Expires.UnixMilli())
+		return err
+	}, nil)
+}
+
+func (s *SQLite) TakeAccountToken(ctx context.Context, token string, kind int) (*AccountToken, error) {
+	var out *AccountToken
+	err := s.write(ctx, func(tx *writeTx) error {
+		t := AccountToken{Token: token, Kind: kind}
+		var expires int64
+		err := tx.QueryRow(`DELETE FROM account_tokens WHERE token = ? AND kind = ? RETURNING user_id, email, expires`,
+			tokenKey(token), kind).Scan(&t.UserID, &t.Email, &expires)
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrNotFound
+		}
+		if err != nil {
+			return err
+		}
+		t.Expires = time.UnixMilli(expires)
+		if !time.Now().Before(t.Expires) {
+			return nil // used up either way, but not usable
+		}
+		out = &t
+		return nil
+	}, nil)
+	if err == nil && out == nil {
+		err = ErrNotFound
+	}
+	return out, err
+}
+
+func (s *SQLite) PendingEmail(ctx context.Context, userID int64) (string, error) {
+	var email string
+	err := s.db.QueryRowContext(ctx, `SELECT email FROM account_tokens WHERE user_id = ? AND kind = ? AND expires > ?`,
+		userID, TokenVerify, time.Now().UnixMilli()).Scan(&email)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	return email, err
 }
 
 // migrate brings an older database up to date. PRAGMA user_version counts
 // the migrations applied:
 //
 //	1: session tokens are stored hashed (they were stored as issued).
+//	2: users have an email address and a must-change-password flag.
 func migrate(db *sql.DB) error {
 	var v int
 	if err := db.QueryRow(`PRAGMA user_version`).Scan(&v); err != nil {
 		return err
 	}
-	if v >= 1 {
-		return nil
+	steps := []func(*sql.Tx) error{hashSessionTokens, addAccountColumns}
+	for ; v < len(steps); v++ {
+		tx, err := db.Begin()
+		if err != nil {
+			return err
+		}
+		if err := steps[v](tx); err != nil {
+			tx.Rollback()
+			return fmt.Errorf("migration %d: %w", v+1, err)
+		}
+		if _, err := tx.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, v+1)); err != nil {
+			tx.Rollback()
+			return err
+		}
+		if err := tx.Commit(); err != nil {
+			return err
+		}
 	}
-	tx, err := db.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
+	return nil
+}
+
+func hashSessionTokens(tx *sql.Tx) error {
 	rows, err := tx.Query(`SELECT token FROM sessions`)
 	if err != nil {
 		return err
@@ -514,10 +652,20 @@ func migrate(db *sql.DB) error {
 			return err
 		}
 	}
-	if _, err := tx.Exec(`PRAGMA user_version = 1`); err != nil {
-		return err
+	return nil
+}
+
+func addAccountColumns(tx *sql.Tx) error {
+	for _, q := range []string{
+		`ALTER TABLE users ADD COLUMN email TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE users ADD COLUMN must_change INTEGER NOT NULL DEFAULT 0`,
+		`CREATE INDEX users_email ON users(email COLLATE NOCASE) WHERE email != ''`,
+	} {
+		if _, err := tx.Exec(q); err != nil {
+			return err
+		}
 	}
-	return tx.Commit()
+	return nil
 }
 
 func boolInt(b bool) int {
@@ -754,6 +902,71 @@ func (s *SQLite) RecentGames(ctx context.Context, userID int64, limit int) ([]Ga
 			return nil, err
 		}
 		out = append(out, g)
+	}
+	return out, rows.Err()
+}
+
+// played is the condition that a finished game of a user in seat N had an
+// opponent: the other seat was taken.
+const playedBySeat0 = `status = 3 AND seat0_user = ? AND (seat1_user != 0 OR seat1_bot != '')`
+const playedBySeat1 = `status = 3 AND seat1_user = ? AND (seat0_user != 0 OR seat0_bot != '')`
+
+func (s *SQLite) History(ctx context.Context, userID int64, before Cursor, limit int) ([]Game, error) {
+	// Each half uses its seat's (seatN_user, updated) index.
+	after := ""
+	args := []any{userID}
+	if !before.Updated.IsZero() {
+		after = ` AND (updated, id) < (?, ?)`
+		args = append(args, before.Updated.UnixMilli(), before.ID)
+	}
+	args = append(args, append([]any{userID}, args[1:]...)...)
+	args = append(args, limit)
+	rows, err := s.db.QueryContext(ctx, `SELECT * FROM (
+		SELECT `+gameCols+` FROM games WHERE `+playedBySeat0+after+`
+		UNION ALL SELECT `+gameCols+` FROM games WHERE `+playedBySeat1+after+`
+		) ORDER BY updated DESC, id DESC LIMIT ?`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Game
+	for rows.Next() {
+		g, _, err := scanGame(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, g)
+	}
+	return out, rows.Err()
+}
+
+func (s *SQLite) Records(ctx context.Context, userID int64) ([]Record, error) {
+	// In SQLite, the bare column nick comes from the row with max(updated).
+	rows, err := s.db.QueryContext(ctx, `WITH mine AS (
+		SELECT seat1_user AS uid, seat1_bot AS bot, seat1_nick AS nick, updated,
+			CASE winner WHEN 0 THEN 1 WHEN 1 THEN -1 ELSE 0 END AS res
+		FROM games WHERE `+playedBySeat0+`
+		UNION ALL
+		SELECT seat0_user, seat0_bot, seat0_nick, updated,
+			CASE winner WHEN 1 THEN 1 WHEN 0 THEN -1 ELSE 0 END
+		FROM games WHERE `+playedBySeat1+`
+	)
+	SELECT uid, bot, nick, max(updated), count(*), sum(res = 1), sum(res = -1), sum(res = 0)
+	FROM mine GROUP BY uid, bot ORDER BY count(*) DESC, max(updated) DESC`, userID, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Record
+	for rows.Next() {
+		var r Record
+		var last int64
+		if err := rows.Scan(&r.Opponent.UserID, &r.Opponent.Bot, &r.Opponent.Nickname, &last,
+			&r.Games, &r.Wins, &r.Losses, &r.Unfinished); err != nil {
+			return nil, err
+		}
+		r.Last = time.UnixMilli(last)
+		out = append(out, r)
 	}
 	return out, rows.Err()
 }

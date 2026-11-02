@@ -22,6 +22,26 @@ type User struct {
 	Nickname     string
 	PasswordHash []byte
 	Created      time.Time
+	Email        string // verified address for password reset links; "" if none
+	// MustChange is set when the admin resets the password: the user must
+	// choose a new one before doing anything else.
+	MustChange bool
+}
+
+// Kinds of AccountToken.
+const (
+	TokenReset  = 1 // a password reset link
+	TokenVerify = 2 // a link confirming an email address
+)
+
+// AccountToken is a single-use secret sent in a link by email. Only a hash
+// of the token is stored.
+type AccountToken struct {
+	Token   string
+	UserID  int64
+	Kind    int
+	Email   string // the address being verified (TokenVerify)
+	Expires time.Time
 }
 
 // Store persists users and sessions. Implementations must be safe for
@@ -38,9 +58,29 @@ type Store interface {
 	// DeleteSession ends a session; deleting an unknown token is not an
 	// error.
 	DeleteSession(ctx context.Context, token string) error
-	// DeleteExpiredSessions removes sessions that expired before t and
-	// reports how many.
+	// DeleteExpiredSessions removes sessions and account tokens that
+	// expired before t and reports how many sessions.
 	DeleteExpiredSessions(ctx context.Context, t time.Time) (int64, error)
+
+	// SetPassword replaces a user's password hash and MustChange flag, and
+	// deletes their password reset tokens and every session but keep (""
+	// for none), in one transaction.
+	SetPassword(ctx context.Context, userID int64, hash []byte, mustChange bool, keep string) error
+	// SetEmail sets a user's verified address ("" to remove it), and
+	// deletes their email verification tokens.
+	SetEmail(ctx context.Context, userID int64, email string) error
+	// UsersByEmail returns the users with this verified address
+	// (case-insensitively).
+	UsersByEmail(ctx context.Context, email string) ([]*User, error)
+	// CreateAccountToken stores a token. A user has at most one token of a
+	// kind: an earlier one is replaced.
+	CreateAccountToken(ctx context.Context, t *AccountToken) error
+	// TakeAccountToken deletes an unexpired token of the given kind and
+	// returns it, or ErrNotFound.
+	TakeAccountToken(ctx context.Context, token string, kind int) (*AccountToken, error)
+	// PendingEmail is the address of a user's unexpired verification
+	// token, or "".
+	PendingEmail(ctx context.Context, userID int64) (string, error)
 }
 
 // Game status values; they match the wire protocol's GameStatus.
@@ -96,6 +136,12 @@ type GameStore interface {
 	// RecentGames returns a user's most recently finished games, newest
 	// first.
 	RecentGames(ctx context.Context, userID int64, limit int) ([]Game, error)
+	// History returns a page of a user's finished games that had an
+	// opponent, newest first: those before cursor (zero for the first
+	// page), ordered by Updated then ID.
+	History(ctx context.Context, userID int64, before Cursor, limit int) ([]Game, error)
+	// Records counts a user's finished games against each opponent.
+	Records(ctx context.Context, userID int64) ([]Record, error)
 	// LoadGame returns an unfinished game with its actions, to wake a game
 	// that was put to sleep.
 	LoadGame(ctx context.Context, id string) (*GameWithActions, error)
@@ -104,6 +150,25 @@ type GameStore interface {
 	DeleteInvite(ctx context.Context, id string) error
 	// LoadInvites returns every stored invite, expired or not.
 	LoadInvites(ctx context.Context) ([]Invite, error)
+}
+
+// Cursor is a position in a user's history: the game with this Updated
+// time and ID.
+type Cursor struct {
+	Updated time.Time
+	ID      string
+}
+
+// Record counts a user's finished games against one opponent: a person
+// (Opponent.UserID) or a bot (Opponent.Bot). Opponent.Nickname is from the
+// latest game.
+type Record struct {
+	Opponent   Seat
+	Games      int
+	Wins       int
+	Losses     int
+	Unfinished int // no winner: expired or cancelled
+	Last       time.Time
 }
 
 // Invite is a pending invitation to a game, from one user to another or,

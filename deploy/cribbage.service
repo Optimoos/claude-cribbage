@@ -21,7 +21,19 @@ ExecStart=/opt/cribbage/cribserver \
 	-backup-dir /var/lib/cribbage/backups \
 	-backup-every 24h -backup-keep 7 \
 	-expert /opt/cribbage/expert.bin \
+	-admin-socket /run/cribbage/admin.sock \
 	-stats 5m
+# Password reset emails (see README.md): add these flags to ExecStart
+# above, with your values, uncomment LoadCredential, and create
+# /etc/cribbage/smtp-password (mode 0600, owned by root).
+#	-public-url https://cribbage.example.com \
+#	-smtp smtp.example.com:465 -smtp-user cribbage@example.com \
+#	-smtp-password-file %d/smtp-password \
+#	-mail-from cribbage@example.com
+#LoadCredential=smtp-password:/etc/cribbage/smtp-password
+# /run/cribbage holds the admin socket (cribserver admin ...).
+RuntimeDirectory=cribbage
+RuntimeDirectoryMode=0700
 Restart=always
 RestartSec=2
 TimeoutStopSec=15

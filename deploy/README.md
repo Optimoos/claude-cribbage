@@ -82,6 +82,51 @@ offers on private, loopback or link-local networks, so nobody can make it
 send packets into its own network. Leave it off to play on one machine or
 a LAN.
 
+## Password resets
+
+Players can change their password from **Account** in the settings menu.
+Changing it, or resetting it, logs them out everywhere else.
+
+**By email.** A player can add an email address under **Account**. The
+server mails a link to confirm it, which works for 48 hours. After that,
+"Forgot your password?" on the login screen mails a link that works for an
+hour, opens the web client, and lets them choose a new password. Each
+account gets at most 3 emails at once, then 1 every 20 minutes, and each
+address may ask for 5 resets, then 1 every 10 minutes. The answer is the
+same whether or not the account exists. Without `-smtp` there is no email:
+the Account screen says so, and only the admin can reset passwords.
+
+To turn email on you need an SMTP account that may send from your domain,
+for example Postmark, Resend, Amazon SES, or your mailbox provider's SMTP
+login. Set up SPF and DKIM for the sender domain as the provider describes,
+or the mail lands in spam. Then:
+
+```sh
+install -d -m 0700 /etc/cribbage
+install -m 0600 /dev/stdin /etc/cribbage/smtp-password <<< 'the-smtp-password'
+```
+
+In `cribbage.service`, add the commented `-public-url`, `-smtp...` and
+`-mail-from` flags to `ExecStart` with your values, uncomment
+`LoadCredential=`, then run
+`systemctl daemon-reload && systemctl restart cribbage`. The log says
+`email enabled`. Port 465 uses TLS from the start; other ports must offer
+STARTTLS, and the server refuses to send without it. `-public-url` must be
+the HTTPS address players use, since the links point there.
+
+**By the admin.** On the server:
+
+```sh
+sudo cribserver admin -socket /run/cribbage/admin.sock reset-password <username>
+```
+
+This prints a temporary password such as `k7mq-x2r9-pd4h` and logs the
+player out everywhere. Pass it on however you like. When they log in with it,
+they must choose a new password before they can do anything else. The
+command talks to the running server through `/run/cribbage/admin.sock`,
+which only root and the `cribbage` user can open (`/opt/cribbage/cribserver`
+if it is not on your PATH).
+
 ## Updating
 
 Games survive restarts: every move is committed before anyone sees it, and

@@ -4,11 +4,14 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
 	_ "net/http/pprof"
+	"net/url"
 	"os"
 	"os/signal"
 	"runtime"
@@ -22,6 +25,7 @@ import (
 	"cribbage/internal/auth"
 	"cribbage/internal/bots"
 	"cribbage/internal/expert"
+	"cribbage/internal/mail"
 	"cribbage/internal/server"
 	"cribbage/internal/store"
 	"cribbage/internal/transport/rtc"
@@ -29,6 +33,10 @@ import (
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "admin" {
+		adminMain(os.Args[2:])
+		return
+	}
 	tcpAddr := flag.String("tcp", "127.0.0.1:7777", "TCP listen address for headless clients (unencrypted and not rate limited from localhost; keep it private)")
 	httpAddr := flag.String("http", "127.0.0.1:8080", "HTTP address for the web client and WebRTC signaling (empty disables; :8080 for other machines on the network)")
 	webDir := flag.String("web-dir", "", "serve the web client from this directory instead of the embedded copy")
@@ -45,6 +53,14 @@ func main() {
 	backupEvery := flag.Duration("backup-every", 24*time.Hour, "how often to back up the database (also at startup, unless the last backup is more recent)")
 	backupKeep := flag.Int("backup-keep", 7, "how many backups to keep")
 	expertPath := flag.String("expert", "", "expert bundle to offer as the \"expert\" bots (e.g. models-expert/expert.bin)")
+	adminSocket := flag.String("admin-socket", "", "listen for admin commands (cribserver admin ...) on this Unix socket, e.g. "+defaultAdminSocket+" (empty disables)")
+	publicURL := flag.String("public-url", "", "the web client's public address, for links in emails (e.g. https://cribbage.example.com)")
+	smtpAddr := flag.String("smtp", "", "mail server host:port for password reset emails (465 for TLS, else STARTTLS); empty disables email")
+	smtpUser := flag.String("smtp-user", "", "mail server login")
+	smtpPassFile := flag.String("smtp-password-file", "", "file holding the mail server password (or set CRIBBAGE_SMTP_PASSWORD)")
+	mailFrom := flag.String("mail-from", "", "sender address for emails, e.g. cribbage@example.com")
+	mailFromName := flag.String("mail-from-name", "Cribbage", "sender name for emails")
+	mailLog := flag.Bool("mail-log", false, "log emails, links included, instead of sending them (testing only)")
 	flag.Parse()
 
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
@@ -95,8 +111,38 @@ func main() {
 		users, games = sq, sq
 	}
 
+	authSvc := &auth.Service{Store: users, BcryptCost: *bcryptCost, BaseURL: *publicURL}
+	switch {
+	case *smtpAddr != "" && *mailLog:
+		fail("email", errors.New("use -smtp or -mail-log, not both"))
+	case *smtpAddr != "":
+		pass := os.Getenv("CRIBBAGE_SMTP_PASSWORD")
+		if *smtpPassFile != "" {
+			b, err := os.ReadFile(*smtpPassFile)
+			if err != nil {
+				fail("smtp password", err)
+			}
+			pass = strings.TrimSpace(string(b))
+		}
+		m := &mail.SMTP{Addr: *smtpAddr, Username: *smtpUser, Password: pass, From: *mailFrom, FromName: *mailFromName}
+		if err := m.Check(); err != nil {
+			fail("email", err)
+		}
+		if err := checkPublicURL(*publicURL); err != nil {
+			fail("email", err)
+		}
+		authSvc.Mailer = m
+		log.Info("email enabled", "smtp", *smtpAddr, "from", *mailFrom)
+	case *mailLog:
+		if authSvc.BaseURL == "" {
+			authSvc.BaseURL = "http://" + *httpAddr + "/"
+		}
+		authSvc.Mailer = mail.Log{Logger: log}
+		log.Warn("emails are logged, not sent (-mail-log): their links can reset passwords")
+	}
+
 	srv := server.New(server.Config{
-		Auth:   &auth.Service{Store: users, BcryptCost: *bcryptCost},
+		Auth:   authSvc,
 		Games:  games,
 		Logger: log,
 	})
@@ -164,6 +210,14 @@ func main() {
 		}()
 	}
 
+	var adminLn net.Listener
+	if *adminSocket != "" {
+		if adminLn, err = serveAdmin(log, *adminSocket, srv); err != nil {
+			fail("admin socket", err)
+		}
+		log.Info("admin socket", "path", *adminSocket)
+	}
+
 	if *pprofAddr != "" {
 		go func() { log.Error("pprof", "err", http.ListenAndServe(*pprofAddr, nil)) }()
 	}
@@ -187,6 +241,9 @@ func main() {
 	<-sig
 	log.Info("shutting down")
 	ln.Close()
+	if adminLn != nil {
+		adminLn.Close()
+	}
 	if httpSrv != nil {
 		httpSrv.Close()
 	}
@@ -272,6 +329,22 @@ func splitList(s string) []string {
 		}
 	}
 	return out
+}
+
+// checkPublicURL requires an absolute http(s) URL, https unless the host
+// is local.
+func checkPublicURL(s string) error {
+	if s == "" {
+		return errors.New("-public-url is needed for the links in emails")
+	}
+	u, err := url.Parse(s)
+	if err != nil || u.Host == "" || (u.Scheme != "https" && u.Scheme != "http") {
+		return fmt.Errorf("-public-url %q must be an http(s) URL", s)
+	}
+	if h := u.Hostname(); u.Scheme == "http" && h != "localhost" && !net.ParseIP(h).IsLoopback() {
+		return fmt.Errorf("-public-url %q must use https", s)
+	}
+	return nil
 }
 
 // displayAddr turns ":8080" style listen addresses into a usable URL host.

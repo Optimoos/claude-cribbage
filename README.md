@@ -205,6 +205,16 @@ systemd behind Caddy for HTTPS, with UDP 7778 open for WebRTC, daily
 database backups (`-backup-dir`, `-backup-every`, `-backup-keep`), rate
 limits and `-rtc-public-only`. The server stops cleanly on SIGINT or SIGTERM.
 
+**Accounts.** Players can change their password, and can add a confirmed
+email address for "Forgot your password?" links (`-smtp`, `-mail-from`,
+`-public-url`). For local testing, `-mail-log` writes emails, links
+included, to the log instead of sending them. The admin resets anyone's
+password with `cribserver admin reset-password <user>`, which reaches the
+running server through `-admin-socket`.
+
+**History.** "History and records" in the lobby lists every finished game,
+50 at a time, with a record against each opponent and bot level.
+
 ## Persistence
 
 The server keeps users, sessions and games in SQLite (`-db`, default

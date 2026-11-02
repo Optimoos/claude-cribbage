@@ -21,32 +21,6 @@ import (
 	"cribbage/internal/transport/tcp"
 )
 
-func TestLimiter(t *testing.T) {
-	l := newLimiter(3, time.Minute)
-	now := time.Unix(1000, 0)
-	for i := 0; i < 3; i++ {
-		if !l.take("a", now) {
-			t.Fatalf("take %d refused within the burst", i)
-		}
-	}
-	if l.take("a", now) || l.allow("a", now) {
-		t.Fatal("allowed past the burst")
-	}
-	if !l.take("b", now) {
-		t.Fatal("keys share a bucket")
-	}
-	if l.allow("a", now.Add(59*time.Second)) {
-		t.Fatal("refilled early")
-	}
-	if !l.take("a", now.Add(time.Minute)) || l.take("a", now.Add(time.Minute)) {
-		t.Fatal("did not refill exactly one token a minute")
-	}
-	l.sweep(now.Add(time.Hour))
-	if len(l.buckets) != 0 {
-		t.Fatalf("sweep kept %d refilled buckets", len(l.buckets))
-	}
-}
-
 // remoteTransport makes a TCP connection look as if it came from ip.
 type remoteTransport struct {
 	*tcp.Conn

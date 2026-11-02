@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -93,13 +94,21 @@ func TestSQLiteSessionTokensHashed(t *testing.T) {
 	if err := s.db.QueryRow(`SELECT token FROM sessions`).Scan(&stored); err != nil || stored == "new-token" || len(stored) != 64 {
 		t.Fatalf("stored token %q, %v", stored, err)
 	}
-	// An old database: a token stored as issued, schema version 0.
+	// An old database: a token stored as issued, and users without the
+	// account columns: schema version 0.
 	if _, err := s.db.Exec(`INSERT INTO sessions (token, user_id, expires) VALUES ('old-token', ?, ?)`,
 		u.ID, time.Now().Add(time.Hour).UnixMilli()); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.db.Exec(`PRAGMA user_version = 0`); err != nil {
-		t.Fatal(err)
+	for _, q := range []string{
+		`DROP INDEX users_email`,
+		`ALTER TABLE users DROP COLUMN email`,
+		`ALTER TABLE users DROP COLUMN must_change`,
+		`PRAGMA user_version = 0`,
+	} {
+		if _, err := s.db.Exec(q); err != nil {
+			t.Fatal(q, err)
+		}
 	}
 	s.Close()
 
@@ -114,6 +123,12 @@ func TestSQLiteSessionTokensHashed(t *testing.T) {
 	var n int
 	if err := s.db.QueryRow(`SELECT COUNT(*) FROM sessions WHERE token = 'old-token'`).Scan(&n); err != nil || n != 0 {
 		t.Fatalf("old token still stored as issued: %d, %v", n, err)
+	}
+	if got, err := s.UserByID(ctx, u.ID); err != nil || got.Email != "" || got.MustChange {
+		t.Fatalf("user after migration: %+v, %v", got, err)
+	}
+	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&n); err != nil || n != 2 {
+		t.Fatalf("schema version %d, %v", n, err)
 	}
 }
 
@@ -443,4 +458,167 @@ func TestSQLiteBatchFailure(t *testing.T) {
 	if txs := s.txs.Load() - before; txs > n/5 {
 		t.Fatalf("%d transactions for %d writes", txs, n)
 	}
+}
+
+func TestAccountTokensAndPasswords(t *testing.T) {
+	forEachStore(t, func(t *testing.T, s both) {
+		ctx := context.Background()
+		a := &User{Username: "alice", Nickname: "A", PasswordHash: []byte("h1"), Created: time.Now()}
+		b := &User{Username: "bob", Nickname: "B", PasswordHash: []byte("h2"), Created: time.Now()}
+		for _, u := range []*User{a, b} {
+			if err := s.CreateUser(ctx, u); err != nil {
+				t.Fatal(err)
+			}
+		}
+		for _, tok := range []string{"s1", "s2"} {
+			if err := s.CreateSession(ctx, tok, a.ID, time.Now().Add(time.Hour)); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := s.CreateSession(ctx, "sb", b.ID, time.Now().Add(time.Hour)); err != nil {
+			t.Fatal(err)
+		}
+
+		// Verification: one pending token per user, single use.
+		exp := time.Now().Add(time.Hour)
+		for _, tok := range []*AccountToken{
+			{Token: "v1", UserID: a.ID, Kind: TokenVerify, Email: "old@example.com", Expires: exp},
+			{Token: "v2", UserID: a.ID, Kind: TokenVerify, Email: "A@Example.com", Expires: exp},
+			{Token: "r1", UserID: a.ID, Kind: TokenReset, Expires: exp},
+			{Token: "late", UserID: b.ID, Kind: TokenReset, Expires: time.Now().Add(-time.Second)},
+		} {
+			if err := s.CreateAccountToken(ctx, tok); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if p, err := s.PendingEmail(ctx, a.ID); err != nil || p != "A@Example.com" {
+			t.Fatalf("pending %q, %v", p, err)
+		}
+		if _, err := s.TakeAccountToken(ctx, "v1", TokenVerify); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("replaced token: %v", err)
+		}
+		if _, err := s.TakeAccountToken(ctx, "v2", TokenReset); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("token of the wrong kind: %v", err)
+		}
+		if _, err := s.TakeAccountToken(ctx, "late", TokenReset); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("expired token: %v", err)
+		}
+		tok, err := s.TakeAccountToken(ctx, "v2", TokenVerify)
+		if err != nil || tok.UserID != a.ID || tok.Email != "A@Example.com" {
+			t.Fatalf("take: %+v, %v", tok, err)
+		}
+		if _, err := s.TakeAccountToken(ctx, "v2", TokenVerify); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("token used twice: %v", err)
+		}
+		if err := s.SetEmail(ctx, a.ID, tok.Email); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.SetEmail(ctx, b.ID, "a@example.com"); err != nil {
+			t.Fatal(err)
+		}
+		us, err := s.UsersByEmail(ctx, "a@EXAMPLE.com")
+		if err != nil || len(us) != 2 || us[0].ID != a.ID || us[1].ID != b.ID {
+			t.Fatalf("users by email: %v, %v", us, err)
+		}
+		if us, _ := s.UsersByEmail(ctx, ""); len(us) != 0 {
+			t.Fatalf("users with no email: %v", us)
+		}
+
+		// A new password keeps one session, ends the others and the reset
+		// link, and leaves other users alone.
+		if err := s.SetPassword(ctx, a.ID, []byte("h3"), true, "s2"); err != nil {
+			t.Fatal(err)
+		}
+		u, _ := s.UserByID(ctx, a.ID)
+		if string(u.PasswordHash) != "h3" || !u.MustChange || u.Email != "A@Example.com" {
+			t.Fatalf("user after SetPassword: %+v", u)
+		}
+		if _, err := s.SessionUser(ctx, "s1"); !errors.Is(err, ErrNotFound) {
+			t.Fatal("other session survived")
+		}
+		if _, err := s.SessionUser(ctx, "s2"); err != nil {
+			t.Fatal("kept session ended")
+		}
+		if _, err := s.SessionUser(ctx, "sb"); err != nil {
+			t.Fatal("another user's session ended")
+		}
+		if _, err := s.TakeAccountToken(ctx, "r1", TokenReset); !errors.Is(err, ErrNotFound) {
+			t.Fatal("reset link survived a new password")
+		}
+		if err := s.SetPassword(ctx, a.ID, []byte("h4"), false, ""); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.SessionUser(ctx, "s2"); !errors.Is(err, ErrNotFound) {
+			t.Fatal("session survived SetPassword keeping none")
+		}
+		if err := s.SetPassword(ctx, 999, []byte("x"), false, ""); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("unknown user: %v", err)
+		}
+	})
+}
+
+func TestHistoryAndRecords(t *testing.T) {
+	forEachStore(t, func(t *testing.T, s both) {
+		ctx := context.Background()
+		base := time.UnixMilli(1_700_000_000_000)
+		me := Seat{UserID: 1, Nickname: "Me"}
+		bob := Seat{UserID: 2, Nickname: "Bob"}
+		bot := Seat{Nickname: "expert bot", Bot: "expert"}
+		finish := func(id string, seats [2]Seat, winner int, at time.Duration) {
+			t.Helper()
+			g := &Game{ID: id, Status: StatusActive, Seats: seats, Winner: -1, Created: base, Updated: base}
+			if err := s.CreateGame(ctx, g); err != nil {
+				t.Fatal(err)
+			}
+			g.Status, g.Winner, g.Updated = StatusFinished, winner, base.Add(at)
+			if err := s.CommitGame(ctx, id, g, nil); err != nil {
+				t.Fatal(err)
+			}
+		}
+		finish("g1", [2]Seat{me, bot}, 0, 1*time.Minute)
+		finish("g2", [2]Seat{bob, me}, 0, 2*time.Minute)
+		finish("g3", [2]Seat{me, bot}, 1, 3*time.Minute)
+		finish("g4", [2]Seat{me, {}}, -1, 4*time.Minute) // open game nobody joined
+		bob.Nickname = "Robert"
+		finish("g5", [2]Seat{me, bob}, -1, 5*time.Minute) // expired
+		finish("g6", [2]Seat{bob, me}, 1, 5*time.Minute)  // same time as g5
+		finish("g7", [2]Seat{bob, bot}, 0, 6*time.Minute) // not mine
+
+		var ids []string
+		var cur Cursor
+		for {
+			page, err := s.History(ctx, 1, cur, 2)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, g := range page {
+				ids = append(ids, g.ID)
+			}
+			if len(page) < 2 {
+				break
+			}
+			last := page[len(page)-1]
+			cur = Cursor{Updated: last.Updated, ID: last.ID}
+		}
+		if got := strings.Join(ids, ","); got != "g6,g5,g3,g2,g1" {
+			t.Fatalf("history %s", got)
+		}
+
+		recs, err := s.Records(ctx, 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(recs) != 2 {
+			t.Fatalf("records %+v", recs)
+		}
+		r := recs[0] // Bob: 3 games, the latest as Robert
+		if r.Opponent.UserID != 2 || r.Opponent.Nickname != "Robert" || r.Games != 3 || r.Wins != 1 || r.Losses != 1 || r.Unfinished != 1 ||
+			!r.Last.Equal(base.Add(5*time.Minute)) {
+			t.Fatalf("record vs Bob %+v", r)
+		}
+		r = recs[1]
+		if r.Opponent.Bot != "expert" || r.Opponent.UserID != 0 || r.Games != 2 || r.Wins != 1 || r.Losses != 1 || r.Unfinished != 0 {
+			t.Fatalf("record vs bot %+v", r)
+		}
+	})
 }

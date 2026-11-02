@@ -198,16 +198,45 @@ public partial class Main : Control
 
     void OnMessage(ServerMessage m)
     {
+        if (TakeReply(m))
+        {
+            return;
+        }
         switch (m.BodyCase)
         {
             case ServerMessage.BodyOneofCase.AuthOk:
                 me = m.AuthOk;
+                account = me.Account ?? new Account();
                 settings.Token = me.Token;
                 settings.LastUser = me.Username;
                 loginError.Text = "";
+                forgotWindow?.QueueFree();
+                forgotWindow = null;
                 ShowLogin(false);
-                Send(new ClientMessage { ListGames = new ListGames() });
+                if (account.MustChangePassword)
+                {
+                    ShowAccount();
+                }
+                else
+                {
+                    Send(new ClientMessage { ListGames = new ListGames() });
+                }
                 RenderAll();
+                if (opts.Show == "history")
+                {
+                    ShowHistory();
+                }
+                else if (opts.Show == "account" && accountWindow == null)
+                {
+                    ShowAccount();
+                }
+                break;
+            case ServerMessage.BodyOneofCase.Account:
+                account = m.Account;
+                RefreshAccount();
+                break;
+            case ServerMessage.BodyOneofCase.History:
+                OnHistory(m.History);
                 break;
             case ServerMessage.BodyOneofCase.Error:
                 OnError(m.Error);
@@ -257,6 +286,15 @@ public partial class Main : Control
             return;
         }
         awaiting = false;
+        if (e.Code == ErrorCode.PasswordChangeRequired)
+        {
+            account.MustChangePassword = true;
+            if (accountWindow == null)
+            {
+                ShowAccount();
+            }
+            return;
+        }
         Notice(e.Message);
         if (selected != null && games.TryGetValue(selected, out var gs) && gs.Update != null && !gs.V.Busy)
         {
@@ -449,6 +487,10 @@ public partial class Main : Control
         loginError = Style.Label("", 14, Style.P.Theirs);
         loginError.AutowrapMode = TextServer.AutowrapMode.WordSmart;
         box.AddChild(loginError);
+        var forgot = new LinkButton { Text = "Forgot your password?", Underline = LinkButton.UnderlineMode.OnHover };
+        forgot.AddThemeColorOverride("font_color", Style.P.Accent);
+        forgot.Pressed += ShowForgot;
+        box.AddChild(forgot);
         return shade;
     }
 
@@ -487,6 +529,10 @@ public partial class Main : Control
     {
         loginShown = show && !opts.Autoplay;
         loginView.Visible = loginShown;
+        if (loginShown && opts.Show == "forgot" && forgotWindow == null)
+        {
+            ShowForgot();
+        }
         if (loginShown)
         {
             (userEdit.Text == "" ? userEdit : passEdit).GrabFocus();
@@ -566,6 +612,7 @@ public partial class Main : Control
         box.AddChild(Heading("Recently finished"));
         recentList = new VBoxContainer();
         box.AddChild(recentList);
+        box.AddChild(Style.Button("History and records", ShowHistory));
         return panel;
     }
 
@@ -730,6 +777,10 @@ public partial class Main : Control
             UpdateMuteButton();
         };
         box.AddChild(mute);
+        if (me != null)
+        {
+            box.AddChild(Style.Button("Account…", () => { pop.Hide(); ShowAccount(); }));
+        }
         ui.AddChild(pop);
         pop.PopupHide += pop.QueueFree;
         pop.Popup(new Rect2I((Vector2I)(GetGlobalMousePosition() + new Vector2(-40, 24)), Vector2I.Zero));
@@ -739,6 +790,7 @@ public partial class Main : Control
     {
         settings.Token = "";
         me = null;
+        CloseAccountWindows();
         games.Clear();
         invites.Clear();
         selected = null;

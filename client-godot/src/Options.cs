@@ -18,6 +18,7 @@ namespace Cribbage;
 //	--pace S                      wait S seconds between moves
 //	--animate                     animate while autoplaying (rapid otherwise)
 //	--screenshot FILE --after S   save the window after S seconds and quit
+//	--show history|account|forgot open that window once possible, for screenshots
 public sealed class Options
 {
     public string? Server, Theme;
@@ -28,7 +29,7 @@ public sealed class Options
     public int QuitAfter;
     public double Pace = 0.02;
     public bool Animate;
-    public string Screenshot = "";
+    public string Screenshot = "", Show = "";
     public double After = 3;
 
     public static Options Parse(IEnumerable<string> args)
@@ -55,6 +56,7 @@ public sealed class Options
                 case "--animate": o.Animate = true; break;
                 case "--pace": o.Pace = double.Parse(Next(), CultureInfo.InvariantCulture); break;
                 case "--screenshot": o.Screenshot = Next(); break;
+                case "--show": o.Show = Next(); break;
                 case "--after": o.After = double.Parse(Next(), CultureInfo.InvariantCulture); break;
                 default: GD.PushWarning($"unknown option {a[i]}"); break;
             }

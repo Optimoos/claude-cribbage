@@ -1,13 +1,14 @@
-package server
+// Package ratelimit keeps token buckets by key.
+package ratelimit
 
 import (
 	"sync"
 	"time"
 )
 
-// limiter is a set of token buckets by key: each key may spend up to burst
+// Limiter is a set of token buckets by key: each key may spend up to burst
 // tokens at once, refilled at one token per every.
-type limiter struct {
+type Limiter struct {
 	burst float64
 	every time.Duration
 
@@ -21,8 +22,10 @@ type bucket struct {
 	at     time.Time
 }
 
-func newLimiter(burst int, every time.Duration) *limiter {
-	return &limiter{burst: float64(burst), every: every, buckets: map[string]*bucket{}}
+// New makes a Limiter: each key may spend burst tokens at once, then one
+// more every interval.
+func New(burst int, every time.Duration) *Limiter {
+	return &Limiter{burst: float64(burst), every: every, buckets: map[string]*bucket{}}
 }
 
 // maxBuckets is how many keys a limiter tracks before it forgets the full
@@ -30,7 +33,7 @@ func newLimiter(burst int, every time.Duration) *limiter {
 const maxBuckets = 100_000
 
 // fill returns key's bucket brought up to date. Callers hold mu.
-func (l *limiter) fill(key string, now time.Time) *bucket {
+func (l *Limiter) fill(key string, now time.Time) *bucket {
 	b := l.buckets[key]
 	if b == nil {
 		if len(l.buckets) >= maxBuckets && now.Sub(l.swept) > time.Second {
@@ -46,7 +49,7 @@ func (l *limiter) fill(key string, now time.Time) *bucket {
 }
 
 // sweep drops buckets that have refilled, which behave like new ones.
-func (l *limiter) sweep(now time.Time) {
+func (l *Limiter) sweep(now time.Time) {
 	l.swept = now
 	full := time.Duration(l.burst * float64(l.every))
 	for k, b := range l.buckets {
@@ -56,15 +59,15 @@ func (l *limiter) sweep(now time.Time) {
 	}
 }
 
-// allow reports whether key has a token left, without spending it.
-func (l *limiter) allow(key string, now time.Time) bool {
+// Allow reports whether key has a token left, without spending it.
+func (l *Limiter) Allow(key string, now time.Time) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return l.fill(key, now).tokens >= 1
 }
 
-// take spends one of key's tokens and reports whether there was one.
-func (l *limiter) take(key string, now time.Time) bool {
+// Take spends one of key's tokens and reports whether there was one.
+func (l *Limiter) Take(key string, now time.Time) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	b := l.fill(key, now)

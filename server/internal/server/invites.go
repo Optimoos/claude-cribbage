@@ -116,7 +116,7 @@ func (s *Server) loadInvites(ctx context.Context) error {
 }
 
 func (s *Server) sendInvite(c *Conn, id uint32, username string) {
-	if !s.invitesSent.take(fmt.Sprint(c.user.ID), time.Now()) {
+	if !s.invitesSent.Take(fmt.Sprint(c.user.ID), time.Now()) {
 		c.sendError(id, pb.ErrorCode_ERROR_CODE_RATE_LIMITED, "", "too many invites; try again later")
 		return
 	}
@@ -228,7 +228,7 @@ func (s *Server) respondInvite(c *Conn, id uint32, inviteID string, accept bool)
 }
 
 func (s *Server) redeemCode(c *Conn, id uint32, code string) {
-	if !s.codeTries.take(fmt.Sprint(c.user.ID), time.Now()) {
+	if !s.codeTries.Take(fmt.Sprint(c.user.ID), time.Now()) {
 		c.sendError(id, pb.ErrorCode_ERROR_CODE_RATE_LIMITED, "", "too many tries; try again later")
 		return
 	}
