@@ -47,11 +47,17 @@ func validPassword(p string) error {
 	return nil
 }
 
-// mailAllowed spends one of a user's emails: 3, then one every 20 minutes,
-// so nobody can use the server to flood someone's inbox.
-func (s *Service) mailAllowed(userID int64) bool {
-	s.mailOnce.Do(func() { s.mailLimit = ratelimit.New(3, 20*time.Minute) })
-	return s.mailLimit.Take(strconv.FormatInt(userID, 10), time.Now())
+// mailAllowed spends one of a user's emails (3, then one every 20 minutes)
+// and one of the address's (3, then one an hour), so nobody can use the
+// server to flood an inbox, from one account or from many.
+func (s *Service) mailAllowed(userID int64, to string) bool {
+	s.mailOnce.Do(func() {
+		s.mailLimit = ratelimit.New(3, 20*time.Minute)
+		s.rcptLimit = ratelimit.New(3, time.Hour)
+	})
+	now := time.Now()
+	return s.mailLimit.Take(strconv.FormatInt(userID, 10), now) &&
+		s.rcptLimit.Take(strings.ToLower(to), now)
 }
 
 // Account describes a user's account settings.
@@ -119,7 +125,7 @@ func (s *Service) SetEmail(ctx context.Context, userID int64, password, email st
 		// change.
 		return s.Store.SetEmail(ctx, userID, email)
 	}
-	if !s.mailAllowed(userID) {
+	if !s.mailAllowed(userID, email) {
 		return ErrMailLimit
 	}
 	token := RandomID(tokenBytes)
@@ -132,14 +138,16 @@ func (s *Service) SetEmail(ctx context.Context, userID int64, password, email st
 	}); err != nil {
 		return err
 	}
-	body := fmt.Sprintf(`Hello %s,
+	// Nothing the account's owner wrote goes to an address not yet shown
+	// to be theirs, except the username, which is short and plain.
+	body := fmt.Sprintf(`Hello,
 
-To use this address for password resets on your cribbage account "%s", open this link within %s:
+To use this address for password resets on the cribbage account "%s", open this link within %s:
 
 %s
 
 If you did not ask for this, ignore this email and nothing will change.
-`, u.Nickname, u.Username, hours(ttl), s.link("verify", token))
+`, u.Username, hours(ttl), s.link("verify", token))
 	if err := s.Mailer.Send(ctx, email, "Confirm your email for Cribbage", body); err != nil {
 		return fmt.Errorf("send verification: %w", err)
 	}
@@ -191,7 +199,7 @@ func (s *Service) RequestReset(ctx context.Context, name string) error {
 	}
 	var errs []error
 	for _, u := range users {
-		if u.Email == "" || !s.mailAllowed(u.ID) {
+		if u.Email == "" || !s.mailAllowed(u.ID, u.Email) {
 			continue
 		}
 		errs = append(errs, s.mailReset(ctx, u))
@@ -256,10 +264,15 @@ func (s *Service) ResetPassword(ctx context.Context, token, newPassword string) 
 }
 
 // AdminResetPassword gives a user a random temporary password, which they
-// must change when they next log in, and ends all their sessions.
+// must change when they next log in, and ends all their sessions. It also
+// removes their email address, which whoever took the account may have
+// set; the returned user still has it, for the admin to see.
 func (s *Service) AdminResetPassword(ctx context.Context, username string) (*store.User, string, error) {
 	u, err := s.Store.UserByUsername(ctx, username)
 	if err != nil {
+		return nil, "", err
+	}
+	if err := s.Store.SetEmail(ctx, u.ID, ""); err != nil {
 		return nil, "", err
 	}
 	temp := TempPassword()

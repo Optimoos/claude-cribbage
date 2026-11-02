@@ -451,10 +451,20 @@ func tokenKey(token string) string {
 	return hex.EncodeToString(h[:])
 }
 
-func (s *SQLite) CreateSession(ctx context.Context, token string, userID int64, expires time.Time) error {
+func (s *SQLite) CreateSession(ctx context.Context, token string, userID int64, hash []byte, expires time.Time) error {
 	return s.write(ctx, func(tx *writeTx) error {
-		_, err := tx.Exec(`INSERT INTO sessions (token, user_id, expires) VALUES (?, ?, ?)`, tokenKey(token), userID, expires.UnixMilli())
-		return err
+		res, err := tx.Exec(`INSERT INTO sessions (token, user_id, expires)
+			SELECT ?, id, ? FROM users WHERE id = ? AND password_hash = ?`,
+			tokenKey(token), expires.UnixMilli(), userID, hash)
+		if err != nil {
+			return err
+		}
+		if n, err := res.RowsAffected(); err != nil {
+			return err
+		} else if n == 0 {
+			return ErrNotFound
+		}
+		return nil
 	}, nil)
 }
 
@@ -505,7 +515,7 @@ func (s *SQLite) SetPassword(ctx context.Context, userID int64, hash []byte, mus
 		if _, err := tx.Exec(`DELETE FROM sessions WHERE user_id = ? AND token != ?`, userID, keepKey(keep)); err != nil {
 			return err
 		}
-		_, err = tx.Exec(`DELETE FROM account_tokens WHERE user_id = ? AND kind = ?`, userID, TokenReset)
+		_, err = tx.Exec(`DELETE FROM account_tokens WHERE user_id = ?`, userID)
 		return err
 	}, nil)
 }
@@ -529,7 +539,7 @@ func (s *SQLite) SetEmail(ctx context.Context, userID int64, email string) error
 		} else if n == 0 {
 			return ErrNotFound
 		}
-		_, err = tx.Exec(`DELETE FROM account_tokens WHERE user_id = ? AND kind = ?`, userID, TokenVerify)
+		_, err = tx.Exec(`DELETE FROM account_tokens WHERE user_id = ?`, userID)
 		return err
 	}, nil)
 }

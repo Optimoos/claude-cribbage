@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/coder/websocket"
@@ -376,8 +377,12 @@ func (a *API) answer(ctx context.Context, ws *websocket.Conn, onConn func(*Conn)
 		return err
 	}
 	opened := make(chan *Conn, 1)
+	// One channel per peer connection. Pion keeps calling this for every
+	// channel the client opens, and an unread extra one would hold its
+	// buffered messages until the peer connection closed.
+	var taken atomic.Bool
 	pc.OnDataChannel(func(dc *webrtc.DataChannel) {
-		if dc.Label() != Label {
+		if dc.Label() != Label || !taken.CompareAndSwap(false, true) {
 			dc.Close()
 			return
 		}
@@ -392,10 +397,7 @@ func (a *API) answer(ctx context.Context, ws *websocket.Conn, onConn func(*Conn)
 				go pc.Close()
 				return
 			}
-			select {
-			case opened <- newConn(pc, dc, Auto, a.live.Done):
-			default:
-			}
+			opened <- newConn(pc, dc, Auto, a.live.Done) // buffered; sent once
 		})
 	})
 	sig := &signaler{ws: ws}

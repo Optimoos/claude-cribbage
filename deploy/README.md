@@ -121,7 +121,10 @@ sudo cribserver admin -socket /run/cribbage/admin.sock reset-password <username>
 ```
 
 This prints a temporary password such as `k7mq-x2r9-pd4h` and logs the
-player out everywhere. Pass it on however you like. When they log in with it,
+player out everywhere. It also removes the account's email address, since
+whoever got into the account may have set it to their own, and prints the
+address it removed; the player can add theirs again. Pass the password on
+however you like. When they log in with it,
 they must choose a new password before they can do anything else. The
 command talks to the running server through `/run/cribbage/admin.sock`,
 which only root and the `cribbage` user can open (`/opt/cribbage/cribserver`

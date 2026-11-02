@@ -53,7 +53,28 @@ RestrictNamespaces=true
 LockPersonality=true
 MemoryDenyWriteExecute=true
 SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RemoveIPC=true
+ProtectClock=true
+ProtectHostname=true
+ProtectKernelLogs=true
+ProtectProc=invisible
+ProcSubset=pid
 UMask=0077
+
+# Resource limits, so a runaway server cannot take Caddy and sshd down
+# with it. For a 2 GB machine; scale MemoryMax and GOMEMLIMIT together
+# (GOMEMLIMIT a little lower, so Go collects garbage before systemd kills).
+Environment=GOMEMLIMIT=1100MiB
+MemoryHigh=1200M
+MemoryMax=1400M
+TasksMax=512
+LimitNOFILE=65536
 
 [Install]
 WantedBy=multi-user.target

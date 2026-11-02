@@ -31,6 +31,8 @@ type adminResponse struct {
 	OK       bool   `json:"ok"`
 	Error    string `json:"error,omitempty"`
 	Password string `json:"password,omitempty"`
+	// RemovedEmail is the address reset-password took off the account.
+	RemovedEmail string `json:"removed_email,omitempty"`
 }
 
 // serveAdmin listens on a Unix socket at path for admin commands.
@@ -73,7 +75,7 @@ func handleAdmin(log *slog.Logger, c net.Conn, srv *server.Server) {
 		switch req.Cmd {
 		case "reset-password":
 			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-			resp.Password, err = srv.AdminResetPassword(ctx, req.Username)
+			resp.Password, resp.RemovedEmail, err = srv.AdminResetPassword(ctx, req.Username)
 			cancel()
 			if err != nil {
 				resp.Error = err.Error()
@@ -101,7 +103,8 @@ func adminMain(args []string) {
 Commands:
   reset-password <username>
         Give a player a temporary password and log them out everywhere.
-        They must choose a new password when they next log in.
+        They must choose a new password when they next log in. Their
+        email address is removed, in case whoever took the account set it.
 
 Run it as the server's user, e.g. sudo -u cribbage cribserver admin ...
 
@@ -144,4 +147,7 @@ Flags:
 	}
 	fmt.Printf("Temporary password for %s: %s\n", req.Username, resp.Password)
 	fmt.Println("They are logged out everywhere, and must choose a new password when they log in with it.")
+	if resp.RemovedEmail != "" {
+		fmt.Printf("Their email address (%s) was removed, in case someone else set it; they can add it again.\n", resp.RemovedEmail)
+	}
 }

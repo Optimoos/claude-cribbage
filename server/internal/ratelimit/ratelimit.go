@@ -77,3 +77,13 @@ func (l *Limiter) Take(key string, now time.Time) bool {
 	b.tokens--
 	return true
 }
+
+// Return gives back a token spent by Take, for a limiter that counts
+// failures: take one before trying, so attempts made at once cannot all
+// get in before the first failure is counted, and return it on success.
+func (l *Limiter) Return(key string, now time.Time) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	b := l.fill(key, now)
+	b.tokens = min(l.burst, b.tokens+1)
+}

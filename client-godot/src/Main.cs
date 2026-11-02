@@ -105,8 +105,16 @@ public partial class Main : Control
     void Connect()
     {
         conn?.Close();
-        SetStatus("connecting…");
         var url = settings.Server;
+        if (!SafeServer(url))
+        {
+            // Over plain ws:// anyone on the network path could swap the
+            // WebRTC answer and read the password off the data channel.
+            conn = null;
+            SetStatus("use wss:// for a server on the internet");
+            return;
+        }
+        SetStatus("connecting…");
         Fetch(HttpBase(url) + "/api/config", body =>
         {
             var ice = new List<string>();
@@ -134,6 +142,38 @@ public partial class Main : Control
             conn.Received += OnMessage;
             conn.Connect();
         });
+    }
+
+    // SafeServer reports whether url is encrypted (wss://), or plain ws://
+    // to this machine or the local network, where a test server may run.
+    static bool SafeServer(string url)
+    {
+        if (!System.Uri.TryCreate(url, System.UriKind.Absolute, out var u))
+        {
+            return false;
+        }
+        if (u.Scheme == "wss")
+        {
+            return true;
+        }
+        if (u.Scheme != "ws")
+        {
+            return false;
+        }
+        if (u.IsLoopback || u.Host == "localhost" || u.Host.EndsWith(".local"))
+        {
+            return true;
+        }
+        if (!System.Net.IPAddress.TryParse(u.Host.Trim('[', ']'), out var ip))
+        {
+            return false;
+        }
+        if (ip.IsIPv6LinkLocal || ip.IsIPv6UniqueLocal)
+        {
+            return true;
+        }
+        var b = ip.GetAddressBytes();
+        return b.Length == 4 && (b[0] == 10 || (b[0] == 172 && (b[1] & 0xf0) == 16) || (b[0] == 192 && b[1] == 168));
     }
 
     static string HttpBase(string ws)
@@ -468,7 +508,7 @@ public partial class Main : Control
             box.AddChild(e);
             return e;
         }
-        serverEdit = Field("Server", "ws://host:8080/rtc");
+        serverEdit = Field("Server", "wss://host/rtc");
         serverEdit.Text = settings.Server;
         serverEdit.TextSubmitted += _ => ChangeServer();
         serverEdit.FocusExited += ChangeServer;

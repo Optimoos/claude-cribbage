@@ -242,3 +242,48 @@ func TestSessionLimit(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 }
+
+// A second data channel on the same peer connection is closed at once, so
+// it cannot hold buffered messages on the server.
+func TestExtraChannelClosed(t *testing.T) {
+	server := newTestAPI(t)
+	conns := make(chan *Conn, 4)
+	ts := httptest.NewServer(server.Handler(func(c *Conn) { conns <- c }))
+	defer ts.Close()
+	url := "ws" + strings.TrimPrefix(ts.URL, "http")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	c, err := newTestAPI(t).Dial(ctx, url, Binary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	first := <-conns
+	defer first.Close()
+
+	extra, err := c.pc.CreateDataChannel(Label, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	closed := make(chan struct{})
+	extra.OnClose(func() { close(closed) })
+	select {
+	case <-closed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the server kept the extra channel open")
+	}
+	select {
+	case <-conns:
+		t.Fatal("the server made a second connection")
+	case <-time.After(200 * time.Millisecond):
+	}
+	// The first channel still works.
+	if err := c.Write(&pb.ClientMessage{Body: &pb.ClientMessage_Ping{Ping: &pb.Ping{}}}); err != nil {
+		t.Fatal(err)
+	}
+	var m pb.ClientMessage
+	if err := first.Read(&m); err != nil || m.GetPing() == nil {
+		t.Fatalf("first channel: %v, %v", &m, err)
+	}
+}

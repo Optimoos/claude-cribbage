@@ -105,22 +105,41 @@ func passwordKey(c *Conn) string {
 	return strings.ToLower(c.user.Username) + "|" + addrKey(remoteIP(c.t))
 }
 
+// allowPasswordCheck spends one of c's user's password checks and one of
+// their failures, which the caller returns with passwordChecked.
+func (s *Server) allowPasswordCheck(c *Conn, id uint32) bool {
+	if !limited(c) {
+		return true
+	}
+	now := time.Now()
+	if !s.passwordChecks.Take(c.userKey, now) || !s.failures.Take(passwordKey(c), now) {
+		c.sendError(id, pb.ErrorCode_ERROR_CODE_RATE_LIMITED, "", "too many attempts; try again later")
+		return false
+	}
+	return true
+}
+
+// passwordChecked returns the failure allowPasswordCheck took, unless the
+// password was wrong.
+func (s *Server) passwordChecked(c *Conn, key string, err error) {
+	if limited(c) && !errors.Is(err, auth.ErrInvalidCredentials) {
+		s.failures.Return(key, time.Now())
+	}
+}
+
 // changePassword runs on c's reader, like a login.
 func (s *Server) changePassword(c *Conn, id uint32, m *pb.ChangePassword) {
-	key := passwordKey(c)
-	if limited(c) && !s.failures.Allow(key, time.Now()) {
-		c.sendError(id, pb.ErrorCode_ERROR_CODE_RATE_LIMITED, "", "too many attempts; try again later")
+	if !s.allowPasswordCheck(c, id) {
 		return
 	}
+	key := passwordKey(c)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	u, err := hashed(s, ctx, func() (*store.User, error) {
 		return s.auth.ChangePassword(ctx, c.user.ID, m.OldPassword, m.NewPassword, c.token)
 	})
+	s.passwordChecked(c, key, err)
 	if err != nil {
-		if errors.Is(err, auth.ErrInvalidCredentials) && limited(c) {
-			s.failures.Take(key, time.Now())
-		}
 		s.sendAccountError(c, id, "change password", err)
 		return
 	}
@@ -138,22 +157,18 @@ func (s *Server) changePassword(c *Conn, id uint32, m *pb.ChangePassword) {
 
 // setEmail checks the password and mails a link, off the reader.
 func (s *Server) setEmail(c *Conn, id uint32, m *pb.SetEmail) {
-	key := passwordKey(c)
-	if limited(c) && !s.failures.Allow(key, time.Now()) {
-		c.sendError(id, pb.ErrorCode_ERROR_CODE_RATE_LIMITED, "", "too many attempts; try again later")
+	if !s.allowPasswordCheck(c, id) {
 		return
 	}
-	user, lim := c.user, limited(c)
+	key, user := passwordKey(c), c.user
 	s.background(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 		defer cancel()
 		_, err := hashed(s, ctx, func() (struct{}, error) {
 			return struct{}{}, s.auth.SetEmail(ctx, user.ID, m.Password, m.Email)
 		})
+		s.passwordChecked(c, key, err)
 		if err != nil {
-			if errors.Is(err, auth.ErrInvalidCredentials) && lim {
-				s.failures.Take(key, time.Now())
-			}
 			s.sendAccountError(c, id, "set email", err)
 			return
 		}
@@ -240,24 +255,24 @@ func (s *Server) closeUserConns(userID int64, keep *Conn) {
 }
 
 // AdminResetPassword gives a user a temporary password that they must
-// change when they next log in, and disconnects them.
-func (s *Server) AdminResetPassword(ctx context.Context, username string) (string, error) {
+// change when they next log in, and disconnects them. It also returns the
+// email address it removed from the account, if any.
+func (s *Server) AdminResetPassword(ctx context.Context, username string) (temp, email string, err error) {
 	var u *store.User
-	var temp string
-	_, err := hashed(s, ctx, func() (struct{}, error) {
+	_, err = hashed(s, ctx, func() (struct{}, error) {
 		var err error
 		u, temp, err = s.auth.AdminResetPassword(ctx, username)
 		return struct{}{}, err
 	})
 	if errors.Is(err, store.ErrNotFound) {
-		return "", fmt.Errorf("no user %q", username)
+		return "", "", fmt.Errorf("no user %q", username)
 	}
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	s.log.Info("password reset by admin", "user", u.ID, "username", u.Username)
 	s.closeUserConns(u.ID, nil)
-	return temp, nil
+	return temp, u.Email, nil
 }
 
 // History paging.

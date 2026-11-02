@@ -171,6 +171,7 @@ type Server struct {
 	inv                    invites
 	invitesSent, codeTries *ratelimit.Limiter
 	resetRequests          *ratelimit.Limiter // password reset emails asked for, by address
+	passwordChecks         *ratelimit.Limiter // password checks by a logged-in user, right or wrong
 
 	bg sync.WaitGroup // background requests, such as sending email
 
@@ -231,6 +232,9 @@ func New(cfg Config) *Server {
 		// Five password reset requests from an address, then one every ten
 		// minutes. Each account also gets few emails (auth.Service).
 		resetRequests: ratelimit.New(5, 10*time.Minute),
+		// Five password checks (changing the password or email), then one
+		// a minute, so nobody can keep the bcrypt slots busy.
+		passwordChecks: ratelimit.New(5, time.Minute),
 		auth:          cfg.Auth,
 		gameStore:     cfg.Games,
 		log:           cfg.Logger,
@@ -316,14 +320,27 @@ func (s *Server) ServeConn(t Transport) {
 		s.unregisterConn(c)
 		s.stats.conns.Add(-1)
 	}()
+	preLogin := 0
 	for {
 		m := new(pb.ClientMessage)
 		if err := t.Read(m); err != nil {
 			return
 		}
+		// A remote client gets a few messages to log in with (each may
+		// cost a database lookup), not as many as it can send in the time
+		// it has.
+		if c.addr != "" && !c.authed.Load() {
+			if preLogin++; preLogin > maxPreLogin {
+				return
+			}
+		}
 		s.handle(c, m)
 	}
 }
+
+// maxPreLogin is how many messages a remote connection may send before it
+// logs in: plenty for a client that mistypes a password a few times.
+const maxPreLogin = 50
 
 func (s *Server) handle(c *Conn, m *pb.ClientMessage) {
 	id := m.RequestId
@@ -355,8 +372,8 @@ func (s *Server) handle(c *Conn, m *pb.ClientMessage) {
 			res, err := hashed(s, ctx, func() (*auth.Result, error) {
 				return s.auth.Login(ctx, b.Login.Username, b.Login.Password)
 			})
-			if errors.Is(err, auth.ErrInvalidCredentials) && limited(c) {
-				s.failures.Take(key, time.Now())
+			if !errors.Is(err, auth.ErrInvalidCredentials) && limited(c) {
+				s.failures.Return(key, time.Now())
 			}
 			return res, err
 		})
@@ -487,7 +504,7 @@ func (s *Server) allowAuth(c *Conn, id uint32, user string, register bool) bool 
 	ip := addrKey(remoteIP(c.t))
 	ok := s.attempts.Take(ip, now) &&
 		(!register || s.registers.Take(ip, now)) &&
-		(register || s.failures.Allow(user, now))
+		(register || s.failures.Take(user, now)) // returned on success
 	if !ok {
 		c.sendError(id, pb.ErrorCode_ERROR_CODE_RATE_LIMITED, "", "too many attempts; try again later")
 	}
@@ -531,6 +548,16 @@ func (s *Server) authenticate(c *Conn, id uint32, fn func(context.Context) (*aut
 	c.mustChange.Store(res.User.MustChange)
 	c.authed.Store(true)
 	s.registerConn(c)
+	// A password change ends sessions and then closes the connections it
+	// can see. One that ended this session before c was registered missed
+	// c, so make sure the session is still there.
+	if uid, err := s.auth.Store.SessionUser(ctx, res.Token); err != nil || uid != res.User.ID {
+		if !errors.Is(err, store.ErrNotFound) && err != nil {
+			s.log.Error("session check", "user", res.User.ID, "err", err)
+		}
+		c.close()
+		return
+	}
 	c.send(&pb.ServerMessage{RequestId: id, Body: &pb.ServerMessage_AuthOk{AuthOk: &pb.AuthOk{
 		UserId: res.User.ID, Username: res.User.Username, Nickname: res.User.Nickname, Token: res.Token,
 		Account: acct,

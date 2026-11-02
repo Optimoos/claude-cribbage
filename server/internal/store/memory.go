@@ -1,8 +1,10 @@
 package store
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -103,9 +105,12 @@ func (m *Memory) UserByID(_ context.Context, id int64) (*User, error) {
 	return &c, nil
 }
 
-func (m *Memory) CreateSession(_ context.Context, token string, userID int64, expires time.Time) error {
+func (m *Memory) CreateSession(_ context.Context, token string, userID int64, hash []byte, expires time.Time) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if u, ok := m.byID[userID]; !ok || !bytes.Equal(u.PasswordHash, hash) {
+		return ErrNotFound
+	}
 	m.sessions[token] = session{userID: userID, expires: expires}
 	return nil
 }
@@ -158,14 +163,15 @@ func (m *Memory) SetPassword(_ context.Context, userID int64, hash []byte, mustC
 			delete(m.sessions, k)
 		}
 	}
-	m.deleteTokens(userID, TokenReset)
+	m.deleteTokens(userID)
 	return nil
 }
 
-// deleteTokens removes a user's tokens of a kind. Callers hold mu.
-func (m *Memory) deleteTokens(userID int64, kind int) {
+// deleteTokens removes a user's account tokens of the given kinds, or of
+// every kind if none are given. Callers hold mu.
+func (m *Memory) deleteTokens(userID int64, kinds ...int) {
 	for k, t := range m.tokens {
-		if t.UserID == userID && t.Kind == kind {
+		if t.UserID == userID && (len(kinds) == 0 || slices.Contains(kinds, t.Kind)) {
 			delete(m.tokens, k)
 		}
 	}
@@ -179,7 +185,7 @@ func (m *Memory) SetEmail(_ context.Context, userID int64, email string) error {
 		return ErrNotFound
 	}
 	u.Email = email
-	m.deleteTokens(userID, TokenVerify)
+	m.deleteTokens(userID)
 	return nil
 }
 

@@ -1093,3 +1093,49 @@ Added 2026-11-01, before deploying. Decided with you:
 
 **Not tested:** sending through a real SMTP provider. That needs your
 account, and then one reset email to yourself after deploying.
+
+### M27: Security review fixes
+
+A last review before deploying, in three parts (accounts, network,
+clients), found no critical issues. Fixed:
+
+- **Extra data channels.** The server accepted every "cribbage" data
+  channel a client opened on one peer connection but read only the first;
+  each extra one could hold about 4 MiB until the client left, enough to
+  run the server out of memory without an account. Now only the first is
+  accepted and the rest are closed. The per-channel send buffer limit went
+  from 8 MiB to 1 MiB.
+- **Links outliving a password change.** A new password (changed, reset by
+  email or by the admin) deletes every reset and verification link, not
+  just reset links, so an address someone else asked for can no longer be
+  confirmed afterwards. A new address deletes reset links sent to the old
+  one. The admin reset also removes the email address and reports it.
+- **Logins racing a password change.** A session is created only if the
+  password hash is still the one that was checked, and after a connection
+  registers, its session must still exist, else it is closed.
+- **Password checks.** Changing the password or email costs a bcrypt hash
+  even with the right password, so these are limited per player (5, then
+  1 a minute). Failures are charged before the check and refunded on
+  success, so a burst of guesses gets no more than the limit.
+- **Mail.** Confirmation emails are limited per recipient as well as per
+  account (3, then 1 an hour) and no longer include the nickname.
+- **Before login,** a remote connection may send 50 messages.
+- **Godot** refuses plain `ws://` except to this machine or the local
+  network, and suggests `wss://`.
+- **systemd:** a syscall filter, no capabilities, more `Protect*`
+  settings, and memory (with a matching `GOMEMLIMIT`) and task limits.
+
+Left for later (low): seeding the shuffle with 128 bits from
+`crypto/rand`, per-/48 limits for IPv6, idle timeouts for connections
+with no games, a hard cap on rate-limiter tables, owner-only permissions
+on the Godot settings file, an Origin check on `/rtc`, and checking the
+seat before waking a sleeping game.
+
+Tests: an extra data channel is closed (fails on the old code); store
+tests for links surviving password and address changes and for sessions
+of an old password; a login racing a reset gets no session; password
+checks limited; a burst of 12 wrong passwords checked only up to the
+limit (12 of 12 on the old code); the pre-login cap; the admin reset
+removing the address. All tests and the race detector pass. The server
+started and answered under the new systemd sandbox settings (run with
+`systemd-run --user`, which cannot apply every setting).

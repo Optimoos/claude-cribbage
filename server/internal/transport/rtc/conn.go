@@ -30,7 +30,7 @@ const Label = "cribbage"
 
 // maxBuffered bounds unsent data per channel before writes fail; a client
 // that stops reading is disconnected instead of growing memory forever.
-const maxBuffered = 8 << 20
+const maxBuffered = 1 << 20
 
 var (
 	jsonOut = protojson.MarshalOptions{EmitUnpopulated: true}

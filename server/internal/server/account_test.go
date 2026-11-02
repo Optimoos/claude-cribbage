@@ -278,12 +278,19 @@ func TestAdminResetPassword(t *testing.T) {
 	srv, addr, _ := startAccountServer(t, true)
 	a := login(t, addr, "alice")
 	ctx := context.Background()
-	if _, err := srv.AdminResetPassword(ctx, "nobody"); err == nil {
+	if _, _, err := srv.AdminResetPassword(ctx, "nobody"); err == nil {
 		t.Fatal("reset an unknown user")
 	}
-	temp, err := srv.AdminResetPassword(ctx, "ALICE")
+	// An address someone else may have set goes with the password.
+	if err := srv.auth.Store.SetEmail(ctx, a.auth.UserId, "thief@example.com"); err != nil {
+		t.Fatal(err)
+	}
+	temp, removed, err := srv.AdminResetPassword(ctx, "ALICE")
 	if err != nil {
 		t.Fatal(err)
+	}
+	if u, _ := srv.auth.Store.UserByID(ctx, a.auth.UserId); removed != "thief@example.com" || u.Email != "" {
+		t.Fatalf("removed %q, address now %q", removed, u.Email)
 	}
 	if !regexp.MustCompile(`^[a-z2-9]{4}-[a-z2-9]{4}-[a-z2-9]{4}$`).MatchString(temp) {
 		t.Fatalf("temporary password %q", temp)

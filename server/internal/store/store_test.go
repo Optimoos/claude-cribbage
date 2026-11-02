@@ -47,10 +47,10 @@ func TestUsersAndSessions(t *testing.T) {
 		if _, err := s.UserByID(ctx, 999); !errors.Is(err, ErrNotFound) {
 			t.Fatalf("missing id: %v", err)
 		}
-		if err := s.CreateSession(ctx, "tok", u.ID, time.Now().Add(time.Hour)); err != nil {
+		if err := s.CreateSession(ctx, "tok", u.ID, u.PasswordHash, time.Now().Add(time.Hour)); err != nil {
 			t.Fatal(err)
 		}
-		if err := s.CreateSession(ctx, "old", u.ID, time.Now().Add(-time.Hour)); err != nil {
+		if err := s.CreateSession(ctx, "old", u.ID, u.PasswordHash, time.Now().Add(-time.Hour)); err != nil {
 			t.Fatal(err)
 		}
 		if id, err := s.SessionUser(ctx, "tok"); err != nil || id != u.ID {
@@ -87,7 +87,7 @@ func TestSQLiteSessionTokensHashed(t *testing.T) {
 	if err := s.CreateUser(ctx, u); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.CreateSession(ctx, "new-token", u.ID, time.Now().Add(time.Hour)); err != nil {
+	if err := s.CreateSession(ctx, "new-token", u.ID, u.PasswordHash, time.Now().Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	var stored string
@@ -471,11 +471,11 @@ func TestAccountTokensAndPasswords(t *testing.T) {
 			}
 		}
 		for _, tok := range []string{"s1", "s2"} {
-			if err := s.CreateSession(ctx, tok, a.ID, time.Now().Add(time.Hour)); err != nil {
+			if err := s.CreateSession(ctx, tok, a.ID, a.PasswordHash, time.Now().Add(time.Hour)); err != nil {
 				t.Fatal(err)
 			}
 		}
-		if err := s.CreateSession(ctx, "sb", b.ID, time.Now().Add(time.Hour)); err != nil {
+		if err := s.CreateSession(ctx, "sb", b.ID, b.PasswordHash, time.Now().Add(time.Hour)); err != nil {
 			t.Fatal(err)
 		}
 
@@ -524,8 +524,21 @@ func TestAccountTokensAndPasswords(t *testing.T) {
 			t.Fatalf("users with no email: %v", us)
 		}
 
-		// A new password keeps one session, ends the others and the reset
-		// link, and leaves other users alone.
+		// A new address ends a reset link sent to the old one.
+		if _, err := s.TakeAccountToken(ctx, "r1", TokenReset); !errors.Is(err, ErrNotFound) {
+			t.Fatal("reset link survived a new address")
+		}
+		for _, tok := range []*AccountToken{
+			{Token: "r2", UserID: a.ID, Kind: TokenReset, Expires: exp},
+			{Token: "v3", UserID: a.ID, Kind: TokenVerify, Email: "thief@example.com", Expires: exp},
+		} {
+			if err := s.CreateAccountToken(ctx, tok); err != nil {
+				t.Fatal(err)
+			}
+		}
+
+		// A new password keeps one session, ends the others and every
+		// account link, and leaves other users alone.
 		if err := s.SetPassword(ctx, a.ID, []byte("h3"), true, "s2"); err != nil {
 			t.Fatal(err)
 		}
@@ -542,8 +555,18 @@ func TestAccountTokensAndPasswords(t *testing.T) {
 		if _, err := s.SessionUser(ctx, "sb"); err != nil {
 			t.Fatal("another user's session ended")
 		}
-		if _, err := s.TakeAccountToken(ctx, "r1", TokenReset); !errors.Is(err, ErrNotFound) {
+		if _, err := s.TakeAccountToken(ctx, "r2", TokenReset); !errors.Is(err, ErrNotFound) {
 			t.Fatal("reset link survived a new password")
+		}
+		if _, err := s.TakeAccountToken(ctx, "v3", TokenVerify); !errors.Is(err, ErrNotFound) {
+			t.Fatal("verification link survived a new password")
+		}
+		// A session for a password checked before the change is refused.
+		if err := s.CreateSession(ctx, "stale", a.ID, []byte("h1"), time.Now().Add(time.Hour)); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("session for an old password: %v", err)
+		}
+		if err := s.CreateSession(ctx, "fresh", a.ID, []byte("h3"), time.Now().Add(time.Hour)); err != nil {
+			t.Fatal(err)
 		}
 		if err := s.SetPassword(ctx, a.ID, []byte("h4"), false, ""); err != nil {
 			t.Fatal(err)

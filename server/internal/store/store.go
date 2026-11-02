@@ -52,7 +52,10 @@ type Store interface {
 	CreateUser(ctx context.Context, u *User) error
 	UserByUsername(ctx context.Context, username string) (*User, error)
 	UserByID(ctx context.Context, id int64) (*User, error)
-	CreateSession(ctx context.Context, token string, userID int64, expires time.Time) error
+	// CreateSession starts a session for a user whose password hash is
+	// still hash, returning ErrNotFound if it is not: a password checked
+	// before a reset cannot start a session after it.
+	CreateSession(ctx context.Context, token string, userID int64, hash []byte, expires time.Time) error
 	// SessionUser returns the user ID for a valid, unexpired token.
 	SessionUser(ctx context.Context, token string) (int64, error)
 	// DeleteSession ends a session; deleting an unknown token is not an
@@ -63,11 +66,11 @@ type Store interface {
 	DeleteExpiredSessions(ctx context.Context, t time.Time) (int64, error)
 
 	// SetPassword replaces a user's password hash and MustChange flag, and
-	// deletes their password reset tokens and every session but keep (""
-	// for none), in one transaction.
+	// deletes their reset and verification tokens and every session but
+	// keep ("" for none), in one transaction.
 	SetPassword(ctx context.Context, userID int64, hash []byte, mustChange bool, keep string) error
 	// SetEmail sets a user's verified address ("" to remove it), and
-	// deletes their email verification tokens.
+	// deletes their verification and reset tokens.
 	SetEmail(ctx context.Context, userID int64, email string) error
 	// UsersByEmail returns the users with this verified address
 	// (case-insensitively).

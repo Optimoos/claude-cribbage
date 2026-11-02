@@ -45,6 +45,7 @@ type Service struct {
 	dummy     []byte
 	mailOnce  sync.Once
 	mailLimit *ratelimit.Limiter // emails per user
+	rcptLimit *ratelimit.Limiter // emails per address
 }
 
 // Result of a successful authentication.
@@ -179,7 +180,12 @@ func (s *Service) newSession(ctx context.Context, u *store.User) (*Result, error
 		ttl = 30 * 24 * time.Hour
 	}
 	token := RandomID(tokenBytes)
-	if err := s.Store.CreateSession(ctx, token, u.ID, time.Now().Add(ttl)); err != nil {
+	err := s.Store.CreateSession(ctx, token, u.ID, u.PasswordHash, time.Now().Add(ttl))
+	if errors.Is(err, store.ErrNotFound) {
+		// The password changed while this one was being checked.
+		return nil, ErrInvalidCredentials
+	}
+	if err != nil {
 		return nil, err
 	}
 	return &Result{User: u, Token: token}, nil
