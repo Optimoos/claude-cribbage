@@ -74,8 +74,7 @@ func TestUsersAndSessions(t *testing.T) {
 	})
 }
 
-// The database holds hashes of session tokens, and a database from before
-// that has its tokens hashed when opened.
+// The database holds hashes of session tokens, not the tokens.
 func TestSQLiteSessionTokensHashed(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "s.db")
@@ -94,42 +93,10 @@ func TestSQLiteSessionTokensHashed(t *testing.T) {
 	if err := s.db.QueryRow(`SELECT token FROM sessions`).Scan(&stored); err != nil || stored == "new-token" || len(stored) != 64 {
 		t.Fatalf("stored token %q, %v", stored, err)
 	}
-	// An old database: a token stored as issued, and users without the
-	// account columns: schema version 0.
-	if _, err := s.db.Exec(`INSERT INTO sessions (token, user_id, expires) VALUES ('old-token', ?, ?)`,
-		u.ID, time.Now().Add(time.Hour).UnixMilli()); err != nil {
-		t.Fatal(err)
-	}
-	for _, q := range []string{
-		`DROP INDEX users_email`,
-		`ALTER TABLE users DROP COLUMN email`,
-		`ALTER TABLE users DROP COLUMN must_change`,
-		`PRAGMA user_version = 0`,
-	} {
-		if _, err := s.db.Exec(q); err != nil {
-			t.Fatal(q, err)
-		}
+	if id, err := s.SessionUser(ctx, "new-token"); err != nil || id != u.ID {
+		t.Fatalf("session: %d, %v", id, err)
 	}
 	s.Close()
-
-	s, err = OpenSQLite(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer s.Close()
-	if id, err := s.SessionUser(ctx, "old-token"); err != nil || id != u.ID {
-		t.Fatalf("old session after migration: %d, %v", id, err)
-	}
-	var n int
-	if err := s.db.QueryRow(`SELECT COUNT(*) FROM sessions WHERE token = 'old-token'`).Scan(&n); err != nil || n != 0 {
-		t.Fatalf("old token still stored as issued: %d, %v", n, err)
-	}
-	if got, err := s.UserByID(ctx, u.ID); err != nil || got.Email != "" || got.MustChange {
-		t.Fatalf("user after migration: %+v, %v", got, err)
-	}
-	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&n); err != nil || n != 2 {
-		t.Fatalf("schema version %d, %v", n, err)
-	}
 }
 
 func play(seat int, c engine.Card) engine.Action { return engine.Play(c) }

@@ -30,8 +30,11 @@ CREATE TABLE IF NOT EXISTS users (
 	username      TEXT NOT NULL UNIQUE COLLATE NOCASE,
 	nickname      TEXT NOT NULL,
 	password_hash BLOB NOT NULL,
-	created       INTEGER NOT NULL
+	created       INTEGER NOT NULL,
+	email         TEXT NOT NULL DEFAULT '', -- verified, for reset links
+	must_change   INTEGER NOT NULL DEFAULT 0 -- the admin reset the password
 );
+CREATE INDEX IF NOT EXISTS users_email ON users(email COLLATE NOCASE) WHERE email != '';
 CREATE TABLE IF NOT EXISTS sessions (
 	token   TEXT PRIMARY KEY,
 	user_id INTEGER NOT NULL REFERENCES users(id),
@@ -162,10 +165,6 @@ func OpenSQLite(path string) (*SQLite, error) {
 	if _, err := db.Exec(schema); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("create schema: %w", err)
-	}
-	if err := migrate(db); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("migrate: %w", err)
 	}
 	ins, err := db.Prepare(`INSERT INTO action_log (game_id, seq, seat, kind, card0, card1) VALUES (?,?,?,?,?,?)`)
 	if err != nil {
@@ -606,76 +605,6 @@ func (s *SQLite) PendingEmail(ctx context.Context, userID int64) (string, error)
 		return "", nil
 	}
 	return email, err
-}
-
-// migrate brings an older database up to date. PRAGMA user_version counts
-// the migrations applied:
-//
-//	1: session tokens are stored hashed (they were stored as issued).
-//	2: users have an email address and a must-change-password flag.
-func migrate(db *sql.DB) error {
-	var v int
-	if err := db.QueryRow(`PRAGMA user_version`).Scan(&v); err != nil {
-		return err
-	}
-	steps := []func(*sql.Tx) error{hashSessionTokens, addAccountColumns}
-	for ; v < len(steps); v++ {
-		tx, err := db.Begin()
-		if err != nil {
-			return err
-		}
-		if err := steps[v](tx); err != nil {
-			tx.Rollback()
-			return fmt.Errorf("migration %d: %w", v+1, err)
-		}
-		if _, err := tx.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, v+1)); err != nil {
-			tx.Rollback()
-			return err
-		}
-		if err := tx.Commit(); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func hashSessionTokens(tx *sql.Tx) error {
-	rows, err := tx.Query(`SELECT token FROM sessions`)
-	if err != nil {
-		return err
-	}
-	var tokens []string
-	for rows.Next() {
-		var t string
-		if err := rows.Scan(&t); err != nil {
-			rows.Close()
-			return err
-		}
-		tokens = append(tokens, t)
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return err
-	}
-	for _, t := range tokens {
-		if _, err := tx.Exec(`UPDATE sessions SET token = ? WHERE token = ?`, tokenKey(t), t); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func addAccountColumns(tx *sql.Tx) error {
-	for _, q := range []string{
-		`ALTER TABLE users ADD COLUMN email TEXT NOT NULL DEFAULT ''`,
-		`ALTER TABLE users ADD COLUMN must_change INTEGER NOT NULL DEFAULT 0`,
-		`CREATE INDEX users_email ON users(email COLLATE NOCASE) WHERE email != ''`,
-	} {
-		if _, err := tx.Exec(q); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 func boolInt(b bool) int {

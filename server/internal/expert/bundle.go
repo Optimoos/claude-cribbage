@@ -16,8 +16,8 @@ import (
 
 const (
 	bundleMagic = "CRIBEX01"
-	// BundleVersion changes whenever a table's meaning or layout changes.
-	// Version 1 bundles (a win table only) are still read.
+	// BundleVersion changes whenever a table's meaning or layout changes;
+	// only bundles of this version are read.
 	BundleVersion = 2
 )
 
@@ -51,8 +51,8 @@ type Meta struct {
 }
 
 // Bundle is the expert's model: every learned table plus its metadata.
-// Discard is nil in bundles built before M12; the bot then discards as the
-// heuristic does.
+// Discard is nil in a bundle built with only a win table (a first step
+// when building one); the bot then discards as the heuristic does.
 type Bundle struct {
 	Meta    Meta
 	Win     *WinTable
@@ -150,8 +150,8 @@ func ReadBundle(r io.Reader) (*Bundle, error) {
 	if err := json.Unmarshal(hdr, &b.Meta); err != nil {
 		return nil, fmt.Errorf("expert: header: %w", err)
 	}
-	if b.Meta.Version < 1 || b.Meta.Version > BundleVersion {
-		return nil, fmt.Errorf("expert: bundle version %d; this build reads versions 1 to %d", b.Meta.Version, BundleVersion)
+	if b.Meta.Version != BundleVersion {
+		return nil, fmt.Errorf("expert: bundle version %d; this build reads version %d", b.Meta.Version, BundleVersion)
 	}
 	want := map[string][]int{"win": winShape, "crib": cribShape, "peg": pegShape, "show": showShape, "keep": keepShape}
 	d := new(DiscardTables)
