@@ -53,6 +53,7 @@ type Conn struct {
 	closed chan struct{}
 	once   sync.Once
 	// release, if set, is called once the peer connection has closed.
+	// Guarded by mu.
 	release func()
 
 	mu    sync.Mutex
@@ -80,6 +81,20 @@ func newConn(pc *webrtc.PeerConnection, dc *webrtc.DataChannel, codec Codec, rel
 		}
 	})
 	return c
+}
+
+// setRelease sets the function called once the peer connection has
+// closed, unless Close was called already, and reports whether it was set.
+func (c *Conn) setRelease(f func()) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	select {
+	case <-c.closed:
+		return false
+	default:
+	}
+	c.release = f
+	return true
 }
 
 // Read decodes the next message into m. Messages that arrived before the
@@ -168,8 +183,11 @@ func (c *Conn) Close() error {
 				time.Sleep(lingerAfter)
 			}
 			c.pc.Close()
-			if c.release != nil {
-				c.release()
+			c.mu.Lock()
+			release := c.release
+			c.mu.Unlock()
+			if release != nil {
+				release()
 			}
 		}()
 	})

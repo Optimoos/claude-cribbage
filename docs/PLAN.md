@@ -1179,7 +1179,26 @@ refused, version mismatch reload then "out of date", privacy page at 390
 px). Godot: built, and screenshots of the login links, settings menu,
 account window with the delete section, deletion, and the upgrade message.
 
-Known flaky (before this milestone too): `TestCodecMirroring`,
-`TestRemoteIP` and now `TestCloseDeliversLastMessage` in
-`internal/transport/rtc` sometimes see a connection drop or time out on
-this machine. To be investigated next.
+### M29: Two WebRTC connection races
+
+`TestRemoteIP`, `TestCodecMirroring` and `TestCloseDeliversLastMessage`
+failed now and then (a few percent of runs). pion's debug logs showed two
+server-side races, both able to hit real players:
+
+- **Signaling closed early.** A client closes the signaling WebSocket as
+  soon as its side of the data channel opens. If that close reached the
+  server before the server's side opened, the server took it for a failure
+  and closed the peer connection. Over the internet the close (TCP) and the
+  channel's opening (UDP) arrive in either order. Now, once the server has
+  sent its answer, a closed WebSocket is normal and it waits for the
+  channel until the signaling timeout, as the Go client already did.
+- **First message dropped.** The server made its Conn, and so set
+  OnMessage, in the channel's OnOpen. pion runs OnOpen on its own goroutine
+  and starts reading at the same moment, dropping messages that arrive
+  before OnMessage is set, such as a client's first (Resume or Login): the
+  client then waited for an answer that never came. The Conn is now made
+  in OnDataChannel, which pion runs before the channel opens.
+
+Undoing either fix brings the failures back (most batches of 100 fail);
+with both, each test passed 100 runs in a row, and the full suite passed
+twice and under the race detector.

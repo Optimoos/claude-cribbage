@@ -386,6 +386,11 @@ func (a *API) answer(ctx context.Context, ws *websocket.Conn, onConn func(*Conn)
 			dc.Close()
 			return
 		}
+		// Make the Conn now: pion starts reading the channel as it opens,
+		// on another goroutine than OnOpen's, and drops messages that
+		// arrive before OnMessage is set, such as a client's first.
+		// OnDataChannel returns before the channel opens.
+		c := newConn(pc, dc, Auto, nil)
 		dc.OnOpen(func() {
 			a.mu.Lock()
 			closing := a.closing
@@ -397,7 +402,11 @@ func (a *API) answer(ctx context.Context, ws *websocket.Conn, onConn func(*Conn)
 				go pc.Close()
 				return
 			}
-			opened <- newConn(pc, dc, Auto, a.live.Done) // buffered; sent once
+			if !c.setRelease(a.live.Done) {
+				a.live.Done() // closed already
+				return
+			}
+			opened <- c // buffered; sent once
 		})
 	})
 	sig := &signaler{ws: ws}
@@ -405,10 +414,20 @@ func (a *API) answer(ctx context.Context, ws *websocket.Conn, onConn func(*Conn)
 	remote := remoteCandidates{keep: a.keep}
 
 	errc := make(chan error, 1)
+	answered := make(chan struct{})
+	var answerOnce sync.Once
 	go func() {
 		for {
 			m, err := readSignal(ctx, ws)
 			if err != nil {
+				select {
+				case <-answered:
+					// The client closes signaling once its side of the data
+					// channel opens, which can be before ours does: keep
+					// waiting for the channel (until ctx ends).
+					return
+				default:
+				}
 				errc <- err
 				return
 			}
@@ -441,6 +460,7 @@ func (a *API) answer(ctx context.Context, ws *websocket.Conn, onConn func(*Conn)
 					errc <- err
 					return
 				}
+				answerOnce.Do(func() { close(answered) })
 			case "candidate":
 				if m.Candidate != nil {
 					if err := remote.add(pc, *m.Candidate); err != nil {
