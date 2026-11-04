@@ -24,6 +24,7 @@ main CPU cost.
 
 | File | Install as |
 |---|---|
+| `cribserver.conf` | `/etc/cribbage/cribserver.conf` (the server's settings) |
 | `cribbage.service` | `/etc/systemd/system/cribbage.service` |
 | `Caddyfile` | `/etc/caddy/Caddyfile` (edit the domain) |
 
@@ -48,7 +49,9 @@ install -d -m 0755 /opt/cribbage
 install -m 0755 /tmp/cribserver /opt/cribbage/
 install -m 0644 /tmp/expert.bin /opt/cribbage/
 
-# The service.
+# Settings, then the service.
+install -d -m 0755 /etc/cribbage
+install -m 0644 cribserver.conf /etc/cribbage/
 cp cribbage.service /etc/systemd/system/
 systemctl daemon-reload
 systemctl enable --now cribbage
@@ -70,14 +73,14 @@ Point the domain's DNS at the server before reloading Caddy, so it can get
 a certificate. Then browse to `https://cribbage.example.com`.
 
 On AWS, GCP or Azure the public IP is NATed rather than on the interface:
-add `-public-ip <elastic/static IP>` to `ExecStart`, and open the same
+set `public-ip = <elastic/static IP>` in `cribserver.conf`, and open the same
 ports in the cloud's security group.
 
 Leave ports 8080 and 7777 closed: they listen on localhost only (the
 default). Port 7777 is for headless bots (`cmd/botclient`), which run on
 the server itself; its protocol is not encrypted.
 
-`-rtc-public-only` makes the server ignore WebRTC addresses a client
+`rtc-public-only` makes the server ignore WebRTC addresses a client
 offers on private, loopback or link-local networks, so nobody can make it
 send packets into its own network. Leave it off to play on one machine or
 a LAN.
@@ -102,7 +105,6 @@ login. Set up SPF and DKIM for the sender domain as the provider describes,
 or the mail lands in spam. Then:
 
 ```sh
-install -d -m 0700 /etc/cribbage
 install -m 0600 /dev/stdin /etc/cribbage/smtp-password <<< 'the-smtp-password'
 openssl rand -hex 32 | install -m 0600 /dev/stdin /etc/cribbage/email-key
 ```
@@ -113,12 +115,12 @@ somewhere safe, apart from the database backups.** Losing it loses the
 addresses (players can add them again), and the server refuses to start
 with a different key than the one the database was first used with.
 
-In `cribbage.service`, add the commented `-public-url`, `-smtp...`,
-`-email-key-file` and `-mail-from` flags to `ExecStart` with your values,
-uncomment both `LoadCredential=` lines, then run
+In `/etc/cribbage/cribserver.conf`, uncomment the `public-url`, `smtp...`,
+`email-key-file` and `mail-from` settings with your values; in
+`cribbage.service`, uncomment both `LoadCredential=` lines; then run
 `systemctl daemon-reload && systemctl restart cribbage`. The log says
 `email enabled`. Port 465 uses TLS from the start; other ports must offer
-STARTTLS, and the server refuses to send without it. `-public-url` must be
+STARTTLS, and the server refuses to send without it. `public-url` must be
 the HTTPS address players use, since the links point there.
 
 **By the admin.** On the server:
@@ -162,7 +164,7 @@ the Godot client) saying what the server keeps. It is written for this
 server as configured here; if you change what is kept (access logs in
 Caddy, a third-party STUN or TURN server, longer backups), update
 `server/web/static/privacy.html`. Both clients have a "Report a bug" link,
-which goes to `-report-url`.
+which goes to `report-url` in `cribserver.conf`.
 
 ## Updating
 

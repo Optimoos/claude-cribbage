@@ -1202,3 +1202,14 @@ server-side races, both able to hit real players:
 Undoing either fix brings the failures back (most batches of 100 fail);
 with both, each test passed 100 runs in a row, and the full suite passed
 twice and under the race detector.
+
+## M30: config file
+
+`cribserver -config <file>` reads settings as `name = value` lines, the
+flag names without the dash, so a deployed server's command line is just
+`-config /etc/cribbage/cribserver.conf` (`deploy/cribserver.conf`).
+Command-line flags override the file. Unknown or repeated names are
+errors, values may be quoted, and `${NAME}` expands an environment
+variable, which lets the file name systemd credentials as
+`${CREDENTIALS_DIRECTORY}/email-key`. `-print-config` writes a file with
+every setting and its help, those at their defaults commented out.

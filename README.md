@@ -13,6 +13,7 @@ go run ./cmd/cribserver -http :8080 # let other machines on the network play too
 go run ./cmd/cribserver -db ""      # in-memory only (nothing survives a restart)
 go run ./cmd/cribserver -model models-ft/best.bin   # also offer the "nn" bot
 go run ./cmd/cribserver -expert models-expert/expert.bin   # also offer the "expert" bots (three levels)
+go run ./cmd/cribserver -config cribserver.conf   # read settings from a file (see deploy/cribserver.conf)
 go run ./cmd/botclient -user alice -opponent heuristic -games 1000 -concurrent 100
 go run ./cmd/botclient -user bob -games 1000      # matchmaking: run two of these
 go run ./cmd/botclient -addr ws://localhost:8080/rtc -user carol -opponent random   # over WebRTC

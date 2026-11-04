@@ -10,32 +10,13 @@ Type=simple
 User=cribbage
 Group=cribbage
 WorkingDirectory=/var/lib/cribbage
-# HTTP and the bot TCP port listen on localhost only: Caddy serves HTTPS,
-# and only WebRTC (UDP 7778) faces the internet. Add
-# -public-ip <address> on clouds whose public IP is NATed (AWS, GCP, Azure).
-ExecStart=/opt/cribbage/cribserver \
-	-http 127.0.0.1:8080 \
-	-tcp 127.0.0.1:7777 \
-	-rtc-port 7778 -rtc-public-only \
-	-db /var/lib/cribbage/cribbage.db \
-	-backup-dir /var/lib/cribbage/backups \
-	-backup-every 24h -backup-keep 7 \
-	-expert /opt/cribbage/expert.bin \
-	-admin-socket /run/cribbage/admin.sock \
-	-stats 5m
-# Password reset emails (see README.md): add these flags to ExecStart
-# above, with your values, uncomment both LoadCredential lines, and create
+# Settings are in /etc/cribbage/cribserver.conf (deploy/cribserver.conf).
+ExecStart=/opt/cribbage/cribserver -config /etc/cribbage/cribserver.conf
+# Password reset emails (see README.md): uncomment both lines, create
 # /etc/cribbage/smtp-password and /etc/cribbage/email-key (mode 0600, owned
-# by root).
-#	-public-url https://cribbage.example.com \
-#	-smtp smtp.example.com:465 -smtp-user cribbage@example.com \
-#	-smtp-password-file %d/smtp-password \
-#	-email-key-file %d/email-key \
-#	-mail-from cribbage@example.com
+# by root), and uncomment the email settings in cribserver.conf.
 #LoadCredential=smtp-password:/etc/cribbage/smtp-password
 #LoadCredential=email-key:/etc/cribbage/email-key
-# "Report a bug" links in both clients go to -report-url (default
-# https://github.com/Optimoos); add it to ExecStart to change them.
 # /run/cribbage holds the admin socket (cribserver admin ...).
 RuntimeDirectory=cribbage
 RuntimeDirectoryMode=0700

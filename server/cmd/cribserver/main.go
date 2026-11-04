@@ -63,12 +63,31 @@ func main() {
 	emailKeyFile := flag.String("email-key-file", "", "file holding the key (64 hex digits, from openssl rand -hex 32) that encrypts email addresses in the database (or set CRIBBAGE_EMAIL_KEY); needed with -smtp or -mail-log")
 	reportURL := flag.String("report-url", "https://github.com/Optimoos", "where the clients' \"Report a bug\" links go (https)")
 	mailLog := flag.Bool("mail-log", false, "log emails, links included, instead of sending them (testing only)")
+	configPath := flag.String("config", "", "read settings from this file (name = value per line, e.g. /etc/cribbage/cribserver.conf); flags on the command line override it")
+	printConfig := flag.Bool("print-config", false, "print a config file with every setting, using these flags' values, and exit")
 	flag.Parse()
+	if flag.NArg() > 0 {
+		fmt.Fprintf(os.Stderr, "cribserver: unexpected argument %q\n", flag.Arg(0))
+		os.Exit(2)
+	}
+	if *configPath != "" {
+		if err := applyConfig(flag.CommandLine, *configPath); err != nil {
+			fmt.Fprintln(os.Stderr, "cribserver: config:", err)
+			os.Exit(2)
+		}
+	}
+	if *printConfig {
+		writeConfig(os.Stdout, flag.CommandLine)
+		return
+	}
 
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	fail := func(msg string, err error) {
 		log.Error(msg, "err", err)
 		os.Exit(1)
+	}
+	if *configPath != "" {
+		log.Info("config", "path", *configPath)
 	}
 
 	if *model != "" {
