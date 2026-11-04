@@ -9,6 +9,8 @@ import (
 	"errors"
 	"io"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/pion/webrtc/v4"
 	"google.golang.org/protobuf/encoding/protojson"
@@ -55,6 +57,8 @@ type Conn struct {
 
 	mu    sync.Mutex
 	codec Codec
+	// wrote: something was sent, so Close lingers for it.
+	wrote atomic.Bool
 }
 
 func newConn(pc *webrtc.PeerConnection, dc *webrtc.DataChannel, codec Codec, release func()) *Conn {
@@ -78,25 +82,31 @@ func newConn(pc *webrtc.PeerConnection, dc *webrtc.DataChannel, codec Codec, rel
 	return c
 }
 
-// Read decodes the next message into m.
+// Read decodes the next message into m. Messages that arrived before the
+// connection closed are still returned.
 func (c *Conn) Read(m proto.Message) error {
+	var msg inbound
 	select {
-	case msg := <-c.in:
-		c.mu.Lock()
-		if c.codec == Auto {
-			c.codec = Binary
-			if msg.text {
-				c.codec = JSON
-			}
-		}
-		c.mu.Unlock()
-		if msg.text {
-			return jsonIn.Unmarshal(msg.data, m)
-		}
-		return proto.Unmarshal(msg.data, m)
+	case msg = <-c.in:
 	case <-c.closed:
-		return io.EOF
+		select {
+		case msg = <-c.in:
+		default:
+			return io.EOF
+		}
 	}
+	c.mu.Lock()
+	if c.codec == Auto {
+		c.codec = Binary
+		if msg.text {
+			c.codec = JSON
+		}
+	}
+	c.mu.Unlock()
+	if msg.text {
+		return jsonIn.Unmarshal(msg.data, m)
+	}
+	return proto.Unmarshal(msg.data, m)
 }
 
 // Write sends m immediately.
@@ -117,24 +127,46 @@ func (c *Conn) Write(m proto.Message) error {
 		if err != nil {
 			return err
 		}
+		c.wrote.Store(true)
 		return c.dc.SendText(string(b))
 	}
 	b, err := proto.Marshal(m)
 	if err != nil {
 		return err
 	}
+	c.wrote.Store(true)
 	return c.dc.Send(b)
 }
 
 // Flush is a no-op: Write sends immediately.
 func (c *Conn) Flush() error { return nil }
 
-// Close tears down the peer connection.
+// lingerFor bounds how long Close waits for sent messages to be delivered,
+// and lingerAfter is the extra moment it gives them once sent.
+const (
+	lingerFor   = 2 * time.Second
+	lingerAfter = 300 * time.Millisecond
+)
+
+// Close tears down the peer connection, once what was written has been
+// delivered (or lingerFor has passed), so that a last message such as an
+// error before closing reaches the client.
 func (c *Conn) Close() error {
 	c.once.Do(func() {
 		close(c.closed)
 		// Closing may block briefly, so never do it from a pion callback.
 		go func() {
+			deadline := time.Now().Add(lingerFor)
+			for c.dc.BufferedAmount() > 0 && c.pc.ConnectionState() == webrtc.PeerConnectionStateConnected &&
+				time.Now().Before(deadline) {
+				time.Sleep(10 * time.Millisecond)
+			}
+			// An empty buffer means the data was handed to SCTP, not that
+			// it reached the peer: give the last packets a moment to arrive
+			// before tearing the association down.
+			if c.wrote.Load() && c.pc.ConnectionState() == webrtc.PeerConnectionStateConnected {
+				time.Sleep(lingerAfter)
+			}
 			c.pc.Close()
 			if c.release != nil {
 				c.release()

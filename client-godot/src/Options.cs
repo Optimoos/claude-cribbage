@@ -18,7 +18,8 @@ namespace Cribbage;
 //	--pace S                      wait S seconds between moves
 //	--animate                     animate while autoplaying (rapid otherwise)
 //	--screenshot FILE --after S   save the window after S seconds and quit
-//	--show history|account|forgot open that window once possible, for screenshots
+//	--show history|account|forgot|settings
+//	                              open that window once possible, for screenshots
 public sealed class Options
 {
     public string? Server, Theme;

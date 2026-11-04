@@ -120,18 +120,23 @@ public static class Style
         return b;
     }
 
-    public static Button Primary(string text, System.Action onPressed)
+    public static Button Primary(string text, System.Action onPressed) => Filled(text, onPressed, P.Accent, P.AccentInk);
+
+    // Danger is a button for something that cannot be undone.
+    public static Button Danger(string text, System.Action onPressed) => Filled(text, onPressed, P.Theirs, P.TheirsInk);
+
+    static Button Filled(string text, System.Action onPressed, Color bg, Color ink)
     {
         var b = Button(text, onPressed);
-        b.AddThemeStyleboxOverride("normal", Box(P.Accent, 6));
-        b.AddThemeStyleboxOverride("hover", Box(P.Accent.Lightened(0.15f), 6));
-        b.AddThemeStyleboxOverride("pressed", Box(P.Accent.Darkened(0.15f), 6));
-        b.AddThemeStyleboxOverride("disabled", Box(P.Accent with { A = 0.35f }, 6));
+        b.AddThemeStyleboxOverride("normal", Box(bg, 6));
+        b.AddThemeStyleboxOverride("hover", Box(bg.Lightened(0.15f), 6));
+        b.AddThemeStyleboxOverride("pressed", Box(bg.Darkened(0.15f), 6));
+        b.AddThemeStyleboxOverride("disabled", Box(bg with { A = 0.35f }, 6));
         foreach (var c in new[] { "font_color", "font_hover_color", "font_pressed_color", "font_focus_color" })
         {
-            b.AddThemeColorOverride(c, P.AccentInk);
+            b.AddThemeColorOverride(c, ink);
         }
-        b.AddThemeColorOverride("font_disabled_color", P.AccentInk with { A = 0.6f });
+        b.AddThemeColorOverride("font_disabled_color", ink with { A = 0.6f });
         return b;
     }
 

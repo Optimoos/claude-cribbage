@@ -287,3 +287,34 @@ func TestExtraChannelClosed(t *testing.T) {
 		t.Fatalf("first channel: %v, %v", &m, err)
 	}
 }
+
+// A message written just before Close still arrives.
+func TestCloseDeliversLastMessage(t *testing.T) {
+	server := newTestAPI(t)
+	ts := httptest.NewServer(server.Handler(func(c *Conn) {
+		var m pb.ClientMessage
+		if c.Read(&m) != nil {
+			return
+		}
+		big := strings.Repeat("x", 40<<10) // more than one SCTP packet
+		c.Write(&pb.ServerMessage{RequestId: m.RequestId, Body: &pb.ServerMessage_Error{Error: &pb.Error{Message: big}}})
+		c.Close()
+	}))
+	defer ts.Close()
+	url := "ws" + strings.TrimPrefix(ts.URL, "http")
+	client := newTestAPI(t)
+	for i := 0; i < 10; i++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		c, err := client.Dial(ctx, url, Binary)
+		cancel()
+		if err != nil {
+			t.Fatal(err)
+		}
+		c.Write(&pb.ClientMessage{RequestId: 9, Body: &pb.ClientMessage_Ping{Ping: &pb.Ping{}}})
+		var m pb.ServerMessage
+		if err := c.Read(&m); err != nil || m.RequestId != 9 {
+			t.Fatalf("try %d: last message lost: %v, %v", i, &m, err)
+		}
+		c.Close()
+	}
+}

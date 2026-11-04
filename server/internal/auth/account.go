@@ -69,7 +69,12 @@ func (s *Service) Account(ctx context.Context, u *store.User) (Account, error) {
 	return Account{Email: u.Email, PendingEmail: pending, MustChange: u.MustChange, EmailEnabled: s.MailEnabled()}, nil
 }
 
-// checkPassword returns the user, freshly loaded, if password is theirs.
+// CheckPassword returns the user, freshly loaded, if password is theirs,
+// else ErrInvalidCredentials. It costs a bcrypt hash.
+func (s *Service) CheckPassword(ctx context.Context, userID int64, password string) (*store.User, error) {
+	return s.checkPassword(ctx, userID, password)
+}
+
 func (s *Service) checkPassword(ctx context.Context, userID int64, password string) (*store.User, error) {
 	u, err := s.Store.UserByID(ctx, userID)
 	if err != nil {
@@ -105,10 +110,9 @@ func (s *Service) ChangePassword(ctx context.Context, userID int64, oldPassword,
 	return u, nil
 }
 
-// SetEmail sets the address for reset links, given the user's password. A
-// new address is mailed a link and used once the link is opened; an empty
-// one removes the address.
-func (s *Service) SetEmail(ctx context.Context, userID int64, password, email string) error {
+// CheckEmail reports an address SetEmail would refuse, before the
+// password is checked.
+func (s *Service) CheckEmail(email string) error {
 	email = strings.TrimSpace(email)
 	if email != "" && !s.MailEnabled() {
 		return ErrMailDisabled
@@ -116,14 +120,28 @@ func (s *Service) SetEmail(ctx context.Context, userID int64, password, email st
 	if email != "" && !mail.ValidAddress(email) {
 		return fmt.Errorf("%w: that is not an email address", ErrInvalidInput)
 	}
-	u, err := s.checkPassword(ctx, userID, password)
-	if err != nil {
+	return nil
+}
+
+// SetEmail sets the address for reset links of u, whose password the
+// caller has checked (CheckPassword). A new address is mailed a link and
+// used once the link is opened; an empty one removes the address.
+func (s *Service) SetEmail(ctx context.Context, u *store.User, email string) error {
+	if err := s.CheckEmail(email); err != nil {
 		return err
 	}
+	email = strings.TrimSpace(email)
+	userID := u.ID
 	if email == "" || strings.EqualFold(email, u.Email) {
 		// Removing the address, or keeping it: either way, drop a pending
 		// change.
-		return s.Store.SetEmail(ctx, userID, email)
+		if err := s.Store.SetEmail(ctx, userID, email); err != nil {
+			return err
+		}
+		if email == "" && u.Email != "" {
+			s.notifyChanged(ctx, u, "removed")
+		}
+		return nil
 	}
 	if !s.mailAllowed(userID, email) {
 		return ErrMailLimit
@@ -167,7 +185,33 @@ func (s *Service) VerifyEmail(ctx context.Context, token string) (int64, error) 
 	if err != nil {
 		return 0, err
 	}
-	return t.UserID, s.Store.SetEmail(ctx, t.UserID, t.Email)
+	u, err := s.Store.UserByID(ctx, t.UserID)
+	if err != nil {
+		return 0, err
+	}
+	if err := s.Store.SetEmail(ctx, t.UserID, t.Email); err != nil {
+		return 0, err
+	}
+	if u.Email != "" && !strings.EqualFold(u.Email, t.Email) {
+		s.notifyChanged(ctx, u, "changed to another address")
+	}
+	return t.UserID, nil
+}
+
+// notifyChanged tells an account's old address that it no longer gets the
+// account's reset links, so an owner whose password was taken finds out.
+func (s *Service) notifyChanged(ctx context.Context, u *store.User, what string) {
+	if s.Mailer == nil || !s.mailAllowed(u.ID, u.Email) {
+		return
+	}
+	body := fmt.Sprintf(`Hello %s,
+
+The email address for password resets on your cribbage account "%s" was %s, so this address will no longer get its reset links.
+
+If you did not do this, someone else may know your password: log in, change your password, and set your address again. If you cannot log in, ask whoever runs the server to reset your password.
+`, u.Nickname, u.Username, what)
+	// Best effort: the change is made either way.
+	_ = s.Mailer.Send(ctx, u.Email, "Your Cribbage email address was changed", body)
 }
 
 // RequestReset mails a reset link to each account with this username or
@@ -284,6 +328,66 @@ func (s *Service) AdminResetPassword(ctx context.Context, username string) (*sto
 		return nil, "", err
 	}
 	return u, temp, nil
+}
+
+// RequestDelete starts deleting u's account; the caller has checked the
+// password (CheckPassword). If the account has an email address and the
+// server can send mail, it mails a link that confirms the deletion and
+// reports mailed. Otherwise username must match the account's, and the
+// caller deletes the account at once: an emailed link is the only second
+// factor available, and an account without an address has nothing else
+// to prove.
+func (s *Service) RequestDelete(ctx context.Context, u *store.User, username string) (mailed bool, err error) {
+	userID := u.ID
+	if u.Email == "" || !s.MailEnabled() {
+		if !strings.EqualFold(strings.TrimSpace(username), u.Username) {
+			return false, fmt.Errorf("%w: type your username to confirm", ErrInvalidInput)
+		}
+		return false, nil
+	}
+	if !s.mailAllowed(userID, u.Email) {
+		return false, ErrMailLimit
+	}
+	token := RandomID(tokenBytes)
+	ttl := s.ResetTTL
+	if ttl == 0 {
+		ttl = time.Hour
+	}
+	if err := s.Store.CreateAccountToken(ctx, &store.AccountToken{
+		Token: token, UserID: userID, Kind: store.TokenDelete, Expires: time.Now().Add(ttl),
+	}); err != nil {
+		return false, err
+	}
+	body := fmt.Sprintf(`Hello %s,
+
+Someone asked to delete your cribbage account "%s". To delete it, open this link within %s and confirm:
+
+%s
+
+Deleting ends your unfinished games (you resign them), removes your account, email address and invites, and frees your username. Games you finished stay in your opponents' history, shown as "%s". This cannot be undone.
+
+If it was not you, ignore this email: nothing will change. But someone may know your password, so change it.
+`, u.Nickname, u.Username, hours(ttl), s.link("delete", token), store.DeletedNickname)
+	if err := s.Mailer.Send(ctx, u.Email, "Confirm deleting your Cribbage account", body); err != nil {
+		return false, fmt.Errorf("send delete link: %w", err)
+	}
+	return true, nil
+}
+
+// TakeDeleteToken checks a token from a deletion link, using it up, and
+// returns the user it belongs to.
+func (s *Service) TakeDeleteToken(ctx context.Context, token string) (int64, error) {
+	if !validToken(token) {
+		return 0, ErrBadToken
+	}
+	t, err := s.Store.TakeAccountToken(ctx, token, store.TokenDelete)
+	if errors.Is(err, store.ErrNotFound) {
+		return 0, ErrBadToken
+	}
+	if err != nil {
+		return 0, err
+	}
+	return t.UserID, nil
 }
 
 // TempPassword is 12 random characters in groups of four, such as

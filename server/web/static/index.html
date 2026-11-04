@@ -40,6 +40,7 @@
           <button id="logout" class="btn btn-ghost">Log out</button>
         </div>
       </div>
+      <p class="menu-links"><a data-report href="https://github.com/Optimoos" target="_blank" rel="noopener noreferrer">Report a bug</a><span aria-hidden="true">·</span><a href="privacy.html" target="_blank" rel="noopener">Privacy</a></p>
     </div>
   </div>
 </header>
@@ -64,6 +65,17 @@
       <p id="login-error" class="error"></p>
       <button type="button" id="forgot" class="link-btn">Forgot your password?</button>
     </form>
+    <p class="menu-links login-links"><a data-report href="https://github.com/Optimoos" target="_blank" rel="noopener noreferrer">Report a bug</a><span aria-hidden="true">·</span><a href="privacy.html" target="_blank" rel="noopener">Privacy</a></p>
+  </section>
+
+  <section id="delete-panel" class="panel login" hidden>
+    <h2>Delete your account?</h2>
+    <p class="muted">This can't be undone. Your unfinished games end (you resign the ones in progress), your account, email address and invites are removed, and your username becomes free for anyone. Games you finished stay in your opponents' history as &ldquo;Deleted player&rdquo;.</p>
+    <div class="row">
+      <button id="delete-confirm" class="btn btn-danger">Delete account</button>
+      <button type="button" class="btn btn-ghost" data-to-login>Keep my account</button>
+    </div>
+    <p id="delete-panel-msg" class="error"></p>
   </section>
 
   <section id="forgot-panel" class="panel login" hidden>
@@ -237,6 +249,14 @@
       <button id="email-remove" class="btn btn-ghost" value="remove">Remove address</button>
     </div>
     <p id="email-msg" class="error"></p>
+  </form>
+  <form id="delete-form">
+    <h3>Delete account</h3>
+    <p id="delete-status" class="hint"></p>
+    <label class="field">Current password <input name="password" type="password" autocomplete="current-password" required></label>
+    <label class="field" id="delete-username">Type your username to confirm <input name="username" autocomplete="off" spellcheck="false"></label>
+    <button class="btn btn-danger">Delete account</button>
+    <p id="delete-msg" class="error"></p>
   </form>
 </dialog>
 <script src="app.js"></script>

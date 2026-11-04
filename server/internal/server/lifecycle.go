@@ -27,6 +27,9 @@ func (s *Server) reserve(kind gameKind, users ...reserveFor) (release func(), er
 	s.gmu.Lock()
 	defer s.gmu.Unlock()
 	for _, u := range users {
+		if s.deleted[u.id] {
+			return nil, &limitError{"that account has been deleted"}
+		}
 		games, bots, open := s.countGames(u.id)
 		games += u.extra
 		who := "You have"

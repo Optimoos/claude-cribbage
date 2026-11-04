@@ -60,6 +60,8 @@ func main() {
 	smtpPassFile := flag.String("smtp-password-file", "", "file holding the mail server password (or set CRIBBAGE_SMTP_PASSWORD)")
 	mailFrom := flag.String("mail-from", "", "sender address for emails, e.g. cribbage@example.com")
 	mailFromName := flag.String("mail-from-name", "Cribbage", "sender name for emails")
+	emailKeyFile := flag.String("email-key-file", "", "file holding the key (64 hex digits, from openssl rand -hex 32) that encrypts email addresses in the database (or set CRIBBAGE_EMAIL_KEY); needed with -smtp or -mail-log")
+	reportURL := flag.String("report-url", "https://github.com/Optimoos", "where the clients' \"Report a bug\" links go (https)")
 	mailLog := flag.Bool("mail-log", false, "log emails, links included, instead of sending them (testing only)")
 	flag.Parse()
 
@@ -140,6 +142,31 @@ func main() {
 		authSvc.Mailer = mail.Log{Logger: log}
 		log.Warn("emails are logged, not sent (-mail-log): their links can reset passwords")
 	}
+	if sq != nil {
+		key := os.Getenv("CRIBBAGE_EMAIL_KEY")
+		if *emailKeyFile != "" {
+			b, err := os.ReadFile(*emailKeyFile)
+			if err != nil {
+				fail("email key", err)
+			}
+			key = string(b)
+		}
+		switch {
+		case key != "":
+			k, err := store.ParseEmailKey(key)
+			if err != nil {
+				fail("email key", err)
+			}
+			if err := sq.SetEmailKey(context.Background(), k); err != nil {
+				fail("email key", err)
+			}
+		case authSvc.Mailer != nil:
+			fail("email", errors.New("email addresses are stored encrypted: give -email-key-file (create one with openssl rand -hex 32)"))
+		}
+	}
+	if err := checkReportURL(*reportURL); err != nil {
+		fail("report url", err)
+	}
 
 	srv := server.New(server.Config{
 		Auth:   authSvc,
@@ -181,7 +208,9 @@ func main() {
 		mux.Handle("/rtc", rtcAPI.Handler(func(c *rtc.Conn) { srv.ServeConn(c) }))
 		mux.HandleFunc("/api/config", func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(rtcAPI.ClientConfig())
+			cfg := rtcAPI.ClientConfig()
+			cfg["reportUrl"] = *reportURL
+			json.NewEncoder(w).Encode(cfg)
 		})
 		mux.HandleFunc("/api/bots", func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
@@ -343,6 +372,15 @@ func checkPublicURL(s string) error {
 	}
 	if h := u.Hostname(); u.Scheme == "http" && h != "localhost" && !net.ParseIP(h).IsLoopback() {
 		return fmt.Errorf("-public-url %q must use https", s)
+	}
+	return nil
+}
+
+// checkReportURL accepts an https URL, which clients open in a browser.
+func checkReportURL(s string) error {
+	u, err := url.Parse(s)
+	if err != nil || u.Scheme != "https" || u.Host == "" {
+		return fmt.Errorf("-report-url %q must be an https URL", s)
 	}
 	return nil
 }

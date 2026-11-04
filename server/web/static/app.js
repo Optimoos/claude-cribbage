@@ -19,6 +19,10 @@ const narrow = () => matchMedia('(max-width: 860px)').matches;
 // Connection: WebSocket signaling, then a data channel carrying JSON.
 // ---------------------------------------------------------------------------
 
+// The protocol version this client speaks (ProtocolVersion in
+// cribbage.proto). The server refuses others with UPGRADE_REQUIRED.
+const PROTOCOL_VERSION = 1;
+
 class Connection {
   constructor(onMessage, onOpen, onClose) {
     this.onMessage = onMessage;
@@ -32,6 +36,7 @@ class Connection {
   async connect() {
     let cfg = { iceServers: [] };
     try { cfg = await (await fetch('api/config')).json(); } catch (e) { /* use defaults */ }
+    setReportLinks(cfg.reportUrl);
     const pc = new RTCPeerConnection({ iceServers: cfg.iceServers });
     const dc = pc.createDataChannel('cribbage', { ordered: true });
     const ws = new WebSocket(location.href.replace(/^http/, 'ws').replace(/[^/]*$/, 'rtc'));
@@ -47,6 +52,7 @@ class Connection {
       try { ws.close(); } catch (e) { /* ignore */ }
       try { pc.close(); } catch (e) { /* ignore */ }
       this.dc = null;
+      if (this.stopped) return; // out of date: stay down, and say so
       this.onClose();
       setTimeout(() => this.connect(), this.retry);
       this.retry = Math.min(this.retry * 2, 2000);
@@ -103,7 +109,7 @@ class Connection {
   send(body) {
     if (!this.dc || this.dc.readyState !== 'open') return 0;
     const id = ++this.nextId;
-    this.dc.send(JSON.stringify(Object.assign({ requestId: id }, body)));
+    this.dc.send(JSON.stringify(Object.assign({ requestId: id, protocolVersion: PROTOCOL_VERSION }, body)));
     return id;
   }
 }
@@ -537,10 +543,16 @@ function request(body, onReply) {
   return id;
 }
 
-// A link from an email: #reset=<token> or #verify=<token>. Read it once and
-// take it out of the address bar and history.
+// Point the "Report a bug" links where the server says.
+function setReportLinks(url) {
+  if (typeof url !== 'string' || !url.startsWith('https://')) return;
+  for (const a of document.querySelectorAll('a[data-report]')) a.href = url;
+}
+
+// A link from an email: #reset=, #verify= or #delete=<token>. Read it once
+// and take it out of the address bar and history.
 let emailLink = (() => {
-  const m = /^#(reset|verify)=([0-9a-f]{64})$/.exec(location.hash);
+  const m = /^#(reset|verify|delete)=([0-9a-f]{64})$/.exec(location.hash);
   if (location.hash) history.replaceState(null, '', location.pathname + location.search);
   return m ? { kind: m[1], token: m[2] } : null;
 })();
@@ -548,7 +560,7 @@ let emailLink = (() => {
 // A link opened in a tab already showing the client changes only the
 // fragment; load the page afresh so it is read like any other.
 addEventListener('hashchange', () => {
-  if (/^#(reset|verify)=/.test(location.hash)) location.reload();
+  if (/^#(reset|verify|delete)=/.test(location.hash)) location.reload();
 });
 
 function onOpen() {
@@ -563,6 +575,7 @@ function onOpen() {
     });
   }
   if (emailLink && emailLink.kind === 'reset') { show('reset-panel'); return; }
+  if (emailLink && emailLink.kind === 'delete') { setMsg('delete-panel-msg', ''); show('delete-panel'); return; }
   const token = localStorage.getItem('token');
   if (token) conn.send({ resume: { token } });
   else show('login');
@@ -578,7 +591,7 @@ function setStatus(text) {
 }
 
 function show(...ids) {
-  for (const id of ['login', 'lobby', 'forgot-panel', 'reset-panel']) $(id).hidden = !ids.includes(id);
+  for (const id of ['login', 'lobby', 'forgot-panel', 'reset-panel', 'delete-panel']) $(id).hidden = !ids.includes(id);
   if (!ids.includes('lobby')) { $('table').hidden = true; $('empty').hidden = true; }
 }
 
@@ -602,13 +615,14 @@ function onMessage(m) {
     if (h(m)) return;
   }
   if (m.authOk) {
+    try { sessionStorage.removeItem('upgrade-reload'); } catch (e) { /* ignore */ }
     state.me = m.authOk;
     state.account = m.authOk.account || {};
     state.history = null;
     localStorage.setItem('token', m.authOk.token);
     $('who').textContent = `Signed in as ${m.authOk.nickname} (${m.authOk.username})`;
     $('account').hidden = false;
-    $('login-error').textContent = '';
+    setMsg('login-error', '');
     show('lobby');
     renderTable();
     if (state.account.mustChangePassword) openAccount();
@@ -639,6 +653,18 @@ function onMessage(m) {
 }
 
 function onError(e) {
+  if (e.code === 'ERROR_CODE_UPGRADE_REQUIRED') {
+    // The server was updated since this page loaded: load the new client,
+    // once. If that does not help, say so instead of reloading forever.
+    conn.stopped = true;
+    let reloaded = false;
+    try { reloaded = sessionStorage.getItem('upgrade-reload') === '1'; sessionStorage.setItem('upgrade-reload', '1'); } catch (err) { /* ignore */ }
+    if (!reloaded) { location.reload(); return; }
+    setStatus('out of date');
+    setMsg('login-error', e.message);
+    show('login');
+    return;
+  }
   if (!state.me && ['ERROR_CODE_INVALID_CREDENTIALS', 'ERROR_CODE_UNAUTHENTICATED'].includes(e.code)) {
     if (localStorage.getItem('token')) {
       localStorage.removeItem('token'); // stale session; ask for a password
@@ -647,7 +673,7 @@ function onError(e) {
     }
   }
   if (!state.me) {
-    $('login-error').textContent = e.message;
+    setMsg('login-error', e.message);
     show('login');
     return;
   }
@@ -1135,8 +1161,8 @@ function renderHistory() {
 // ---------------------------------------------------------------------------
 
 function openAccount() {
-  for (const f of ['password-form', 'email-form']) $(f).reset();
-  for (const m of ['password-msg', 'email-msg']) setMsg(m, '');
+  for (const f of ['password-form', 'email-form', 'delete-form']) $(f).reset();
+  for (const m of ['password-msg', 'email-msg', 'delete-msg']) setMsg(m, '');
   renderAccount();
   $('settings').hidden = true;
   if (!$('account-dialog').open) $('account-dialog').showModal();
@@ -1159,6 +1185,13 @@ function renderAccount() {
   $('email-status').textContent = status;
   for (const el of $('email-form').querySelectorAll('input, button')) el.disabled = !a.emailEnabled;
   $('email-remove').hidden = !a.email && !a.pendingEmail;
+  $('delete-form').hidden = must;
+  const byEmail = a.emailEnabled && a.email;
+  $('delete-username').hidden = !!byEmail;
+  $('delete-form').elements.username.required = !byEmail;
+  $('delete-status').textContent = byEmail
+    ? `We'll send a link to ${a.email}; your account is deleted when you open it and confirm.`
+    : 'Your account is deleted at once. This cannot be undone.';
 }
 
 function setMsg(id, text, ok = false) {
@@ -1212,6 +1245,55 @@ $('email-form').onsubmit = ev => {
     return true;
   });
   if (!sent) setMsg('email-msg', 'Not connected.');
+};
+
+$('delete-form').onsubmit = ev => {
+  ev.preventDefault();
+  const f = new FormData(ev.target);
+  setMsg('delete-msg', '');
+  const sent = request({ deleteAccount: { password: f.get('password'), username: f.get('username') || '' } }, m => {
+    if (m.error) { setMsg('delete-msg', m.error.message); return true; }
+    ev.target.reset();
+    if (m.ack) {
+      setMsg('delete-msg', `Check ${state.account.email} for a link to confirm. It works for an hour.`, true);
+      return true;
+    }
+    accountDeleted();
+    return true;
+  });
+  if (!sent) setMsg('delete-msg', 'Not connected.');
+};
+
+// accountDeleted forgets the session; the server closes the connection,
+// and the client reconnects to the login page.
+function accountDeleted() {
+  localStorage.removeItem('token');
+  state.me = null;
+  if ($('account-dialog').open) $('account-dialog').close();
+  setMsg('login-error', 'Your account was deleted.', true);
+  show('login');
+}
+
+$('delete-confirm').onclick = () => {
+  if (!emailLink || emailLink.kind !== 'delete') return show('login');
+  const token = emailLink.token;
+  const sent = request({ confirmDeleteAccount: { token } }, m => {
+    if (m.error) {
+      setMsg('delete-panel-msg', m.error.code === 'ERROR_CODE_NOT_FOUND'
+        ? 'This link has expired or was already used. Ask for a new one from your account settings.' : m.error.message);
+      return true;
+    }
+    emailLink = null;
+    // This browser may be logged in as that account (resuming will fail
+    // and forget it) or as another one (which carries on).
+    const token = localStorage.getItem('token');
+    setMsg('login-error', `The account ${m.accountDeleted.username} was deleted.`, true);
+    toast(`The account ${m.accountDeleted.username} was deleted.`);
+    show('login');
+    if (!state.me && token) conn.send({ resume: { token } });
+    return true;
+  });
+  if (!sent) setMsg('delete-panel-msg', 'Not connected yet…');
 };
 
 $('forgot').onclick = () => {
@@ -1578,7 +1660,7 @@ $('login-form').onsubmit = ev => {
   const f = new FormData(ev.target);
   const action = ev.submitter ? ev.submitter.value : 'login';
   const creds = { username: f.get('username'), password: f.get('password') };
-  if (!conn.dc) { $('login-error').textContent = 'Not connected yet…'; return; }
+  if (!conn.dc) { setMsg('login-error', 'Not connected yet…'); return; }
   if (action === 'register') conn.send({ register: Object.assign(creds, { nickname: f.get('nickname') }) });
   else conn.send({ login: creds });
 };

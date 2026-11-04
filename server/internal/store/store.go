@@ -32,6 +32,7 @@ type User struct {
 const (
 	TokenReset  = 1 // a password reset link
 	TokenVerify = 2 // a link confirming an email address
+	TokenDelete = 3 // a link confirming that an account should be deleted
 )
 
 // AccountToken is a single-use secret sent in a link by email. Only a hash
@@ -84,7 +85,14 @@ type Store interface {
 	// PendingEmail is the address of a user's unexpired verification
 	// token, or "".
 	PendingEmail(ctx context.Context, userID int64) (string, error)
+	// DeleteUser removes a user with their sessions and account tokens.
+	// User IDs are never reused.
+	DeleteUser(ctx context.Context, userID int64) error
 }
+
+// DeletedNickname replaces a deleted user's nickname in the games they
+// played, which stay in their opponents' history.
+const DeletedNickname = "Deleted player"
 
 // Game status values; they match the wire protocol's GameStatus.
 const (
@@ -148,6 +156,10 @@ type GameStore interface {
 	// LoadGame returns an unfinished game with its actions, to wake a game
 	// that was put to sleep.
 	LoadGame(ctx context.Context, id string) (*GameWithActions, error)
+
+	// ForgetUser shows a deleted user as DeletedNickname in their games
+	// and removes their invites. Their unfinished games must have ended.
+	ForgetUser(ctx context.Context, userID int64) error
 
 	CreateInvite(ctx context.Context, inv *Invite) error
 	DeleteInvite(ctx context.Context, id string) error

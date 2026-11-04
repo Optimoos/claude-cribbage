@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"strings"
 	"time"
 
 	"cribbage/internal/server"
@@ -82,6 +83,15 @@ func handleAdmin(log *slog.Logger, c net.Conn, srv *server.Server) {
 			} else {
 				resp.OK = true
 			}
+		case "delete-account":
+			ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+			err = srv.AdminDeleteAccount(ctx, req.Username)
+			cancel()
+			if err != nil {
+				resp.Error = err.Error()
+			} else {
+				resp.OK = true
+			}
 		default:
 			resp.Error = fmt.Sprintf("unknown command %q", req.Cmd)
 		}
@@ -97,6 +107,7 @@ func handleAdmin(log *slog.Logger, c net.Conn, srv *server.Server) {
 func adminMain(args []string) {
 	fl := flag.NewFlagSet("admin", flag.ExitOnError)
 	socket := fl.String("socket", defaultAdminSocket, "the server's -admin-socket")
+	yes := fl.Bool("yes", false, "delete-account: do not ask to confirm")
 	fl.Usage = func() {
 		fmt.Fprintf(fl.Output(), `Usage: cribserver admin [-socket path] <command>
 
@@ -105,6 +116,12 @@ Commands:
         Give a player a temporary password and log them out everywhere.
         They must choose a new password when they next log in. Their
         email address is removed, in case whoever took the account set it.
+  delete-account [-yes] <username>
+        Delete a player's account: their unfinished games end (active ones
+        are resigned), their invites and account are removed, and their
+        username is free again. Finished games stay in their opponents'
+        history as "Deleted player". Asks you to type the username again
+        unless -yes is given.
 
 Run it as the server's user, e.g. sudo -u cribbage cribserver admin ...
 
@@ -121,6 +138,20 @@ Flags:
 			os.Exit(2)
 		}
 		req = adminRequest{Cmd: "reset-password", Username: fl.Arg(1)}
+	case "delete-account":
+		if fl.NArg() != 2 {
+			fl.Usage()
+			os.Exit(2)
+		}
+		req = adminRequest{Cmd: "delete-account", Username: fl.Arg(1)}
+		if !*yes {
+			fmt.Printf("This permanently deletes the account %q. Type the username again to confirm: ", req.Username)
+			line, _ := bufio.NewReader(os.Stdin).ReadString('\n')
+			if strings.TrimSpace(line) != req.Username {
+				fmt.Fprintln(os.Stderr, "Not deleted.")
+				os.Exit(1)
+			}
+		}
 	default:
 		fl.Usage()
 		os.Exit(2)
@@ -144,6 +175,10 @@ Flags:
 	if !resp.OK {
 		fmt.Fprintln(os.Stderr, "error:", resp.Error)
 		os.Exit(1)
+	}
+	if req.Cmd == "delete-account" {
+		fmt.Printf("Deleted the account %s.\n", req.Username)
+		return
 	}
 	fmt.Printf("Temporary password for %s: %s\n", req.Username, resp.Password)
 	fmt.Println("They are logged out everywhere, and must choose a new password when they log in with it.")

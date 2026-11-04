@@ -26,15 +26,20 @@ import (
 // which keeps action_log small and startup fast.
 const schema = `
 CREATE TABLE IF NOT EXISTS users (
-	id            INTEGER PRIMARY KEY,
+	id            INTEGER PRIMARY KEY AUTOINCREMENT, -- never reused: deleted users' games keep their ID
 	username      TEXT NOT NULL UNIQUE COLLATE NOCASE,
 	nickname      TEXT NOT NULL,
 	password_hash BLOB NOT NULL,
 	created       INTEGER NOT NULL,
-	email         TEXT NOT NULL DEFAULT '', -- verified, for reset links
+	email         TEXT NOT NULL DEFAULT '', -- verified, for reset links; encrypted (emailkey.go)
+	email_index   TEXT NOT NULL DEFAULT '', -- keyed hash of the address, for lookups
 	must_change   INTEGER NOT NULL DEFAULT 0 -- the admin reset the password
 );
-CREATE INDEX IF NOT EXISTS users_email ON users(email COLLATE NOCASE) WHERE email != '';
+CREATE INDEX IF NOT EXISTS users_email ON users(email_index) WHERE email_index != '';
+CREATE TABLE IF NOT EXISTS meta (
+	key   TEXT PRIMARY KEY,
+	value TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS sessions (
 	token   TEXT PRIMARY KEY,
 	user_id INTEGER NOT NULL REFERENCES users(id),
@@ -71,7 +76,7 @@ CREATE TABLE IF NOT EXISTS account_tokens (
 	token   TEXT PRIMARY KEY, -- SHA-256 of the token, like sessions
 	user_id INTEGER NOT NULL REFERENCES users(id),
 	kind    INTEGER NOT NULL,
-	email   TEXT NOT NULL,
+	email   TEXT NOT NULL, -- encrypted, like users.email
 	expires INTEGER NOT NULL,
 	UNIQUE (user_id, kind)
 );
@@ -97,6 +102,9 @@ type SQLite struct {
 	done    chan struct{}
 
 	insertAction *sql.Stmt
+
+	// emails encrypts addresses; nil until SetEmailKey, and then fixed.
+	emails *emailCrypt
 
 	// live tracks the action_log rows of each unfinished game. It is only
 	// modified after a successful commit, on the writer goroutine.
@@ -414,22 +422,81 @@ func (s *SQLite) CreateUser(ctx context.Context, u *User) error {
 }
 
 func (s *SQLite) scanUser(row *sql.Row) (*User, error) {
-	u, err := scanUserRow(row)
+	u, err := s.scanUserRow(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
 	return u, err
 }
 
-func scanUserRow(row scanner) (*User, error) {
+func (s *SQLite) scanUserRow(row scanner) (*User, error) {
 	var u User
 	var created int64
 	var must int
-	if err := row.Scan(&u.ID, &u.Username, &u.Nickname, &u.PasswordHash, &created, &u.Email, &must); err != nil {
+	var sealed string
+	if err := row.Scan(&u.ID, &u.Username, &u.Nickname, &u.PasswordHash, &created, &sealed, &must); err != nil {
 		return nil, err
 	}
 	u.Created, u.MustChange = time.UnixMilli(created), must != 0
+	u.Email = s.openEmail(u.ID, sealed)
 	return &u, nil
+}
+
+// SetEmailKey sets the key that encrypts email addresses (at least
+// MinEmailKey bytes). Call it once, before serving. The first key used
+// with a database is remembered (as a value only it decrypts), and any
+// other key is refused with ErrWrongEmailKey. Without a key, addresses
+// cannot be stored, and stored ones read as empty.
+func (s *SQLite) SetEmailKey(ctx context.Context, key []byte) error {
+	e, err := newEmailCrypt(key)
+	if err != nil {
+		return err
+	}
+	check := []byte("meta email_key_check")
+	var stored string
+	err = s.db.QueryRowContext(ctx, `SELECT value FROM meta WHERE key = 'email_key_check'`).Scan(&stored)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		err = s.write(ctx, func(tx *writeTx) error {
+			_, err := tx.Exec(`INSERT INTO meta (key, value) VALUES ('email_key_check', ?)`, e.seal(check, keyCheck))
+			return err
+		}, nil)
+		if err != nil {
+			return err
+		}
+	case err != nil:
+		return err
+	default:
+		if v, err := e.open(check, stored); err != nil || v != keyCheck {
+			return ErrWrongEmailKey
+		}
+	}
+	s.emails = e
+	return nil
+}
+
+// sealEmail encrypts a user's address; "" stays "".
+func (s *SQLite) sealEmail(userID int64, email string) (sealed, index string, err error) {
+	if email == "" {
+		return "", "", nil
+	}
+	if s.emails == nil {
+		return "", "", ErrNoEmailKey
+	}
+	return s.emails.seal(emailContext(userID), email), s.emails.index(email), nil
+}
+
+// openEmail decrypts a stored address. One that cannot be read (no key is
+// set: the server no longer sends mail) is treated as no address.
+func (s *SQLite) openEmail(userID int64, sealed string) string {
+	if sealed == "" || s.emails == nil {
+		return ""
+	}
+	email, err := s.emails.open(emailContext(userID), sealed)
+	if err != nil {
+		return ""
+	}
+	return email
 }
 
 const userCols = `id, username, nickname, password_hash, created, email, must_change`
@@ -528,8 +595,12 @@ func keepKey(token string) string {
 }
 
 func (s *SQLite) SetEmail(ctx context.Context, userID int64, email string) error {
+	sealed, index, err := s.sealEmail(userID, email)
+	if err != nil {
+		return err
+	}
 	return s.write(ctx, func(tx *writeTx) error {
-		res, err := tx.Exec(`UPDATE users SET email = ? WHERE id = ?`, email, userID)
+		res, err := tx.Exec(`UPDATE users SET email = ?, email_index = ? WHERE id = ?`, sealed, index, userID)
 		if err != nil {
 			return err
 		}
@@ -544,17 +615,17 @@ func (s *SQLite) SetEmail(ctx context.Context, userID int64, email string) error
 }
 
 func (s *SQLite) UsersByEmail(ctx context.Context, email string) ([]*User, error) {
-	if email == "" {
+	if email == "" || s.emails == nil {
 		return nil, nil
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT `+userCols+` FROM users WHERE email = ? COLLATE NOCASE AND email != '' ORDER BY id`, email)
+	rows, err := s.db.QueryContext(ctx, `SELECT `+userCols+` FROM users WHERE email_index = ? ORDER BY id`, s.emails.index(email))
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	var out []*User
 	for rows.Next() {
-		u, err := scanUserRow(rows)
+		u, err := s.scanUserRow(rows)
 		if err != nil {
 			return nil, err
 		}
@@ -564,9 +635,13 @@ func (s *SQLite) UsersByEmail(ctx context.Context, email string) ([]*User, error
 }
 
 func (s *SQLite) CreateAccountToken(ctx context.Context, t *AccountToken) error {
+	sealed, _, err := s.sealEmail(t.UserID, t.Email)
+	if err != nil {
+		return err
+	}
 	return s.write(ctx, func(tx *writeTx) error {
 		_, err := tx.Exec(`INSERT OR REPLACE INTO account_tokens (token, user_id, kind, email, expires) VALUES (?, ?, ?, ?, ?)`,
-			tokenKey(t.Token), t.UserID, t.Kind, t.Email, t.Expires.UnixMilli())
+			tokenKey(t.Token), t.UserID, t.Kind, sealed, t.Expires.UnixMilli())
 		return err
 	}, nil)
 }
@@ -588,6 +663,7 @@ func (s *SQLite) TakeAccountToken(ctx context.Context, token string, kind int) (
 		if !time.Now().Before(t.Expires) {
 			return nil // used up either way, but not usable
 		}
+		t.Email = s.openEmail(t.UserID, t.Email)
 		out = &t
 		return nil
 	}, nil)
@@ -597,6 +673,36 @@ func (s *SQLite) TakeAccountToken(ctx context.Context, token string, kind int) (
 	return out, err
 }
 
+func (s *SQLite) DeleteUser(ctx context.Context, userID int64) error {
+	return s.write(ctx, func(tx *writeTx) error {
+		for _, q := range []string{
+			`DELETE FROM sessions WHERE user_id = ?`,
+			`DELETE FROM account_tokens WHERE user_id = ?`,
+			`DELETE FROM users WHERE id = ?`,
+		} {
+			if _, err := tx.Exec(q, userID); err != nil {
+				return err
+			}
+		}
+		return nil
+	}, nil)
+}
+
+func (s *SQLite) ForgetUser(ctx context.Context, userID int64) error {
+	return s.write(ctx, func(tx *writeTx) error {
+		for _, q := range []string{
+			`UPDATE games SET seat0_nick = ? WHERE seat0_user = ?`,
+			`UPDATE games SET seat1_nick = ? WHERE seat1_user = ?`,
+		} {
+			if _, err := tx.Exec(q, DeletedNickname, userID); err != nil {
+				return err
+			}
+		}
+		_, err := tx.Exec(`DELETE FROM invites WHERE from_user = ? OR to_user = ?`, userID, userID)
+		return err
+	}, nil)
+}
+
 func (s *SQLite) PendingEmail(ctx context.Context, userID int64) (string, error) {
 	var email string
 	err := s.db.QueryRowContext(ctx, `SELECT email FROM account_tokens WHERE user_id = ? AND kind = ? AND expires > ?`,
@@ -604,7 +710,7 @@ func (s *SQLite) PendingEmail(ctx context.Context, userID int64) (string, error)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil
 	}
-	return email, err
+	return s.openEmail(userID, email), err
 }
 
 func boolInt(b bool) int {

@@ -113,9 +113,13 @@ func (c *Client) fail(err error) {
 var ErrClosed = errors.New("connection closed")
 
 // Send queues m, assigning a request id if it has none, and returns the id.
+// It sets the protocol version unless m has one.
 func (c *Client) Send(m *pb.ClientMessage) (uint32, error) {
 	if m.RequestId == 0 {
 		m.RequestId = c.nextID.Add(1)
+	}
+	if m.ProtocolVersion == 0 {
+		m.ProtocolVersion = uint32(pb.ProtocolVersion_PROTOCOL_VERSION_CURRENT)
 	}
 	select {
 	case c.out <- m:

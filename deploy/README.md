@@ -104,11 +104,18 @@ or the mail lands in spam. Then:
 ```sh
 install -d -m 0700 /etc/cribbage
 install -m 0600 /dev/stdin /etc/cribbage/smtp-password <<< 'the-smtp-password'
+openssl rand -hex 32 | install -m 0600 /dev/stdin /etc/cribbage/email-key
 ```
 
-In `cribbage.service`, add the commented `-public-url`, `-smtp...` and
-`-mail-from` flags to `ExecStart` with your values, uncomment
-`LoadCredential=`, then run
+Email addresses are stored encrypted with that key (AES-256-GCM), so the
+database and its backups reveal none without it. **Back the key up
+somewhere safe, apart from the database backups.** Losing it loses the
+addresses (players can add them again), and the server refuses to start
+with a different key than the one the database was first used with.
+
+In `cribbage.service`, add the commented `-public-url`, `-smtp...`,
+`-email-key-file` and `-mail-from` flags to `ExecStart` with your values,
+uncomment both `LoadCredential=` lines, then run
 `systemctl daemon-reload && systemctl restart cribbage`. The log says
 `email enabled`. Port 465 uses TLS from the start; other ports must offer
 STARTTLS, and the server refuses to send without it. `-public-url` must be
@@ -130,7 +137,40 @@ command talks to the running server through `/run/cribbage/admin.sock`,
 which only root and the `cribbage` user can open (`/opt/cribbage/cribserver`
 if it is not on your PATH).
 
+## Deleting accounts
+
+Players delete their own accounts under **Account**. With a confirmed
+email address, a link is mailed there (it works for an hour) and the
+account goes only when they open it and confirm; without one, they type
+their username again. Deleting ends their unfinished games (resigning those
+in progress), removes the account, its address and invites, and frees the
+username. Their finished games stay in their opponents' history as
+"Deleted player". To delete an account yourself:
+
+```sh
+sudo cribserver admin -socket /run/cribbage/admin.sock delete-account <username>
+```
+
+It asks you to type the username again (`-yes` skips that). A deleted
+account stays in database backups until they rotate out (a week by
+default), with its address encrypted.
+
+## Privacy and bug reports
+
+The web client links to a privacy page (`/privacy.html`, also linked from
+the Godot client) saying what the server keeps. It is written for this
+server as configured here; if you change what is kept (access logs in
+Caddy, a third-party STUN or TURN server, longer backups), update
+`server/web/static/privacy.html`. Both clients have a "Report a bug" link,
+which goes to `-report-url`.
+
 ## Updating
+
+Clients carry a protocol version, and the server refuses clients built for
+another one with a message to update. The web client is served by the
+server, so it reloads itself; Godot builds must be replaced. Bump
+`PROTOCOL_VERSION_CURRENT` in `proto/cribbage/v1/cribbage.proto` (and
+`PROTOCOL_VERSION` in `app.js`) when a change would break older clients.
 
 Games survive restarts: every move is committed before anyone sees it, and
 clients reconnect and resume by themselves within a few seconds.

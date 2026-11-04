@@ -26,6 +26,9 @@ func forEachStore(t *testing.T, fn func(t *testing.T, s both)) {
 			t.Fatal(err)
 		}
 		t.Cleanup(func() { s.Close() })
+		if err := s.SetEmailKey(context.Background(), testEmailKey); err != nil {
+			t.Fatal(err)
+		}
 		fn(t, s)
 	})
 }
@@ -609,6 +612,82 @@ func TestHistoryAndRecords(t *testing.T) {
 		r = recs[1]
 		if r.Opponent.Bot != "expert" || r.Opponent.UserID != 0 || r.Games != 2 || r.Wins != 1 || r.Losses != 1 || r.Unfinished != 0 {
 			t.Fatalf("record vs bot %+v", r)
+		}
+	})
+}
+
+// Deleting a user removes the account, and their finished games stay in
+// their opponent's history under DeletedNickname. IDs are not reused.
+func TestDeleteUser(t *testing.T) {
+	forEachStore(t, func(t *testing.T, s both) {
+		ctx := context.Background()
+		a := &User{Username: "alice", Nickname: "Al", PasswordHash: []byte("h"), Created: time.Now()}
+		b := &User{Username: "bob", Nickname: "Bo", PasswordHash: []byte("h"), Created: time.Now()}
+		for _, u := range []*User{b, a} { // alice has the highest ID
+			if err := s.CreateUser(ctx, u); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := s.CreateSession(ctx, "sa", a.ID, a.PasswordHash, time.Now().Add(time.Hour)); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.CreateAccountToken(ctx, &AccountToken{Token: "d", UserID: a.ID, Kind: TokenDelete, Expires: time.Now().Add(time.Hour)}); err != nil {
+			t.Fatal(err)
+		}
+		now := time.Now()
+		g := &Game{ID: "g1", Status: StatusActive, Winner: -1, Created: now, Updated: now,
+			Seats: [2]Seat{{UserID: a.ID, Nickname: "Al"}, {UserID: b.ID, Nickname: "Bo"}}}
+		if err := s.CreateGame(ctx, g); err != nil {
+			t.Fatal(err)
+		}
+		g.Status, g.Winner = StatusFinished, 1
+		if err := s.CommitGame(ctx, g.ID, g, nil); err != nil {
+			t.Fatal(err)
+		}
+		for _, inv := range []*Invite{
+			{ID: "i1", From: a.ID, FromName: "Al", To: b.ID, ToName: "Bo", Created: now, Expires: now.Add(time.Hour)},
+			{ID: "i2", From: b.ID, FromName: "Bo", Created: now, Code: "ABC-DEF", Expires: now.Add(time.Hour)},
+		} {
+			if err := s.CreateInvite(ctx, inv); err != nil {
+				t.Fatal(err)
+			}
+		}
+
+		if err := s.DeleteUser(ctx, a.ID); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.ForgetUser(ctx, a.ID); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.UserByID(ctx, a.ID); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("user still there: %v", err)
+		}
+		if _, err := s.UserByUsername(ctx, "alice"); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("username still taken: %v", err)
+		}
+		if _, err := s.SessionUser(ctx, "sa"); !errors.Is(err, ErrNotFound) {
+			t.Fatal("session survived")
+		}
+		if _, err := s.TakeAccountToken(ctx, "d", TokenDelete); !errors.Is(err, ErrNotFound) {
+			t.Fatal("token survived")
+		}
+		hist, err := s.History(ctx, b.ID, Cursor{}, 10)
+		if err != nil || len(hist) != 1 || hist[0].Seats[0].Nickname != DeletedNickname || hist[0].Seats[0].UserID != a.ID {
+			t.Fatalf("opponent's history: %+v, %v", hist, err)
+		}
+		if recs, _ := s.Records(ctx, b.ID); len(recs) != 1 || recs[0].Opponent.Nickname != DeletedNickname {
+			t.Fatalf("opponent's records: %+v", recs)
+		}
+		invs, _ := s.LoadInvites(ctx)
+		if len(invs) != 1 || invs[0].ID != "i2" {
+			t.Fatalf("invites: %+v", invs)
+		}
+		c := &User{Username: "alice", Nickname: "New", PasswordHash: []byte("h"), Created: time.Now()}
+		if err := s.CreateUser(ctx, c); err != nil {
+			t.Fatal(err)
+		}
+		if c.ID == a.ID {
+			t.Fatal("a deleted user's ID was reused")
 		}
 	})
 }

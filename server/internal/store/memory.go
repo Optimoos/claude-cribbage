@@ -44,6 +44,50 @@ func NewMemory() *Memory {
 	}
 }
 
+func (m *Memory) DeleteUser(_ context.Context, userID int64) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	u, ok := m.byID[userID]
+	if !ok {
+		return nil
+	}
+	delete(m.byID, userID)
+	delete(m.byName, strings.ToLower(u.Username))
+	for k, s := range m.sessions {
+		if s.userID == userID {
+			delete(m.sessions, k)
+		}
+	}
+	m.deleteTokens(userID)
+	return nil
+}
+
+func (m *Memory) ForgetUser(_ context.Context, userID int64) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	rename := func(seats *[2]Seat) {
+		for i := range seats {
+			if seats[i].UserID == userID {
+				seats[i].Nickname = DeletedNickname
+			}
+		}
+	}
+	for _, g := range m.games {
+		rename(&g.Game.Seats)
+	}
+	for _, list := range m.recent {
+		for i := range list {
+			rename(&list[i].Seats)
+		}
+	}
+	for id, inv := range m.invites {
+		if inv.From == userID || inv.To == userID {
+			delete(m.invites, id)
+		}
+	}
+	return nil
+}
+
 func (m *Memory) CreateInvite(_ context.Context, inv *Invite) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()

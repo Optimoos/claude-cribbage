@@ -25,6 +25,11 @@ public partial class Main : Control
     List<string> bots = new() { "heuristic", "random" };
     string statusText = "";
     bool loginShown;
+    // The server's message when it refused this client's protocol version;
+    // the connection stays closed until the server changes.
+    string upgradeMessage = "";
+    const string DefaultReportUrl = "https://github.com/Optimoos";
+    string reportUrl = DefaultReportUrl;
 
     // Everything below is rebuilt when the theme changes.
     Control ui = null!;
@@ -105,6 +110,8 @@ public partial class Main : Control
     void Connect()
     {
         conn?.Close();
+        upgradeMessage = "";
+        reportUrl = DefaultReportUrl;
         var url = settings.Server;
         if (!SafeServer(url))
         {
@@ -121,6 +128,11 @@ public partial class Main : Control
             try
             {
                 using var doc = JsonDocument.Parse(body);
+                if (doc.RootElement.TryGetProperty("reportUrl", out var r) && r.ValueKind == JsonValueKind.String &&
+                    IsHttps(r.GetString()) && url == settings.Server)
+                {
+                    reportUrl = r.GetString()!;
+                }
                 foreach (var s in doc.RootElement.GetProperty("iceServers").EnumerateArray())
                 {
                     foreach (var u in s.GetProperty("urls").EnumerateArray())
@@ -174,6 +186,51 @@ public partial class Main : Control
         }
         var b = ip.GetAddressBytes();
         return b.Length == 4 && (b[0] == 10 || (b[0] == 172 && (b[1] & 0xf0) == 16) || (b[0] == 192 && b[1] == 168));
+    }
+
+    static bool IsHttps(string? url) =>
+        System.Uri.TryCreate(url, System.UriKind.Absolute, out var u) && u.Scheme == "https";
+
+    // OpenReport opens the server's "Report a bug" page in the browser.
+    void OpenReport() => OS.ShellOpen(IsHttps(reportUrl) ? reportUrl : DefaultReportUrl);
+
+    // OpenPrivacy opens the server's privacy page in the browser, if the
+    // server is one this client would connect to.
+    void OpenPrivacy()
+    {
+        var url = HttpBase(settings.Server) + "/privacy.html";
+        if (SafeServer(settings.Server)) // https, or http to this machine or the LAN
+        {
+            OS.ShellOpen(url);
+        }
+        else if (loginShown)
+        {
+            LoginMessage("Set a secure (wss://) server to see its privacy page.");
+        }
+        else
+        {
+            Notice("Set a secure (wss://) server to see its privacy page.");
+        }
+    }
+
+    // Links makes the "Report a bug · Privacy" row; before runs first (to
+    // close a popup, say).
+    Control Links(System.Action? before = null)
+    {
+        var row = new HBoxContainer();
+        row.AddThemeConstantOverride("separation", 8);
+        LinkButton Link(string text, System.Action open)
+        {
+            var l = new LinkButton { Text = text, Underline = LinkButton.UnderlineMode.OnHover };
+            l.AddThemeColorOverride("font_color", Style.P.Accent);
+            l.Pressed += () => { before?.Invoke(); open(); };
+            row.AddChild(l);
+            return l;
+        }
+        Link("Report a bug", OpenReport);
+        row.AddChild(Style.Label("·", 14, Style.P.Muted));
+        Link("Privacy", OpenPrivacy);
+        return row;
     }
 
     static string HttpBase(string ws)
@@ -238,6 +295,11 @@ public partial class Main : Control
 
     void OnMessage(ServerMessage m)
     {
+        if (m.Error is { Code: ErrorCode.UpgradeRequired } up)
+        {
+            OnUpgradeRequired(up.Message);
+            return;
+        }
         if (TakeReply(m))
         {
             return;
@@ -246,6 +308,7 @@ public partial class Main : Control
         {
             case ServerMessage.BodyOneofCase.AuthOk:
                 me = m.AuthOk;
+                deleting = false;
                 account = me.Account ?? new Account();
                 settings.Token = me.Token;
                 settings.LastUser = me.Username;
@@ -269,6 +332,10 @@ public partial class Main : Control
                 else if (opts.Show == "account" && accountWindow == null)
                 {
                     ShowAccount();
+                }
+                else if (opts.Show == "settings")
+                {
+                    ShowSettings();
                 }
                 break;
             case ServerMessage.BodyOneofCase.Account:
@@ -307,8 +374,26 @@ public partial class Main : Control
             case ServerMessage.BodyOneofCase.MatchQueued:
                 Notice("Waiting for an opponent…");
                 break;
+            case ServerMessage.BodyOneofCase.AccountDeleted:
+                AccountDeleted();
+                break;
         }
         AutoplayMessage(m);
+    }
+
+    // OnUpgradeRequired stops reconnecting to a server that refuses this
+    // client's protocol version: only an update (or another server) helps.
+    void OnUpgradeRequired(string message)
+    {
+        upgradeMessage = message != "" ? message : "This version of Cribbage is out of date. Please update it to keep playing.";
+        conn?.Close();
+        me = null;
+        CloseAccountWindows();
+        SetStatus("out of date");
+        Notice(upgradeMessage);
+        LoginMessage(upgradeMessage);
+        ShowLogin(true);
+        RenderAll();
     }
 
     void OnError(Protocol.Error e)
@@ -317,11 +402,17 @@ public partial class Main : Control
         {
             if (e.Code is ErrorCode.InvalidCredentials or ErrorCode.Unauthenticated && settings.Token != "")
             {
+                if (deleting)
+                {
+                    AccountDeleted(); // the reply was lost as the server closed
+                    return;
+                }
                 settings.Token = ""; // stale session; ask for a password
+                CloseAccountWindows();
                 ShowLogin(true);
                 return;
             }
-            loginError.Text = e.Message;
+            LoginMessage(e.Message);
             ShowLogin(true);
             return;
         }
@@ -531,6 +622,7 @@ public partial class Main : Control
         forgot.AddThemeColorOverride("font_color", Style.P.Accent);
         forgot.Pressed += ShowForgot;
         box.AddChild(forgot);
+        box.AddChild(Links());
         return shade;
     }
 
@@ -551,10 +643,10 @@ public partial class Main : Control
         ChangeServer();
         if (conn is not { IsOpen: true })
         {
-            loginError.Text = "Not connected yet…";
+            LoginMessage(upgradeMessage != "" ? upgradeMessage : "Not connected yet…");
             return;
         }
-        loginError.Text = "";
+        LoginMessage("");
         if (register)
         {
             Send(new ClientMessage { Register = new Register { Username = userEdit.Text, Password = passEdit.Text, Nickname = nickEdit.Text } });
@@ -563,6 +655,13 @@ public partial class Main : Control
         {
             Send(new ClientMessage { Login = new Login { Username = userEdit.Text, Password = passEdit.Text } });
         }
+    }
+
+    // LoginMessage shows text under the login form: an error, or (ok) news.
+    void LoginMessage(string text, bool ok = false)
+    {
+        loginError.Text = text;
+        loginError.AddThemeColorOverride("font_color", ok ? Style.P.Accent : Style.P.Theirs);
     }
 
     void ShowLogin(bool show)
@@ -821,6 +920,7 @@ public partial class Main : Control
         {
             box.AddChild(Style.Button("Account…", () => { pop.Hide(); ShowAccount(); }));
         }
+        box.AddChild(Links(pop.Hide));
         ui.AddChild(pop);
         pop.PopupHide += pop.QueueFree;
         pop.Popup(new Rect2I((Vector2I)(GetGlobalMousePosition() + new Vector2(-40, 24)), Vector2I.Zero));

@@ -29,7 +29,7 @@ func (f fakeMailer) Send(_ context.Context, to, subject, body string) error {
 	return nil
 }
 
-var linkRE = regexp.MustCompile(`https://crib\.example/#(reset|verify)=([0-9a-f]{64})`)
+var linkRE = regexp.MustCompile(`https://crib\.example/#(reset|verify|delete)=([0-9a-f]{64})`)
 
 // link waits for a message to "to" and returns its link's kind and token.
 func (f fakeMailer) link(t *testing.T, to string) (string, string) {
@@ -243,6 +243,9 @@ func TestEmailVerifyAndReset(t *testing.T) {
 	c.next(t, func(m *pb.ServerMessage) bool { return m.GetAccount().GetEmail() != "" })
 	if acct := c.next(t, replyTo(c.send(t, setEmail("", "password123")))).GetAccount(); acct.GetEmail() != "" {
 		t.Fatalf("address not removed: %v", acct)
+	}
+	if m := <-mails; m.to != "carol@example.com" || !strings.Contains(m.body, "was removed") {
+		t.Fatalf("removal notice: %+v", m)
 	}
 	n.next(t, replyTo(n.send(t, reset("carol"))))
 	mails.none(t)

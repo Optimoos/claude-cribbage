@@ -490,6 +490,11 @@ button.card:disabled { cursor: default; }
 .login h2 { margin: 0 0 .4rem; }
 .login > .muted { margin: 0 0 1rem; }
 .error.ok { color: var(--accent); }
+.menu-links { display: flex; gap: .5rem; justify-content: center; margin: .8rem 0 0; font-size: .85rem; color: var(--muted); }
+.menu-links a { color: inherit; text-underline-offset: 2px; }
+.menu-links a:hover { color: var(--accent); }
+.login-links { margin-top: 1.2rem; }
+#delete-form .btn-danger { margin-top: .2rem; }
 .menu .row .btn { flex: 1; }
 .history-btn { margin-top: .7rem; width: 100%; }
 .history { min-width: 0; }
@@ -580,3 +585,13 @@ body.has-table.drawer-open .lobby { transform: none; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
 }
+
+/* ---- Privacy page -------------------------------------------------------- */
+.doc-page { padding: 1rem; }
+main.doc { display: block; max-width: 44rem; margin: 1rem auto 2rem; padding: 1.4rem 1.6rem; }
+.doc h1 { margin: 0 0 .3rem; }
+.doc h2 { font-size: 1.1rem; margin: 1.4rem 0 .4rem; }
+.doc ul { padding-left: 1.2rem; }
+.doc li { margin: .35rem 0; }
+.doc a { color: var(--accent); }
+@media (max-width: 560px) { main.doc { padding: 1rem; } }

@@ -207,10 +207,19 @@ limits and `-rtc-public-only`. The server stops cleanly on SIGINT or SIGTERM.
 
 **Accounts.** Players can change their password, and can add a confirmed
 email address for "Forgot your password?" links (`-smtp`, `-mail-from`,
-`-public-url`). For local testing, `-mail-log` writes emails, links
-included, to the log instead of sending them. The admin resets anyone's
-password with `cribserver admin reset-password <user>`, which reaches the
-running server through `-admin-socket`.
+`-public-url`). Addresses are stored encrypted under `-email-key-file`
+(64 hex digits: `openssl rand -hex 32`), which email needs. For local
+testing, `-mail-log` writes emails, links included, to the log instead of
+sending them. Players can delete their accounts, confirmed by an emailed
+link if they have an address. The admin resets anyone's password with
+`cribserver admin reset-password <user>` and deletes accounts with
+`cribserver admin delete-account <user>`, which reach the running server
+through `-admin-socket`.
+
+**Versions, bugs and privacy.** Every client message carries a protocol
+version; the server refuses others and tells the client to update. Both
+clients link to "Report a bug" (`-report-url`) and to a privacy page
+(`/privacy.html`).
 
 **History.** "History and records" in the lobby lists every finished game,
 50 at a time, with a record against each opponent and bot level.

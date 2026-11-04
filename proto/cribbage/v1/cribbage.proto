@@ -9,6 +9,15 @@ option go_package = "cribbage/internal/protocol/pb";
 // Suits: 0 clubs, 1 diamonds, 2 hearts, 3 spades. Ranks: 1 ace .. 13 king.
 // Seats are 0 or 1; -1 means "none".
 
+// ProtocolVersion is the version of this protocol. Clients send it in
+// every ClientMessage; a server answers a message with any other version
+// with UPGRADE_REQUIRED and closes the connection. Change CURRENT whenever
+// a change would break clients built against the previous version.
+enum ProtocolVersion {
+  PROTOCOL_VERSION_UNSPECIFIED = 0;
+  PROTOCOL_VERSION_CURRENT = 1;
+}
+
 // ---------------------------------------------------------------------------
 // Client -> server
 // ---------------------------------------------------------------------------
@@ -16,6 +25,9 @@ option go_package = "cribbage/internal/protocol/pb";
 message ClientMessage {
   // Optional client-chosen id, echoed on the direct response or error.
   uint32 request_id = 1;
+  // The ProtocolVersion the client was built for (PROTOCOL_VERSION_CURRENT
+  // as a number).
+  uint32 protocol_version = 2;
   oneof body {
     Register register = 10;
     Login login = 11;
@@ -39,6 +51,8 @@ message ClientMessage {
     RequestPasswordReset request_password_reset = 52;
     ResetPassword reset_password = 53;
     VerifyEmail verify_email = 54;
+    DeleteAccount delete_account = 55;
+    ConfirmDeleteAccount confirm_delete_account = 56;
   }
 }
 
@@ -173,6 +187,29 @@ message VerifyEmail {
   string token = 1;
 }
 
+// DeleteAccount starts deleting the user's account, given their password.
+// With a verified email address (and a server that can send mail), the
+// reply is Ack and a link is mailed to that address; the account is
+// deleted only when ConfirmDeleteAccount sends the link's token. Without
+// one, username must be typed again to confirm, and the account is deleted
+// at once: the reply is AccountDeleted, and the server closes every
+// connection of the account.
+//
+// Deleting ends the user's unfinished games (resigning active ones), drops
+// their invites, and removes the account. Finished games stay in their
+// opponents' history, with the player shown as "Deleted player".
+message DeleteAccount {
+  string password = 1;
+  string username = 2;
+}
+
+// ConfirmDeleteAccount deletes an account with the token from a
+// DeleteAccount link. The reply is AccountDeleted. NOT_FOUND if the link
+// has expired or was used. Allowed before logging in.
+message ConfirmDeleteAccount {
+  string token = 1;
+}
+
 // ---------------------------------------------------------------------------
 // Server -> client
 // ---------------------------------------------------------------------------
@@ -189,6 +226,7 @@ message ServerMessage {
     Ack ack = 23;
     Invites invites = 24; // the user's pending invites, whenever they change
     History history = 25;
+    AccountDeleted account_deleted = 26;
     Account account = 12; // the user's account settings, whenever they change
     Pong pong = 40;
   }
@@ -211,6 +249,9 @@ enum ErrorCode {
   // The admin reset this user's password: ChangePassword (or Logout) is
   // the only request allowed until a new one is chosen.
   ERROR_CODE_PASSWORD_CHANGE_REQUIRED = 13;
+  // The client was built for another ProtocolVersion; the server closes
+  // the connection after sending this.
+  ERROR_CODE_UPGRADE_REQUIRED = 14;
 }
 
 message Error {
@@ -229,6 +270,12 @@ message AuthOk {
 }
 
 // Account is what a user can change about their account.
+// AccountDeleted: the account is gone, and the server closes every
+// connection logged in as it.
+message AccountDeleted {
+  string username = 1;
+}
+
 message Account {
   string email = 1; // verified address for reset links; empty if none
   string pending_email = 2; // set but not yet verified

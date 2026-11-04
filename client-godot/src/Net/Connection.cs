@@ -129,6 +129,11 @@ public sealed class Connection
             return; // signaling failed
         }
         pc.Poll();
+        Deliver();
+        if (pc == null)
+        {
+            return; // closed by a handler
+        }
 
         // "Failed" comes long after "disconnected" when the server goes away
         // (e.g. a restart), so give up on a disconnect that lasts.
@@ -177,7 +182,13 @@ public sealed class Connection
             Fail();
             return;
         }
+    }
 
+    // Deliver reads the messages waiting on the data channel. It runs
+    // before the checks for a closed channel, so a message the server sends
+    // just before closing (such as UPGRADE_REQUIRED) is not lost.
+    void Deliver()
+    {
         while (open && dc != null && dc.GetAvailablePacketCount() > 0)
         {
             var data = dc.GetPacket();
@@ -297,8 +308,8 @@ public sealed class Connection
         retryAt = -1;
     }
 
-    // Send sends m with a fresh request id and returns it, or 0 when the
-    // connection is not open.
+    // Send sends m with a fresh request id and the protocol version, and
+    // returns the id, or 0 when the connection is not open.
     public uint Send(ClientMessage m)
     {
         if (!open || dc == null)
@@ -306,6 +317,7 @@ public sealed class Connection
             return 0;
         }
         m.RequestId = ++nextId;
+        m.ProtocolVersion = (uint)ProtocolVersion.Current;
         dc.PutPacket(m.ToByteArray());
         return m.RequestId;
     }

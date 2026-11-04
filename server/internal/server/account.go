@@ -155,24 +155,43 @@ func (s *Server) changePassword(c *Conn, id uint32, m *pb.ChangePassword) {
 	c.send(&pb.ServerMessage{RequestId: id, Body: &pb.ServerMessage_Account{Account: a}})
 }
 
+// checkPassword checks c's user's password, limited as allowPasswordCheck
+// says, holding a hashing slot only for the hash itself. On failure it has
+// sent the error.
+func (s *Server) checkPassword(ctx context.Context, c *Conn, id uint32, key string, password string) (*store.User, bool) {
+	u, err := hashed(s, ctx, func() (*store.User, error) {
+		return s.auth.CheckPassword(ctx, c.user.ID, password)
+	})
+	s.passwordChecked(c, key, err)
+	if err != nil {
+		s.sendAccountError(c, id, "check password", err)
+		return nil, false
+	}
+	return u, true
+}
+
 // setEmail checks the password and mails a link, off the reader.
 func (s *Server) setEmail(c *Conn, id uint32, m *pb.SetEmail) {
+	if err := s.auth.CheckEmail(m.Email); err != nil {
+		s.sendAccountError(c, id, "set email", err)
+		return
+	}
 	if !s.allowPasswordCheck(c, id) {
 		return
 	}
-	key, user := passwordKey(c), c.user
+	key := passwordKey(c)
 	s.background(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 		defer cancel()
-		_, err := hashed(s, ctx, func() (struct{}, error) {
-			return struct{}{}, s.auth.SetEmail(ctx, user.ID, m.Password, m.Email)
-		})
-		s.passwordChecked(c, key, err)
-		if err != nil {
+		u, ok := s.checkPassword(ctx, c, id, key, m.Password)
+		if !ok {
+			return
+		}
+		if err := s.auth.SetEmail(ctx, u, m.Email); err != nil {
 			s.sendAccountError(c, id, "set email", err)
 			return
 		}
-		if err := s.pushAccount(ctx, user.ID, reply{c, id}); err != nil {
+		if err := s.pushAccount(ctx, u.ID, reply{c, id}); err != nil {
 			s.sendAccountError(c, id, "account", err)
 		}
 	})

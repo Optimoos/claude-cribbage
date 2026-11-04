@@ -1139,3 +1139,47 @@ limit (12 of 12 on the old code); the pre-login cap; the admin reset
 removing the address. All tests and the race detector pass. The server
 started and answered under the new systemd sandbox settings (run with
 `systemd-run --user`, which cannot apply every setting).
+
+### M28: Protocol versions, account deletion, encrypted emails, privacy
+
+- **Protocol version.** Every ClientMessage carries `protocol_version`
+  (`PROTOCOL_VERSION_CURRENT`, now 1). The server answers any other with
+  UPGRADE_REQUIRED and closes the connection. The web client reloads once
+  to pick up the new page, then says it is out of date; Godot says so and
+  stops reconnecting.
+- **Deleting accounts.** DeleteAccount with the password: with a confirmed
+  address, a link (an hour, single use) is mailed and ConfirmDeleteAccount
+  deletes; without one, the username is typed again and the account goes at
+  once. Deleting marks the user so they can start nothing, closes their
+  connections, cancels open games and resigns active ones, drops invites,
+  deletes the user, sessions and tokens, and renames them "Deleted player"
+  in finished games (IDs are AUTOINCREMENT, never reused). `cribserver
+  admin delete-account <user>` does the same. A password change also
+  cancels a pending deletion link.
+- **Email addresses encrypted** (AES-256-GCM, bound to the user ID) under
+  `-email-key-file`, with a keyed hash for lookups; the first key used is
+  remembered and a different one refused. The old address is told when an
+  address is changed or removed.
+- **Mail outside the hashing slot.** Setting an email and deleting check the
+  password under the bcrypt semaphore, then send mail without holding it.
+- **Report a bug** (`-report-url`, served in `/api/config`) and **Privacy**
+  (`/privacy.html`) links in both clients.
+- **Last messages before a close arrive.** A WebRTC close now waits for
+  queued data to drain (up to 2 s) plus a moment, and the Go client's Read
+  returns queued messages before EOF. Before, an error sent just before
+  closing (and the Logout ack) was often lost.
+
+Tests: protocol version refusal; deletion by link (games resigned, invites
+dropped, opponent's history kept), without an address, and by the admin;
+notices to the old address; email encryption (nothing in the clear in the
+database file, wrong key refused, rows cannot be swapped); store deletion
+with ID reuse; last message delivered on close. The web client was driven
+end to end in headless Firefox (links, both deletion paths, used link
+refused, version mismatch reload then "out of date", privacy page at 390
+px). Godot: built, and screenshots of the login links, settings menu,
+account window with the delete section, deletion, and the upgrade message.
+
+Known flaky (before this milestone too): `TestCodecMirroring`,
+`TestRemoteIP` and now `TestCloseDeliversLastMessage` in
+`internal/transport/rtc` sometimes see a connection drop or time out on
+this machine. To be investigated next.

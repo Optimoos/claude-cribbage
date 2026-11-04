@@ -6,7 +6,7 @@ using Godot;
 
 namespace Cribbage;
 
-// Account settings, password resets and game history.
+// Account settings, password resets, account deletion and game history.
 public partial class Main
 {
     // Handlers for replies to particular requests, by request id. A handler
@@ -15,8 +15,13 @@ public partial class Main
     Account account = new();
 
     Window? accountWindow, forgotWindow, historyWindow;
-    Label? emailStatus;
+    Label? emailStatus, deleteStatus;
     Button? emailRemove;
+    Control? deleteUser;
+    // A DeleteAccount that deletes at once is waiting for its reply. The
+    // server closes the connection right after AccountDeleted, which can
+    // then be lost; a session that no longer resumes confirms the deletion.
+    bool deleting;
 
     // History, as fetched so far.
     readonly List<GameSummary> historyGames = new();
@@ -113,7 +118,7 @@ public partial class Main
     {
         accountWindow?.QueueFree();
         var must = account.MustChangePassword;
-        var box = Window("Account", 440, must ? 470 : 620, out var w, closable: !must);
+        var box = Window("Account", 440, must ? 470 : 680, out var w, closable: !must);
         accountWindow = w;
         w.TreeExiting += () => { if (accountWindow == w) accountWindow = null; };
         if (must)
@@ -172,8 +177,13 @@ public partial class Main
             box.AddChild(Heading("Email for password resets"));
             emailStatus = Wrapped("", 13, Style.P.Muted);
             box.AddChild(emailStatus);
-            var email = Field(box, "Email address");
-            var epw = Field(box, "Current password", true);
+            // The fields, with their labels, show only if the server can
+            // send email.
+            var fields = new VBoxContainer { Visible = account.EmailEnabled };
+            fields.AddThemeConstantOverride("separation", 8);
+            box.AddChild(fields);
+            var email = Field(fields, "Email address");
+            var epw = Field(fields, "Current password", true);
             var eMsg = Wrapped("", 14, Style.P.Theirs);
             void SetEmail(bool remove)
             {
@@ -211,16 +221,95 @@ public partial class Main
             row.AddChild(Style.Primary("Save", () => SetEmail(false)));
             emailRemove = Style.Button("Remove address", () => SetEmail(true));
             row.AddChild(emailRemove);
+            row.Visible = account.EmailEnabled;
             box.AddChild(row);
             box.AddChild(eMsg);
-            foreach (var c in new Control[] { email, epw, row })
-            {
-                c.Visible = account.EmailEnabled;
-            }
+
+            AddDeleteAccount(box);
         }
         RefreshAccount();
         w.PopupCentered();
         old.GrabFocus();
+    }
+
+    // DeleteByEmail reports whether deleting the account takes a confirmation
+    // link mailed to its address, rather than typing the username.
+    bool DeleteByEmail => account.EmailEnabled && account.Email != "";
+
+    void AddDeleteAccount(VBoxContainer box)
+    {
+        box.AddChild(Heading("Delete account"));
+        deleteStatus = Wrapped("", 13, Style.P.Muted);
+        box.AddChild(deleteStatus);
+        var dpw = Field(box, "Current password", true);
+        // The username field, with its label, shows only without email.
+        var userBox = new VBoxContainer();
+        userBox.AddThemeConstantOverride("separation", 8);
+        var name = Field(userBox, "Type your username to confirm");
+        box.AddChild(userBox);
+        deleteUser = userBox;
+        var dMsg = Wrapped("", 14, Style.P.Theirs);
+        void Delete()
+        {
+            dMsg.AddThemeColorOverride("font_color", Style.P.Theirs);
+            dMsg.Text = "";
+            var byEmail = DeleteByEmail;
+            var sent = Request(new ClientMessage
+            {
+                DeleteAccount = new DeleteAccount { Password = dpw.Text, Username = byEmail ? "" : name.Text.Trim() },
+            }, m =>
+            {
+                deleting = false;
+                if (m.Error != null)
+                {
+                    dMsg.AddThemeColorOverride("font_color", Style.P.Theirs);
+                    dMsg.Text = m.Error.Message;
+                    return true;
+                }
+                dpw.Text = name.Text = "";
+                if (m.Ack != null)
+                {
+                    dMsg.AddThemeColorOverride("font_color", Style.P.Accent);
+                    dMsg.Text = $"Check {account.Email} for a link to confirm. It works for an hour.";
+                    return true;
+                }
+                if (m.AccountDeleted != null)
+                {
+                    AccountDeleted();
+                    return true;
+                }
+                return false;
+            });
+            if (sent == 0)
+            {
+                dMsg.Text = "Not connected.";
+            }
+            else
+            {
+                deleting = !byEmail;
+            }
+        }
+        dpw.TextSubmitted += _ => { if (DeleteByEmail) Delete(); else name.GrabFocus(); };
+        name.TextSubmitted += _ => Delete();
+        box.AddChild(Style.Danger("Delete account", Delete));
+        box.AddChild(dMsg);
+    }
+
+    // AccountDeleted forgets the session of a deleted account and returns
+    // to the login screen. The server closes the connection; the reconnect
+    // comes up unauthenticated, since the token is gone.
+    void AccountDeleted()
+    {
+        deleting = false;
+        settings.Token = "";
+        me = null;
+        CloseAccountWindows();
+        games.Clear();
+        invites.Clear();
+        selected = null;
+        LoginMessage("Your account was deleted.", ok: true);
+        ShowLogin(true);
+        RenderAll();
     }
 
     // RefreshAccount shows the latest account settings in the open window.
@@ -252,6 +341,13 @@ public partial class Main
         if (emailRemove != null && IsInstanceValid(emailRemove))
         {
             emailRemove.Visible = a.Email != "" || a.PendingEmail != "";
+        }
+        if (deleteStatus != null && IsInstanceValid(deleteStatus) && deleteUser != null && IsInstanceValid(deleteUser))
+        {
+            deleteStatus.Text = DeleteByEmail
+                ? $"We'll send a link to {a.Email}; your account is deleted when you open it and confirm."
+                : "Your account is deleted at once. This cannot be undone.";
+            deleteUser.Visible = !DeleteByEmail;
         }
     }
 

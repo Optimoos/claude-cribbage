@@ -24,13 +24,18 @@ ExecStart=/opt/cribbage/cribserver \
 	-admin-socket /run/cribbage/admin.sock \
 	-stats 5m
 # Password reset emails (see README.md): add these flags to ExecStart
-# above, with your values, uncomment LoadCredential, and create
-# /etc/cribbage/smtp-password (mode 0600, owned by root).
+# above, with your values, uncomment both LoadCredential lines, and create
+# /etc/cribbage/smtp-password and /etc/cribbage/email-key (mode 0600, owned
+# by root).
 #	-public-url https://cribbage.example.com \
 #	-smtp smtp.example.com:465 -smtp-user cribbage@example.com \
 #	-smtp-password-file %d/smtp-password \
+#	-email-key-file %d/email-key \
 #	-mail-from cribbage@example.com
 #LoadCredential=smtp-password:/etc/cribbage/smtp-password
+#LoadCredential=email-key:/etc/cribbage/email-key
+# "Report a bug" links in both clients go to -report-url (default
+# https://github.com/Optimoos); add it to ExecStart to change them.
 # /run/cribbage holds the admin socket (cribserver admin ...).
 RuntimeDirectory=cribbage
 RuntimeDirectoryMode=0700

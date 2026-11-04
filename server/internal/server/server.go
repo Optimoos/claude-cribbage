@@ -166,6 +166,9 @@ type Server struct {
 	// userGames, so concurrent creations cannot pass the limits. Guarded
 	// by gmu.
 	reserved map[int64]reservation
+	// deleted marks users whose accounts are being or have been deleted,
+	// so they cannot start games. Guarded by gmu.
+	deleted map[int64]bool
 
 	imu                    sync.Mutex
 	inv                    invites
@@ -224,6 +227,7 @@ func New(cfg Config) *Server {
 		authLim:     lim,
 		connsByAddr: map[string]int{},
 		reserved:    map[int64]reservation{},
+		deleted:     map[int64]bool{},
 		inv:         newInvites(),
 		// Ten invites, then one every six minutes; ten code guesses, then
 		// one a minute.
@@ -235,16 +239,16 @@ func New(cfg Config) *Server {
 		// Five password checks (changing the password or email), then one
 		// a minute, so nobody can keep the bcrypt slots busy.
 		passwordChecks: ratelimit.New(5, time.Minute),
-		auth:          cfg.Auth,
-		gameStore:     cfg.Games,
-		log:           cfg.Logger,
-		outbox:        cfg.OutboxSize,
-		quit:          make(chan struct{}),
-		allConns:      map[*Conn]struct{}{},
-		games:         map[string]*game{},
-		userGames:     map[int64]map[string]*game{},
-		open:          map[string]*game{},
-		conns:         map[int64]map[*Conn]struct{}{},
+		auth:           cfg.Auth,
+		gameStore:      cfg.Games,
+		log:            cfg.Logger,
+		outbox:         cfg.OutboxSize,
+		quit:           make(chan struct{}),
+		allConns:       map[*Conn]struct{}{},
+		games:          map[string]*game{},
+		userGames:      map[int64]map[string]*game{},
+		open:           map[string]*game{},
+		conns:          map[int64]map[*Conn]struct{}{},
 	}
 	go s.sweep()
 	return s
@@ -326,6 +330,10 @@ func (s *Server) ServeConn(t Transport) {
 		if err := t.Read(m); err != nil {
 			return
 		}
+		if m.ProtocolVersion != protocolVersion {
+			s.refuseVersion(c, m)
+			return
+		}
 		// A remote client gets a few messages to log in with (each may
 		// cost a database lookup), not as many as it can send in the time
 		// it has.
@@ -335,6 +343,23 @@ func (s *Server) ServeConn(t Transport) {
 			}
 		}
 		s.handle(c, m)
+	}
+}
+
+const protocolVersion = uint32(pb.ProtocolVersion_PROTOCOL_VERSION_CURRENT)
+
+// refuseVersion tells a client built for another protocol version to
+// update, and closes the connection once that is sent.
+func (s *Server) refuseVersion(c *Conn, m *pb.ClientMessage) {
+	msg := "This version of Cribbage is out of date. Please update it to keep playing."
+	if m.ProtocolVersion > protocolVersion {
+		msg = "This server runs an older version of Cribbage than your app. Try again later."
+	}
+	c.sendError(m.RequestId, pb.ErrorCode_ERROR_CODE_UPGRADE_REQUIRED, "", msg)
+	c.drainAndClose()
+	select {
+	case <-c.done:
+	case <-time.After(5 * time.Second):
 	}
 }
 
@@ -392,6 +417,9 @@ func (s *Server) handle(c *Conn, m *pb.ClientMessage) {
 	case *pb.ClientMessage_VerifyEmail:
 		s.verifyEmail(c, id, b.VerifyEmail.Token)
 		return
+	case *pb.ClientMessage_ConfirmDeleteAccount:
+		s.confirmDeleteAccount(c, id, b.ConfirmDeleteAccount.Token)
+		return
 	case *pb.ClientMessage_Ping:
 		c.send(&pb.ServerMessage{RequestId: id, Body: &pb.ServerMessage_Pong{Pong: &pb.Pong{
 			ClientTime: b.Ping.ClientTime, ServerTime: uint64(time.Now().UnixMilli()),
@@ -425,6 +453,8 @@ func (s *Server) handle(c *Conn, m *pb.ClientMessage) {
 		s.changePassword(c, id, b.ChangePassword)
 	case *pb.ClientMessage_SetEmail:
 		s.setEmail(c, id, b.SetEmail)
+	case *pb.ClientMessage_DeleteAccount:
+		s.deleteAccount(c, id, b.DeleteAccount)
 	case *pb.ClientMessage_CreateGame:
 		s.createGame(c, id, b.CreateGame.Bot)
 	case *pb.ClientMessage_JoinGame:

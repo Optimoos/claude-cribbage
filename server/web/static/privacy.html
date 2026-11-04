@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en" data-theme="felt">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#123826">
+<title>Cribbage privacy</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%23123826'/><text x='16' y='23' font-size='20' text-anchor='middle' fill='%23e8c547'>♣</text></svg>">
+<link rel="stylesheet" href="style.css">
+</head>
+<body class="doc-page">
+<main class="panel doc">
+<h1>Privacy</h1>
+<p class="muted">What this Cribbage server keeps about you, and why. It is a small game server: it keeps as little as it can.</p>
+
+<h2>What is stored</h2>
+<ul>
+  <li><b>Your account:</b> your username, your nickname, and your password as a bcrypt hash. The password itself is never stored, and nobody running the server can read it.</li>
+  <li><b>Your email address, if you add one.</b> It is optional and used only to send you password reset links, links to confirm an address or deleting your account, and a notice if the address on your account changes. It is stored encrypted, with a key kept apart from the database, so a copy of the database or a backup does not reveal it. It is never shown to other players, shared, or used for anything else.</li>
+  <li><b>Your games:</b> the players, the moves and the result of each game, for your history and your record against each opponent.</li>
+  <li><b>Invites</b> you send or receive, until they are answered or expire.</li>
+  <li><b>Sessions:</b> while you are logged in, a random token (stored only as a hash) lets your device reconnect. It lasts 30 days, or until you log out or change your password.</li>
+</ul>
+
+<h2>What other players see</h2>
+<p>Your nickname, whether you are online, and the games you play with them. Anyone who knows your username can send you an invite. Nobody else sees your email address.</p>
+
+<h2>Your device</h2>
+<p>The web page keeps your session token and your settings (theme, sounds) in your browser's local storage. There are no cookies, ads, analytics or tracking, and the page loads nothing from other sites. The desktop app keeps the same things in its settings file.</p>
+
+<h2>Network addresses</h2>
+<p>Your IP address is used while you are connected, to connect the game (WebRTC) and to limit login attempts and connections. It is not stored with your account. It may appear in the server's logs in rare cases, such as a connection dropped for not keeping up.</p>
+
+<h2>Email</h2>
+<p>Messages are sent through an email provider, which handles the address and the message like any email it delivers.</p>
+
+<h2>How long things are kept</h2>
+<ul>
+  <li>Your account, email address and games: until you delete your account.</li>
+  <li>Links in emails: an hour (resets and deleting) or 48 hours (confirming an address), and only once.</li>
+  <li>Backups of the database are kept for up to a week, so for a week after you delete your account it may remain in a backup, with your email address encrypted.</li>
+</ul>
+
+<h2>Deleting your account</h2>
+<p>Open <b>Settings → Account…</b> and choose <b>Delete account</b>. If your account has an email address, a link is sent there and your account is deleted when you open it and confirm. Your unfinished games end (you resign those in progress), and your account, email address and invites are removed. Games you finished stay in your opponents' history, shown as &ldquo;Deleted player&rdquo;. If you can't log in, ask whoever runs the server to delete it for you.</p>
+
+<h2>Questions</h2>
+<p>Use the &ldquo;Report a bug&rdquo; link in the game, or ask whoever runs this server.</p>
+
+<p><a href="./">Back to the game</a></p>
+</main>
+</body>
+</html>
