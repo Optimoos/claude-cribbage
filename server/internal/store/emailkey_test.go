@@ -22,12 +22,15 @@ func TestEmailsEncrypted(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	u := &User{Username: "alice", Nickname: "A", PasswordHash: []byte("h"), Created: time.Now()}
+	u := &User{Username: "alice", Nickname: "A", Created: time.Now()}
 	if err := s.CreateUser(ctx, u); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.SetEmail(ctx, u.ID, "Alice@Example.com"); !errors.Is(err, ErrNoEmailKey) {
 		t.Fatalf("address stored without a key: %v", err)
+	}
+	if err := s.CreateUser(ctx, &User{Username: "x", Nickname: "X", Email: "x@example.com"}); !errors.Is(err, ErrNoEmailKey) {
+		t.Fatalf("account with an address created without a key: %v", err)
 	}
 	if err := s.SetEmailKey(ctx, testEmailKey); err != nil {
 		t.Fatal(err)
@@ -46,11 +49,19 @@ func TestEmailsEncrypted(t *testing.T) {
 	if us, err := s.UsersByEmail(ctx, "alice@EXAMPLE.com"); err != nil || len(us) != 1 || us[0].Email != "Alice@Example.com" {
 		t.Fatalf("lookup: %v, %v", us, err)
 	}
-	if p, _ := s.PendingEmail(ctx, u.ID); p != "pending@example.com" {
+	if p, _ := s.PendingEmail(ctx, u.ID, TokenVerify); p != "pending@example.com" {
 		t.Fatalf("pending %q", p)
 	}
+	// An address given when the account is created is sealed too.
+	c := &User{Username: "carol", Nickname: "C", Created: time.Now(), Email: "carol@example.com"}
+	if err := s.CreateUser(ctx, c); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := s.UserByID(ctx, c.ID); got.Email != "carol@example.com" {
+		t.Fatalf("created with %q", got.Email)
+	}
 	// A row's address cannot be moved to another user.
-	b := &User{Username: "bob", Nickname: "B", PasswordHash: []byte("h"), Created: time.Now()}
+	b := &User{Username: "bob", Nickname: "B", Created: time.Now()}
 	if err := s.CreateUser(ctx, b); err != nil {
 		t.Fatal(err)
 	}

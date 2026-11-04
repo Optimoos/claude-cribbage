@@ -1213,3 +1213,35 @@ errors, values may be quoted, and `${NAME}` expands an environment
 variable, which lets the file name systemd credentials as
 `${CREDENTIALS_DIRECTORY}/email-key`. `-print-config` writes a file with
 every setting and its help, those at their defaults commented out.
+
+## M31: no passwords
+
+Passwords are gone. People sign in with an 8-digit code emailed to them
+(or the link in the same email, which signs in the browser that opens
+it), a passkey in the web client (go-webauthn, discoverable credentials,
+tied to `-public-url`'s host), or, in the desktop app, by approving the
+code it shows from a signed-in device (`StartDeviceSignIn`,
+`ClaimDeviceSignIn`, `ApproveDevice`, `DeviceApproved`). Registering
+mails a code and creates the account only when it is used; an address may
+be shared by several accounts, and then one email carries a code per
+account. Bots sign in to bot accounts (no address) with `-bot-key-file`;
+the key cannot open a person's account. Protocol version 2.
+
+- **Codes.** A client gets a secret challenge and can try 5 codes against
+  it; an account takes 10 wrong codes from anywhere, then 1 an hour, so
+  guessing an 8-digit code would take millennia. Asking again resends the
+  same code while most of its 15 minutes are left. Codes and challenges
+  live in memory only. Emails: 10 per account and 20 per address, then 1
+  every 5 minutes; 10 code requests per IP, then 1 a minute.
+- **Sessions** last 90 days from last use (renewed at most daily).
+  "Sign out other devices" ends the rest. A connection that has started
+  signing in may stay 20 minutes instead of 30 seconds.
+- **Address changes** need a link to the current address, then one to the
+  new address, so a device left signed in cannot take the account; the old
+  address is told. `cribserver admin set-email` recovers an account: new
+  address, every session ended, passkeys removed.
+- **Mail.** Without `-smtp`, emails go to the log (testing). Without
+  `-email-key-file`, a key is created beside the database.
+- Tests: a software passkey authenticator (`internal/auth/passkeytest`)
+  drives the real WebAuthn checks; the web client's passkey code was run
+  end to end in headless Firefox against an in-page software authenticator.

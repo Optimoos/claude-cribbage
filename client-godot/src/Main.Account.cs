@@ -6,7 +6,7 @@ using Godot;
 
 namespace Cribbage;
 
-// Account settings, password resets, account deletion and game history.
+// Account settings, account deletion and game history.
 public partial class Main
 {
     // Handlers for replies to particular requests, by request id. A handler
@@ -14,10 +14,9 @@ public partial class Main
     readonly Dictionary<uint, System.Func<ServerMessage, bool>> replies = new();
     Account account = new();
 
-    Window? accountWindow, forgotWindow, historyWindow;
-    Label? emailStatus, deleteStatus;
-    Button? emailRemove;
-    Control? deleteUser;
+    Window? accountWindow, historyWindow;
+    Label? emailStatus, deleteStatus, passkeyStatus;
+    Control? deleteUser, passkeyBox;
     // A DeleteAccount that deletes at once is waiting for its reply. The
     // server closes the connection right after AccountDeleted, which can
     // then be lost; a session that no longer resumes confirms the deletion.
@@ -48,11 +47,11 @@ public partial class Main
 
     void CloseAccountWindows()
     {
-        foreach (var w in new[] { accountWindow, forgotWindow, historyWindow })
+        foreach (var w in new[] { accountWindow, historyWindow })
         {
             w?.QueueFree();
         }
-        accountWindow = forgotWindow = historyWindow = null;
+        accountWindow = historyWindow = null;
         replies.Clear();
     }
 
@@ -103,145 +102,111 @@ public partial class Main
         return l;
     }
 
-    static LineEdit Field(VBoxContainer box, string label, bool secret = false, string text = "")
+    static LineEdit Field(VBoxContainer box, string label, string text = "")
     {
         box.AddChild(Style.Label(label, 14, Style.P.Muted));
-        var e = new LineEdit { Secret = secret, Text = text, MaxLength = 254 };
+        var e = new LineEdit { Text = text, MaxLength = 254 };
         box.AddChild(e);
         return e;
     }
 
     // ---------------------------------------------------------------
-    // Account: password and email
+    // Account: email, passkeys, other devices, deletion
 
     void ShowAccount()
     {
         accountWindow?.QueueFree();
-        var must = account.MustChangePassword;
-        var box = Window("Account", 440, must ? 470 : 680, out var w, closable: !must);
+        var box = Window("Account", 460, 700, out var w);
         accountWindow = w;
         w.TreeExiting += () => { if (accountWindow == w) accountWindow = null; };
-        if (must)
-        {
-            box.AddChild(Style.Label("Account", 22, Style.P.Accent));
-            box.AddChild(Wrapped("Your password was reset. Choose a new password to carry on.", 15, Style.P.Accent));
-        }
 
-        box.AddChild(Heading("Change password"));
-        var old = Field(box, must ? "Temporary password" : "Current password", true);
-        var pw = Field(box, "New password", true);
-        var again = Field(box, "New password again", true);
-        var pwMsg = Wrapped("", 14, Style.P.Theirs);
-        void ChangePassword()
+        box.AddChild(Heading("Email"));
+        emailStatus = Wrapped("", 14);
+        box.AddChild(emailStatus);
+        var email = Field(box, "New email address");
+        var eMsg = Wrapped("", 14, Style.P.Theirs);
+        void SetEmail()
         {
-            if (pw.Text != again.Text)
+            var addr = email.Text.Trim();
+            if (addr == "")
             {
-                pwMsg.Text = "The new passwords don't match.";
+                eMsg.AddThemeColorOverride("font_color", Style.P.Theirs);
+                eMsg.Text = "Enter an email address.";
                 return;
             }
-            pwMsg.Text = "";
-            var sent = Request(new ClientMessage { ChangePassword = new ChangePassword { OldPassword = old.Text, NewPassword = pw.Text } }, m =>
+            eMsg.AddThemeColorOverride("font_color", Style.P.Accent);
+            eMsg.Text = "Sending…";
+            var sent = Request(new ClientMessage { SetEmail = new SetEmail { Email = addr } }, m =>
             {
                 if (m.Error != null)
                 {
-                    pwMsg.AddThemeColorOverride("font_color", Style.P.Theirs);
-                    pwMsg.Text = m.Error.Message;
+                    eMsg.AddThemeColorOverride("font_color", Style.P.Theirs);
+                    eMsg.Text = m.Error.Message;
                     return true;
                 }
                 account = m.Account;
-                old.Text = pw.Text = again.Text = "";
-                if (must)
-                {
-                    w.QueueFree();
-                    Notice("Password changed.");
-                    Send(new ClientMessage { ListGames = new ListGames() });
-                }
-                else
-                {
-                    pwMsg.AddThemeColorOverride("font_color", Style.P.Accent);
-                    pwMsg.Text = "Password changed. Your other devices have been logged out.";
-                }
+                email.Text = "";
+                eMsg.Text = "";
+                RefreshAccount();
                 return true;
             });
             if (sent == 0)
             {
-                pwMsg.Text = "Not connected.";
+                eMsg.AddThemeColorOverride("font_color", Style.P.Theirs);
+                eMsg.Text = "Not connected.";
             }
         }
-        again.TextSubmitted += _ => ChangePassword();
-        box.AddChild(Style.Primary("Change password", ChangePassword));
-        box.AddChild(pwMsg);
+        email.TextSubmitted += _ => SetEmail();
+        var row = new HBoxContainer();
+        row.AddThemeConstantOverride("separation", 10);
+        row.AddChild(Style.Primary("Change email", SetEmail));
+        box.AddChild(row);
+        box.AddChild(eMsg);
 
-        if (!must)
+        passkeyStatus = Wrapped("", 14);
+        passkeyBox = new VBoxContainer();
+        passkeyBox.AddThemeConstantOverride("separation", 8);
+        passkeyBox.AddChild(Heading("Passkeys"));
+        passkeyBox.AddChild(passkeyStatus);
+        box.AddChild(passkeyBox);
+
+        box.AddChild(Heading("Other devices"));
+        box.AddChild(Wrapped("Sign out everywhere else you're signed in, such as other computers, phones and browsers.", 14, Style.P.Muted));
+        var oMsg = Wrapped("", 14, Style.P.Theirs);
+        void SignOutOthers()
         {
-            box.AddChild(Heading("Email for password resets"));
-            emailStatus = Wrapped("", 13, Style.P.Muted);
-            box.AddChild(emailStatus);
-            // The fields, with their labels, show only if the server can
-            // send email.
-            var fields = new VBoxContainer { Visible = account.EmailEnabled };
-            fields.AddThemeConstantOverride("separation", 8);
-            box.AddChild(fields);
-            var email = Field(fields, "Email address");
-            var epw = Field(fields, "Current password", true);
-            var eMsg = Wrapped("", 14, Style.P.Theirs);
-            void SetEmail(bool remove)
+            var sent = Request(new ClientMessage { SignOutOthers = new SignOutOthers() }, m =>
             {
-                var addr = remove ? "" : email.Text.Trim();
-                if (!remove && addr == "")
-                {
-                    eMsg.Text = "Enter an email address.";
-                    return;
-                }
-                eMsg.AddThemeColorOverride("font_color", Style.P.Accent);
-                eMsg.Text = remove ? "" : "Sending…";
-                var sent = Request(new ClientMessage { SetEmail = new SetEmail { Email = addr, Password = epw.Text } }, m =>
-                {
-                    if (m.Error != null)
-                    {
-                        eMsg.AddThemeColorOverride("font_color", Style.P.Theirs);
-                        eMsg.Text = m.Error.Message;
-                        return true;
-                    }
-                    account = m.Account;
-                    email.Text = epw.Text = "";
-                    RefreshAccount();
-                    eMsg.Text = remove ? "Address removed." :
-                        account.PendingEmail != "" ? $"Check {account.PendingEmail} for a link to confirm it." : "Saved.";
-                    return true;
-                });
-                if (sent == 0)
-                {
-                    eMsg.Text = "Not connected.";
-                }
+                oMsg.AddThemeColorOverride("font_color", m.Error != null ? Style.P.Theirs : Style.P.Accent);
+                oMsg.Text = m.Error?.Message ?? "Your other devices are signed out.";
+                return true;
+            });
+            if (sent == 0)
+            {
+                oMsg.AddThemeColorOverride("font_color", Style.P.Theirs);
+                oMsg.Text = "Not connected.";
             }
-            epw.TextSubmitted += _ => SetEmail(false);
-            var row = new HBoxContainer();
-            row.AddThemeConstantOverride("separation", 10);
-            row.AddChild(Style.Primary("Save", () => SetEmail(false)));
-            emailRemove = Style.Button("Remove address", () => SetEmail(true));
-            row.AddChild(emailRemove);
-            row.Visible = account.EmailEnabled;
-            box.AddChild(row);
-            box.AddChild(eMsg);
-
-            AddDeleteAccount(box);
         }
+        var orow = new HBoxContainer();
+        orow.AddChild(Style.Button("Sign out other devices", SignOutOthers));
+        box.AddChild(orow);
+        box.AddChild(oMsg);
+
+        AddDeleteAccount(box);
         RefreshAccount();
         w.PopupCentered();
-        old.GrabFocus();
     }
 
     // DeleteByEmail reports whether deleting the account takes a confirmation
-    // link mailed to its address, rather than typing the username.
-    bool DeleteByEmail => account.EmailEnabled && account.Email != "";
+    // link mailed to its address, rather than typing the username (a bot,
+    // which has no address).
+    bool DeleteByEmail => account.Email != "";
 
     void AddDeleteAccount(VBoxContainer box)
     {
         box.AddChild(Heading("Delete account"));
-        deleteStatus = Wrapped("", 13, Style.P.Muted);
+        deleteStatus = Wrapped("", 14, Style.P.Muted);
         box.AddChild(deleteStatus);
-        var dpw = Field(box, "Current password", true);
         // The username field, with its label, shows only without email.
         var userBox = new VBoxContainer();
         userBox.AddThemeConstantOverride("separation", 8);
@@ -256,7 +221,7 @@ public partial class Main
             var byEmail = DeleteByEmail;
             var sent = Request(new ClientMessage
             {
-                DeleteAccount = new DeleteAccount { Password = dpw.Text, Username = byEmail ? "" : name.Text.Trim() },
+                DeleteAccount = new DeleteAccount { Username = byEmail ? "" : name.Text.Trim() },
             }, m =>
             {
                 deleting = false;
@@ -266,11 +231,11 @@ public partial class Main
                     dMsg.Text = m.Error.Message;
                     return true;
                 }
-                dpw.Text = name.Text = "";
+                name.Text = "";
                 if (m.Ack != null)
                 {
                     dMsg.AddThemeColorOverride("font_color", Style.P.Accent);
-                    dMsg.Text = $"Check {account.Email} for a link to confirm. It works for an hour.";
+                    dMsg.Text = $"We've emailed you a link to confirm, at {account.Email}. It works for an hour.";
                     return true;
                 }
                 if (m.AccountDeleted != null)
@@ -289,15 +254,16 @@ public partial class Main
                 deleting = !byEmail;
             }
         }
-        dpw.TextSubmitted += _ => { if (DeleteByEmail) Delete(); else name.GrabFocus(); };
         name.TextSubmitted += _ => Delete();
-        box.AddChild(Style.Danger("Delete account", Delete));
+        var row = new HBoxContainer();
+        row.AddChild(Style.Danger("Delete account", Delete));
+        box.AddChild(row);
         box.AddChild(dMsg);
     }
 
     // AccountDeleted forgets the session of a deleted account and returns
-    // to the login screen. The server closes the connection; the reconnect
-    // comes up unauthenticated, since the token is gone.
+    // to the sign-in screen. The server closes the connection; the
+    // reconnect comes up unauthenticated, since the token is gone.
     void AccountDeleted()
     {
         deleting = false;
@@ -320,78 +286,31 @@ public partial class Main
             return;
         }
         var a = account;
-        string status;
-        if (!a.EmailEnabled)
+        var status = a.Email != ""
+            ? $"Sign-in codes go to {a.Email}."
+            : "This account has no email address.";
+        if (a.PendingEmail != "")
         {
-            status = "This server can't send email, so whoever runs it resets forgotten passwords.";
-        }
-        else if (a.Email != "")
-        {
-            status = $"Reset links go to {a.Email}.";
-        }
-        else
-        {
-            status = "No address yet. Without one, only whoever runs the server can reset your password.";
-        }
-        if (a.EmailEnabled && a.PendingEmail != "")
-        {
-            status += $" We sent a link to {a.PendingEmail}: open it within 48 hours to start using that address.";
+            status += a.PendingNeedsCurrent && a.Email != ""
+                ? $"\n\nTo change it to {a.PendingEmail}, first open the link we sent to {a.Email}, your current address. " +
+                  $"Then we'll send a link to {a.PendingEmail}; open that one too to finish."
+                : $"\n\nAlmost done: open the link we sent to {a.PendingEmail} to start using it.";
         }
         emailStatus.Text = status;
-        if (emailRemove != null && IsInstanceValid(emailRemove))
+        if (passkeyBox != null && IsInstanceValid(passkeyBox) && passkeyStatus != null)
         {
-            emailRemove.Visible = a.Email != "" || a.PendingEmail != "";
+            passkeyBox.Visible = a.PasskeysEnabled;
+            var n = a.Passkeys.Count;
+            passkeyStatus.Text = $"Passkeys: {n} (manage them in the web version)";
         }
         if (deleteStatus != null && IsInstanceValid(deleteStatus) && deleteUser != null && IsInstanceValid(deleteUser))
         {
             deleteStatus.Text = DeleteByEmail
-                ? $"We'll send a link to {a.Email}; your account is deleted when you open it and confirm."
+                ? $"We'll email a link to {a.Email}; your account is deleted when you open it and confirm. " +
+                  "Your unfinished games end, and this cannot be undone."
                 : "Your account is deleted at once. This cannot be undone.";
             deleteUser.Visible = !DeleteByEmail;
         }
-    }
-
-    // ShowForgot asks for a reset link, which opens in a web browser.
-    void ShowForgot()
-    {
-        ChangeServer();
-        forgotWindow?.QueueFree();
-        var box = Window("Forgot your password?", 420, 330, out var w);
-        forgotWindow = w;
-        box.AddChild(Wrapped("Enter your username or email address. If the account has a confirmed email address, " +
-            "we'll send it a link to choose a new password. The link opens in your web browser; then log in here with the new password."));
-        var name = Field(box, "Username or email", text: userEdit.Text);
-        var msg = Wrapped("", 14, Style.P.Theirs);
-        void Submit()
-        {
-            var sent = Request(new ClientMessage { RequestPasswordReset = new RequestPasswordReset { Username = name.Text.Trim() } }, m =>
-            {
-                if (m.Error != null)
-                {
-                    msg.AddThemeColorOverride("font_color", Style.P.Theirs);
-                    msg.Text = m.Error.Message;
-                }
-                else
-                {
-                    msg.AddThemeColorOverride("font_color", Style.P.Accent);
-                    msg.Text = "If that account has a confirmed email address, a link is on its way. It works for an hour.";
-                }
-                return true;
-            });
-            if (sent == 0)
-            {
-                msg.Text = "Not connected yet…";
-            }
-        }
-        name.TextSubmitted += _ => Submit();
-        var row = new HBoxContainer();
-        row.AddThemeConstantOverride("separation", 10);
-        row.AddChild(Style.Primary("Send link", Submit));
-        row.AddChild(Style.Button("Close", () => w.QueueFree()));
-        box.AddChild(row);
-        box.AddChild(msg);
-        w.PopupCentered();
-        name.GrabFocus();
     }
 
     // ---------------------------------------------------------------

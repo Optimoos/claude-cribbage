@@ -45,7 +45,7 @@ func TestWebRTCGameJSON(t *testing.T) {
 	}
 	tc := &tclient{Client: c, msgs: make(chan *pb.ServerMessage, 1024)}
 	t.Cleanup(func() { c.Close() })
-	if tc.auth, err = c.Login("webby", "password123", "Web Player", true); err != nil {
+	if tc.auth, err = c.BotLogin("webby", "Web Player", testBotKey); err != nil {
 		t.Fatal(err)
 	}
 	tc.startReading()
@@ -81,7 +81,7 @@ func TestMixedTransports(t *testing.T) {
 		{Addr: url, Username: "rtcsolo", Opponent: "heuristic"},
 	}
 	for i, cfg := range cfgs {
-		cfg.Password, cfg.Bot, cfg.Concurrent, cfg.Games = "password123", "heuristic", 50, 300
+		cfg.Key, cfg.Bot, cfg.Concurrent, cfg.Games = testBotKey, "heuristic", 50, 300
 		wg.Add(1)
 		go func(i int, cfg botclient.Config) {
 			defer wg.Done()

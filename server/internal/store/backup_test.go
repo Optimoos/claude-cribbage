@@ -16,7 +16,7 @@ func TestBackupTo(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close()
-	if err := s.CreateUser(ctx, &User{Username: "alice", Nickname: "A", PasswordHash: []byte("h"), Created: time.Now()}); err != nil {
+	if err := s.CreateUser(ctx, &User{Username: "alice", Nickname: "A", Created: time.Now()}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -59,7 +59,7 @@ func TestBackupTo(t *testing.T) {
 	}
 
 	// The live database still takes writes.
-	if err := s.CreateUser(ctx, &User{Username: "bob", Nickname: "B", PasswordHash: []byte("h"), Created: time.Now()}); err != nil {
+	if err := s.CreateUser(ctx, &User{Username: "bob", Nickname: "B", Created: time.Now()}); err != nil {
 		t.Fatal(err)
 	}
 }

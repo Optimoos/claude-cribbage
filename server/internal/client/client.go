@@ -183,16 +183,12 @@ func (c *Client) call(m *pb.ClientMessage) (*pb.ServerMessage, error) {
 	}
 }
 
-// Login authenticates with a username and password. If register is true
-// and the account does not exist, it is created.
-func (c *Client) Login(username, password, nickname string, register bool) (*pb.AuthOk, error) {
-	r, err := c.call(&pb.ClientMessage{Body: &pb.ClientMessage_Login{Login: &pb.Login{Username: username, Password: password}}})
-	var se ServerError
-	if register && errors.As(err, &se) && se.Code == pb.ErrorCode_ERROR_CODE_INVALID_CREDENTIALS {
-		r, err = c.call(&pb.ClientMessage{Body: &pb.ClientMessage_Register{Register: &pb.Register{
-			Username: username, Password: password, Nickname: nickname,
-		}}})
-	}
+// BotLogin signs in to a bot account with the server's bot key, creating
+// the account (with nickname, or the username if empty) on first use.
+func (c *Client) BotLogin(username, nickname, key string) (*pb.AuthOk, error) {
+	r, err := c.call(&pb.ClientMessage{Body: &pb.ClientMessage_BotLogin{BotLogin: &pb.BotLogin{
+		Username: username, Nickname: nickname, Key: key,
+	}}})
 	if err != nil {
 		return nil, err
 	}

@@ -21,7 +21,7 @@ const narrow = () => matchMedia('(max-width: 860px)').matches;
 
 // The protocol version this client speaks (ProtocolVersion in
 // cribbage.proto). The server refuses others with UPGRADE_REQUIRED.
-const PROTOCOL_VERSION = 1;
+const PROTOCOL_VERSION = 2;
 
 class Connection {
   constructor(onMessage, onOpen, onClose) {
@@ -37,6 +37,8 @@ class Connection {
     let cfg = { iceServers: [] };
     try { cfg = await (await fetch('api/config')).json(); } catch (e) { /* use defaults */ }
     setReportLinks(cfg.reportUrl);
+    state.passkeysOffered = cfg.passkeys === true;
+    $('passkey-signin').hidden = !passkeysUsable();
     const pc = new RTCPeerConnection({ iceServers: cfg.iceServers });
     const dc = pc.createDataChannel('cribbage', { ordered: true });
     const ws = new WebSocket(location.href.replace(/^http/, 'ws').replace(/[^/]*$/, 'rtc'));
@@ -476,7 +478,9 @@ const state = {
   invites: [],        // pending invites to and from me
   selected: null,
   pane: null,         // 'history' while the history replaces the table
-  account: null,      // Account: email settings, must change password
+  account: null,      // Account: email address, passkeys
+  passkeysOffered: false, // the server offers passkeys (api/config)
+  signin: null,       // a sign-in waiting for its emailed code: { challenge, name, register }
   history: null,      // {games, next, records, total} once fetched
   picked: new Set(),  // cards selected for discard
   logShown: { id: null, n: 0 },
@@ -549,36 +553,48 @@ function setReportLinks(url) {
   for (const a of document.querySelectorAll('a[data-report]')) a.href = url;
 }
 
-// A link from an email: #reset=, #verify= or #delete=<token>. Read it once
-// and take it out of the address bar and history.
-let emailLink = (() => {
-  const m = /^#(reset|verify|delete)=([0-9a-f]{64})$/.exec(location.hash);
+// A link from an email (#signin=, #verify=, #change= or #delete=<token>),
+// or one to approve a device (#device=<code>). Read it once and take it
+// out of the address bar and history.
+let emailLink = null;
+let pendingDevice = null; // a device code to approve once signed in
+(() => {
+  const m = /^#(signin|verify|change|delete)=([0-9a-f]{64})$/.exec(location.hash);
+  const d = /^#device=([A-Za-z]{4}-?[A-Za-z]{4})$/.exec(location.hash);
   if (location.hash) history.replaceState(null, '', location.pathname + location.search);
-  return m ? { kind: m[1], token: m[2] } : null;
+  if (m) emailLink = { kind: m[1], token: m[2] };
+  if (d) pendingDevice = d[1].toUpperCase();
 })();
 
 // A link opened in a tab already showing the client changes only the
 // fragment; load the page afresh so it is read like any other.
 addEventListener('hashchange', () => {
-  if (/^#(reset|verify|delete)=/.test(location.hash)) location.reload();
+  if (/^#(signin|verify|change|delete|device)=/.test(location.hash)) location.reload();
 });
 
 function onOpen() {
   setStatus('online');
   state.me = null; // each connection authenticates afresh
-  if (emailLink && emailLink.kind === 'verify') {
-    const token = emailLink.token;
+  if (emailLink && (emailLink.kind === 'verify' || emailLink.kind === 'change')) {
+    const { kind, token } = emailLink;
     emailLink = null;
     request({ verifyEmail: { token } }, m => {
-      toast(m.ack ? 'Email address confirmed. Reset links will go there.' : m.error.message);
+      if (m.error) toast(m.error.message);
+      else toast(kind === 'change' ? 'Confirmed. Now open the link we sent to your new address.' : 'Email address changed. Sign-in codes will go there now.');
       return true;
     });
   }
-  if (emailLink && emailLink.kind === 'reset') { show('reset-panel'); return; }
+  if (emailLink && emailLink.kind === 'signin') { setMsg('link-msg', ''); show('link-panel'); return; }
   if (emailLink && emailLink.kind === 'delete') { setMsg('delete-panel-msg', ''); show('delete-panel'); return; }
   const token = localStorage.getItem('token');
   if (token) conn.send({ resume: { token } });
-  else show('login');
+  else if ($('register-panel').hidden && $('code-panel').hidden) showLogin();
+}
+
+// showLogin shows the sign-in page, saying why if a device is waiting.
+function showLogin() {
+  if (pendingDevice) setMsg('login-error', `Sign in to approve the device showing ${pendingDevice.slice(0, 4)}-${pendingDevice.slice(-4)}.`, true);
+  show('login');
 }
 
 function onClose() {
@@ -591,7 +607,7 @@ function setStatus(text) {
 }
 
 function show(...ids) {
-  for (const id of ['login', 'lobby', 'forgot-panel', 'reset-panel', 'delete-panel']) $(id).hidden = !ids.includes(id);
+  for (const id of ['login', 'lobby', 'register-panel', 'code-panel', 'link-panel', 'delete-panel']) $(id).hidden = !ids.includes(id);
   if (!ids.includes('lobby')) { $('table').hidden = true; $('empty').hidden = true; }
 }
 
@@ -619,14 +635,16 @@ function onMessage(m) {
     state.me = m.authOk;
     state.account = m.authOk.account || {};
     state.history = null;
+    state.signin = null;
+    emailLink = null;
     localStorage.setItem('token', m.authOk.token);
     $('who').textContent = `Signed in as ${m.authOk.nickname} (${m.authOk.username})`;
     $('account').hidden = false;
     setMsg('login-error', '');
     show('lobby');
     renderTable();
-    if (state.account.mustChangePassword) openAccount();
-    else conn.send({ listGames: {} });
+    conn.send({ listGames: {} });
+    if (pendingDevice) openDeviceDialog(pendingDevice);
   } else if (m.account) {
     state.account = m.account;
     renderAccount();
@@ -667,19 +685,14 @@ function onError(e) {
   }
   if (!state.me && ['ERROR_CODE_INVALID_CREDENTIALS', 'ERROR_CODE_UNAUTHENTICATED'].includes(e.code)) {
     if (localStorage.getItem('token')) {
-      localStorage.removeItem('token'); // stale session; ask for a password
-      show('login');
+      localStorage.removeItem('token'); // stale session: sign in again
+      showLogin();
       return;
     }
   }
   if (!state.me) {
     setMsg('login-error', e.message);
     show('login');
-    return;
-  }
-  if (e.code === 'ERROR_CODE_PASSWORD_CHANGE_REQUIRED') {
-    state.account = Object.assign({}, state.account, { mustChangePassword: true });
-    openAccount();
     return;
   }
   notice(e.message);
@@ -1157,40 +1170,263 @@ function renderHistory() {
 }
 
 // ---------------------------------------------------------------------------
-// Account: password, email, and password resets
+// Signing in: emailed codes and links, passkeys, approving other devices
+// ---------------------------------------------------------------------------
+
+// formatCode shows a typed code as "1234 5678".
+function formatCode(s) {
+  const d = String(s).replace(/\D/g, '');
+  return d.length > 4 ? d.slice(0, 4) + ' ' + d.slice(4) : d;
+}
+
+// startCode shows the code page for a sign-in the server has started.
+function startCode(started, name, register) {
+  state.signin = { challenge: started.challenge, name, register };
+  const mins = Math.round((started.expiresIn || 900) / 60);
+  $('code-hint').textContent = register
+    ? `We sent a code to ${register.email}. Enter it within ${mins} minutes to finish creating your account, or open the link in the email.`
+    : `If “${name}” has an account, we sent a code to its email address. Enter it within ${mins} minutes, or open the link in the email on this device.`;
+  $('signin-code-form').reset();
+  setMsg('signin-code-msg', '');
+  show('code-panel');
+  $('signin-code-form').elements.code.focus();
+}
+
+$('signin-form').onsubmit = ev => {
+  ev.preventDefault();
+  const name = String(new FormData(ev.target).get('name')).trim();
+  if (!name) return;
+  setMsg('login-error', '');
+  const sent = request({ requestSignIn: { name } }, m => {
+    if (m.error) { setMsg('login-error', m.error.message); return true; }
+    startCode(m.signInStarted, name, null);
+    return true;
+  });
+  if (!sent) setMsg('login-error', 'Not connected yet…');
+};
+
+$('to-register').onclick = () => {
+  const name = String($('signin-form').elements.name.value).trim();
+  const f = $('register-form');
+  f.reset();
+  if (name.includes('@')) f.elements.email.value = name;
+  else f.elements.username.value = name;
+  setMsg('register-msg', '');
+  show('register-panel');
+};
+
+$('register-form').onsubmit = ev => {
+  ev.preventDefault();
+  const f = new FormData(ev.target);
+  const reg = { username: String(f.get('username')).trim(), nickname: String(f.get('nickname')).trim(), email: String(f.get('email')).trim() };
+  setMsg('register-msg', 'Sending…', true);
+  const sent = request({ register: reg }, m => {
+    if (m.error) {
+      setMsg('register-msg', m.error.code === 'ERROR_CODE_USERNAME_TAKEN' ? 'That username is taken. Try another.' : m.error.message);
+      return true;
+    }
+    startCode(m.signInStarted, reg.username, reg);
+    return true;
+  });
+  if (!sent) setMsg('register-msg', 'Not connected yet…');
+};
+
+$('signin-code-form').elements.code.addEventListener('input', e => {
+  const el = e.target;
+  if (/^[\d\s-]*$/.test(el.value)) el.value = formatCode(el.value);
+});
+
+$('signin-code-form').onsubmit = ev => {
+  ev.preventDefault();
+  if (!state.signin) return showLogin();
+  const code = String(new FormData(ev.target).get('code'));
+  setMsg('signin-code-msg', '');
+  const sent = request({ enterCode: { challenge: state.signin.challenge, code } }, m => {
+    if (!m.error) return false; // AuthOk signs in as usual
+    if (m.error.code === 'ERROR_CODE_NOT_FOUND') {
+      setMsg('signin-code-msg', 'That code has expired or had too many wrong tries. Choose “Send again” for a new one.');
+    } else if (m.error.code === 'ERROR_CODE_USERNAME_TAKEN') {
+      setMsg('signin-code-msg', 'Someone took that username meanwhile. Go back and choose another.');
+    } else {
+      setMsg('signin-code-msg', m.error.message);
+    }
+    return true;
+  });
+  if (!sent) setMsg('signin-code-msg', 'Not connected yet…');
+};
+
+$('code-resend').onclick = () => {
+  const s = state.signin;
+  if (!s) return showLogin();
+  const body = s.register ? { register: s.register } : { requestSignIn: { name: s.name } };
+  const sent = request(body, m => {
+    if (m.error) { setMsg('signin-code-msg', m.error.message); return true; }
+    startCode(m.signInStarted, s.name, s.register);
+    setMsg('signin-code-msg', 'Sent. Check your email (and its spam folder).', true);
+    return true;
+  });
+  if (!sent) setMsg('signin-code-msg', 'Not connected yet…');
+};
+
+$('link-confirm').onclick = () => {
+  if (!emailLink || emailLink.kind !== 'signin') return showLogin();
+  const sent = request({ useSignInLink: { token: emailLink.token } }, m => {
+    if (!m.error) return false;
+    emailLink = null;
+    setMsg('login-error', m.error.code === 'ERROR_CODE_NOT_FOUND'
+      ? 'That sign-in link has expired or was already used. Ask for a new code below.' : m.error.message);
+    showLogin();
+    return true;
+  });
+  if (!sent) setMsg('link-msg', 'Not connected yet…');
+};
+
+for (const b of document.querySelectorAll('[data-to-login]')) {
+  b.onclick = () => {
+    emailLink = null;
+    state.signin = null;
+    setMsg('login-error', '');
+    showLogin();
+    const token = localStorage.getItem('token');
+    if (token && !state.me) conn.send({ resume: { token } });
+  };
+}
+
+// Passkeys. The server speaks WebAuthn's JSON form (binary values in
+// base64url); browsers want ArrayBuffers.
+const b64u = {
+  decode(s) {
+    const t = s.replace(/-/g, '+').replace(/_/g, '/') + '='.repeat((4 - s.length % 4) % 4);
+    return Uint8Array.from(atob(t), c => c.charCodeAt(0)).buffer;
+  },
+  encode(buf) {
+    let bin = '';
+    for (const b of new Uint8Array(buf)) bin += String.fromCharCode(b);
+    return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  },
+};
+
+function passkeysUsable() {
+  return state.passkeysOffered && !!window.PublicKeyCredential && !!navigator.credentials;
+}
+
+function creationOptions(pk) {
+  if (PublicKeyCredential.parseCreationOptionsFromJSON) return PublicKeyCredential.parseCreationOptionsFromJSON(pk);
+  return Object.assign({}, pk, {
+    challenge: b64u.decode(pk.challenge),
+    user: Object.assign({}, pk.user, { id: b64u.decode(pk.user.id) }),
+    excludeCredentials: (pk.excludeCredentials || []).map(c => Object.assign({}, c, { id: b64u.decode(c.id) })),
+  });
+}
+
+function requestOptions(pk) {
+  if (PublicKeyCredential.parseRequestOptionsFromJSON) return PublicKeyCredential.parseRequestOptionsFromJSON(pk);
+  return Object.assign({}, pk, {
+    challenge: b64u.decode(pk.challenge),
+    allowCredentials: (pk.allowCredentials || []).map(c => Object.assign({}, c, { id: b64u.decode(c.id) })),
+  });
+}
+
+function credentialJSON(cred) {
+  if (typeof cred.toJSON === 'function') return JSON.stringify(cred.toJSON());
+  const r = cred.response;
+  const response = { clientDataJSON: b64u.encode(r.clientDataJSON) };
+  if (r.attestationObject) {
+    response.attestationObject = b64u.encode(r.attestationObject);
+    if (r.getTransports) response.transports = r.getTransports();
+  } else {
+    response.authenticatorData = b64u.encode(r.authenticatorData);
+    response.signature = b64u.encode(r.signature);
+    if (r.userHandle) response.userHandle = b64u.encode(r.userHandle);
+  }
+  return JSON.stringify({
+    id: cred.id, rawId: b64u.encode(cred.rawId), type: cred.type,
+    authenticatorAttachment: cred.authenticatorAttachment || undefined,
+    clientExtensionResults: cred.getClientExtensionResults ? cred.getClientExtensionResults() : {},
+    response,
+  });
+}
+
+// passkeyError explains a failed browser ceremony, or nothing if the user
+// just cancelled it.
+function passkeyError(e) {
+  if (e && (e.name === 'NotAllowedError' || e.name === 'AbortError')) return '';
+  if (e && e.name === 'InvalidStateError') return 'This device already has a passkey for your account.';
+  return 'Your browser could not use a passkey' + (e && e.message ? `: ${e.message}` : '.');
+}
+
+$('passkey-signin').onclick = () => {
+  setMsg('login-error', '');
+  const sent = request({ passkeySignInBegin: {} }, m => {
+    if (m.error) { setMsg('login-error', m.error.message); return true; }
+    const opts = JSON.parse(m.passkeyOptions.optionsJson);
+    navigator.credentials.get({ publicKey: requestOptions(opts.publicKey) }).then(cred => {
+      request({ passkeySignInFinish: { credentialJson: credentialJSON(cred) } }, r => {
+        if (!r.error) return false;
+        setMsg('login-error', r.error.code === 'ERROR_CODE_INVALID_CREDENTIALS'
+          ? "That passkey didn't work here. It may have been removed: sign in with a code instead." : r.error.message);
+        return true;
+      });
+    }).catch(e => setMsg('login-error', passkeyError(e)));
+    return true;
+  });
+  if (!sent) setMsg('login-error', 'Not connected yet…');
+};
+
+// ---------------------------------------------------------------------------
+// Account: email address, passkeys, devices, deleting
 // ---------------------------------------------------------------------------
 
 function openAccount() {
-  for (const f of ['password-form', 'email-form', 'delete-form']) $(f).reset();
-  for (const m of ['password-msg', 'email-msg', 'delete-msg']) setMsg(m, '');
+  for (const f of ['email-form', 'passkey-form', 'device-form', 'delete-form']) $(f).reset();
+  for (const m of ['email-msg', 'passkey-msg', 'device-msg', 'sign-out-msg', 'delete-msg']) setMsg(m, '');
   renderAccount();
   $('settings').hidden = true;
   if (!$('account-dialog').open) $('account-dialog').showModal();
 }
 
+function shortDate(ms) {
+  return new Date(Number(ms)).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+}
+
 function renderAccount() {
   const a = state.account || {};
-  const must = !!a.mustChangePassword;
-  $('must-change').hidden = !must;
-  $('account-close').hidden = must;
-  $('email-form').hidden = must;
-  $('old-label').textContent = must ? 'Temporary password' : 'Current password';
-  let status;
-  if (!a.emailEnabled) status = "This server can't send email, so whoever runs it resets forgotten passwords.";
-  else if (a.email) status = `Reset links go to ${a.email}.`;
-  else status = 'No address yet. Without one, only whoever runs the server can reset your password.';
-  if (a.emailEnabled && a.pendingEmail) {
-    status += ` We sent a link to ${a.pendingEmail}: open it within 48 hours to start using that address.`;
+  let status = a.email ? `Sign-in codes go to ${a.email}.` : 'This account has no email address.';
+  if (a.pendingEmail) {
+    status += a.pendingNeedsCurrent
+      ? ` To change it to ${a.pendingEmail}, open the link we sent to ${a.email || 'your current address'}, then the one we send to the new address.`
+      : ` We sent a link to ${a.pendingEmail}: open it to start using that address.`;
   }
   $('email-status').textContent = status;
-  for (const el of $('email-form').querySelectorAll('input, button')) el.disabled = !a.emailEnabled;
-  $('email-remove').hidden = !a.email && !a.pendingEmail;
-  $('delete-form').hidden = must;
-  const byEmail = a.emailEnabled && a.email;
-  $('delete-username').hidden = !!byEmail;
-  $('delete-form').elements.username.required = !byEmail;
-  $('delete-status').textContent = byEmail
-    ? `We'll send a link to ${a.email}; your account is deleted when you open it and confirm.`
+
+  $('passkey-section').hidden = !a.passkeysEnabled || !window.PublicKeyCredential;
+  const list = $('passkey-list');
+  list.replaceChildren();
+  for (const k of a.passkeys || []) {
+    const li = document.createElement('li');
+    const used = Number(k.lastUsed) ? `last used ${shortDate(k.lastUsed)}` : 'not used yet';
+    li.innerHTML = `<span><b>${esc(k.name)}</b><small>added ${esc(shortDate(k.created))}, ${esc(used)}</small></span>`;
+    const rm = document.createElement('button');
+    rm.type = 'button';
+    rm.className = 'btn btn-ghost';
+    rm.textContent = 'Remove';
+    rm.onclick = () => {
+      if (!confirm(`Remove the passkey “${k.name}”? It will no longer sign you in.`)) return;
+      request({ passkeyRemove: { id: k.id } }, m => {
+        if (m.error) setMsg('passkey-msg', m.error.message);
+        else { state.account = m.account; renderAccount(); setMsg('passkey-msg', 'Passkey removed. You can also delete it from your device or password manager.', true); }
+        return true;
+      });
+    };
+    li.appendChild(rm);
+    list.appendChild(li);
+  }
+  if (!(a.passkeys || []).length) list.innerHTML = '<li class="muted">No passkeys yet.</li>';
+
+  $('delete-username').hidden = !!a.email;
+  $('delete-form').elements.username.required = !a.email;
+  $('delete-status').textContent = a.email
+    ? `We'll email a link to ${a.email}; your account is deleted when you open it and confirm.`
     : 'Your account is deleted at once. This cannot be undone.';
 }
 
@@ -1201,57 +1437,111 @@ function setMsg(id, text, ok = false) {
 
 $('account-btn').onclick = () => openAccount();
 $('account-close').onclick = () => $('account-dialog').close();
-// While a new password is required the dialog cannot be dismissed.
-$('account-dialog').addEventListener('cancel', e => {
-  if (state.account && state.account.mustChangePassword) e.preventDefault();
-});
-
-$('password-form').onsubmit = ev => {
-  ev.preventDefault();
-  const f = new FormData(ev.target);
-  if (f.get('new') !== f.get('again')) return setMsg('password-msg', "The new passwords don't match.");
-  const must = state.account && state.account.mustChangePassword;
-  const sent = request({ changePassword: { oldPassword: f.get('old'), newPassword: f.get('new') } }, m => {
-    if (m.error) { setMsg('password-msg', m.error.message); return true; }
-    state.account = m.account;
-    ev.target.reset();
-    if (must) {
-      $('account-dialog').close();
-      toast('Password changed.');
-      conn.send({ listGames: {} });
-    } else {
-      setMsg('password-msg', 'Password changed. Your other devices have been logged out.', true);
-    }
-    renderAccount();
-    return true;
-  });
-  setMsg('password-msg', sent ? '' : 'Not connected.');
-};
 
 $('email-form').onsubmit = ev => {
   ev.preventDefault();
-  const f = new FormData(ev.target);
-  const remove = ev.submitter && ev.submitter.value === 'remove';
-  const email = remove ? '' : String(f.get('email')).trim();
-  if (!remove && !email) return setMsg('email-msg', 'Enter an email address.');
-  setMsg('email-msg', remove ? '' : 'Sending…', true);
-  const sent = request({ setEmail: { email, password: f.get('password') } }, m => {
+  const email = String(new FormData(ev.target).get('email')).trim();
+  if (!email) return setMsg('email-msg', 'Enter an email address.');
+  setMsg('email-msg', 'Sending…', true);
+  const sent = request({ setEmail: { email } }, m => {
     if (m.error) { setMsg('email-msg', m.error.message); return true; }
     state.account = m.account;
     ev.target.reset();
     renderAccount();
-    setMsg('email-msg', remove ? 'Address removed.' :
-      m.account.pendingEmail ? `Check ${m.account.pendingEmail} for a link to confirm it.` : 'Saved.', true);
+    const a = m.account;
+    setMsg('email-msg', !a.pendingEmail ? 'Saved.' : a.pendingNeedsCurrent
+      ? `Check ${a.email} for a link to confirm the change.` : `Check ${a.pendingEmail} for a link to confirm it.`, true);
     return true;
   });
   if (!sent) setMsg('email-msg', 'Not connected.');
+};
+
+$('passkey-form').onsubmit = ev => {
+  ev.preventDefault();
+  const name = String(new FormData(ev.target).get('name')).trim() || defaultPasskeyName();
+  setMsg('passkey-msg', '');
+  const sent = request({ passkeyAddBegin: {} }, m => {
+    if (m.error) { setMsg('passkey-msg', m.error.message); return true; }
+    const opts = JSON.parse(m.passkeyOptions.optionsJson);
+    navigator.credentials.create({ publicKey: creationOptions(opts.publicKey) }).then(cred => {
+      request({ passkeyAddFinish: { credentialJson: credentialJSON(cred), name } }, r => {
+        if (r.error) { setMsg('passkey-msg', r.error.message); return true; }
+        state.account = r.account;
+        ev.target.reset();
+        renderAccount();
+        setMsg('passkey-msg', 'Passkey added. Next time, choose “Use a passkey” to sign in.', true);
+        return true;
+      });
+    }).catch(e => setMsg('passkey-msg', passkeyError(e)));
+    return true;
+  });
+  if (!sent) setMsg('passkey-msg', 'Not connected.');
+};
+
+// defaultPasskeyName guesses what device this is, for the passkey list.
+function defaultPasskeyName() {
+  const ua = navigator.userAgent;
+  for (const [re, name] of [[/iPhone/, 'iPhone'], [/iPad/, 'iPad'], [/Android/, 'Android'], [/Mac OS X/, 'Mac'], [/Windows/, 'Windows'], [/CrOS/, 'Chromebook'], [/Linux/, 'Linux']]) {
+    if (re.test(ua)) return name;
+  }
+  return 'Passkey';
+}
+
+function approveDevice(code, msgId, done) {
+  setMsg(msgId, '');
+  const sent = request({ approveDevice: { code } }, m => {
+    if (m.error) {
+      setMsg(msgId, m.error.code === 'ERROR_CODE_NOT_FOUND'
+        ? 'No device is showing that code. Check it, or start again on the device: codes last 10 minutes.' : m.error.message);
+      return true;
+    }
+    done();
+    return true;
+  });
+  if (!sent) setMsg(msgId, 'Not connected.');
+}
+
+$('device-form').onsubmit = ev => {
+  ev.preventDefault();
+  const code = String(new FormData(ev.target).get('code')).trim();
+  approveDevice(code, 'device-msg', () => {
+    ev.target.reset();
+    setMsg('device-msg', 'Approved. The device is signing in.', true);
+  });
+};
+
+function openDeviceDialog(code) {
+  $('device-code').textContent = `${code.slice(0, 4)}-${code.slice(-4)}`;
+  setMsg('device-dialog-msg', '');
+  if (!$('device-dialog').open) $('device-dialog').showModal();
+}
+$('device-approve').onclick = () => {
+  const code = pendingDevice;
+  if (!code) return $('device-dialog').close();
+  approveDevice(code, 'device-dialog-msg', () => {
+    pendingDevice = null;
+    $('device-dialog').close();
+    toast('Approved. The device is signing in.');
+  });
+};
+$('device-cancel').onclick = () => { pendingDevice = null; $('device-dialog').close(); };
+$('device-dialog').addEventListener('cancel', () => { pendingDevice = null; });
+
+$('sign-out-others').onclick = () => {
+  setMsg('sign-out-msg', '');
+  const sent = request({ signOutOthers: {} }, m => {
+    if (m.error) setMsg('sign-out-msg', m.error.message);
+    else setMsg('sign-out-msg', 'Your other devices are signed out.', true);
+    return true;
+  });
+  if (!sent) setMsg('sign-out-msg', 'Not connected.');
 };
 
 $('delete-form').onsubmit = ev => {
   ev.preventDefault();
   const f = new FormData(ev.target);
   setMsg('delete-msg', '');
-  const sent = request({ deleteAccount: { password: f.get('password'), username: f.get('username') || '' } }, m => {
+  const sent = request({ deleteAccount: { username: f.get('username') || '' } }, m => {
     if (m.error) { setMsg('delete-msg', m.error.message); return true; }
     ev.target.reset();
     if (m.ack) {
@@ -1265,7 +1555,7 @@ $('delete-form').onsubmit = ev => {
 };
 
 // accountDeleted forgets the session; the server closes the connection,
-// and the client reconnects to the login page.
+// and the client reconnects to the sign-in page.
 function accountDeleted() {
   localStorage.removeItem('token');
   state.me = null;
@@ -1284,7 +1574,7 @@ $('delete-confirm').onclick = () => {
       return true;
     }
     emailLink = null;
-    // This browser may be logged in as that account (resuming will fail
+    // This browser may be signed in as that account (resuming will fail
     // and forget it) or as another one (which carries on).
     const token = localStorage.getItem('token');
     setMsg('login-error', `The account ${m.accountDeleted.username} was deleted.`, true);
@@ -1294,49 +1584,6 @@ $('delete-confirm').onclick = () => {
     return true;
   });
   if (!sent) setMsg('delete-panel-msg', 'Not connected yet…');
-};
-
-$('forgot').onclick = () => {
-  const name = $('login-form').elements.username.value;
-  $('forgot-form').elements.name.value = name;
-  setMsg('forgot-msg', '');
-  show('forgot-panel');
-};
-for (const b of document.querySelectorAll('[data-to-login]')) {
-  b.onclick = () => {
-    emailLink = null;
-    show('login');
-    const token = localStorage.getItem('token');
-    if (token && !state.me) conn.send({ resume: { token } });
-  };
-}
-$('forgot-form').onsubmit = ev => {
-  ev.preventDefault();
-  const name = String(new FormData(ev.target).get('name')).trim();
-  const sent = request({ requestPasswordReset: { username: name } }, m => {
-    if (m.error) setMsg('forgot-msg', m.error.message);
-    else setMsg('forgot-msg', 'If that account has a confirmed email address, a link is on its way. It works for an hour.', true);
-    return true;
-  });
-  if (!sent) setMsg('forgot-msg', 'Not connected yet…');
-};
-$('reset-form').onsubmit = ev => {
-  ev.preventDefault();
-  const f = new FormData(ev.target);
-  if (f.get('new') !== f.get('again')) return setMsg('reset-msg', "The passwords don't match.");
-  if (!emailLink) return show('login');
-  const sent = request({ resetPassword: { token: emailLink.token, newPassword: f.get('new') } }, m => {
-    if (m.error) {
-      setMsg('reset-msg', m.error.code === 'ERROR_CODE_NOT_FOUND'
-        ? 'This link has expired or was already used. Ask for a new one from the login page.' : m.error.message);
-      return true;
-    }
-    emailLink = null;
-    ev.target.reset();
-    toast('Password changed. You are logged in.');
-    return false; // the AuthOk logs in as usual
-  });
-  if (!sent) setMsg('reset-msg', 'Not connected yet…');
 };
 
 // ---------------------------------------------------------------------------
@@ -1654,16 +1901,6 @@ function act(action) {
 // ---------------------------------------------------------------------------
 // UI wiring
 // ---------------------------------------------------------------------------
-
-$('login-form').onsubmit = ev => {
-  ev.preventDefault();
-  const f = new FormData(ev.target);
-  const action = ev.submitter ? ev.submitter.value : 'login';
-  const creds = { username: f.get('username'), password: f.get('password') };
-  if (!conn.dc) { setMsg('login-error', 'Not connected yet…'); return; }
-  if (action === 'register') conn.send({ register: Object.assign(creds, { nickname: f.get('nickname') }) });
-  else conn.send({ login: creds });
-};
 
 $('logout').onclick = () => {
   localStorage.removeItem('token');

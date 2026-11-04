@@ -208,7 +208,8 @@ main {
 .login { grid-column: 1 / -1; justify-self: center; width: min(100%, 25rem); margin-top: 6vh; padding: 1.5rem; }
 .login-hero { text-align: center; margin-bottom: 1rem; }
 .login-hero h2 { font-size: 1.35rem; margin: .4rem 0 .2rem; }
-.login .row .btn { flex: 1; }
+.login .row { flex-wrap: wrap; }
+.login .row .btn { flex: 1 1 auto; white-space: nowrap; }
 .suits { display: inline-flex; gap: .35rem; font-size: 1.4rem; color: var(--ink); }
 .suits .r { color: var(--card-red); }
 .suits b { animation: bob 2.4s ease-in-out infinite; }
@@ -523,6 +524,13 @@ button.card:disabled { cursor: default; }
 .dialog .icon-btn:hover { background: var(--surface-2); }
 .dialog h3 { margin: 1.1rem 0 .5rem; font-size: .78rem; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); font-family: inherit; }
 .dialog .hint { margin: 0 0 .6rem; font-size: .85rem; }
+.code-input { font-size: 1.4rem !important; letter-spacing: .12em; font-variant-numeric: tabular-nums; text-align: center; }
+.passkey-list { list-style: none; margin: 0 0 .7rem; padding: 0; }
+.passkey-list li { display: flex; align-items: center; gap: .6rem; padding: .45rem 0; border-bottom: 1px solid var(--line); }
+.passkey-list li > span { flex: 1; min-width: 0; }
+.passkey-list b { display: block; overflow-wrap: anywhere; }
+.passkey-list small { color: var(--muted); font-size: .78rem; }
+.device-code { font-size: 1.8rem; font-weight: 700; letter-spacing: .14em; text-align: center; margin: .4rem 0 .8rem; font-variant-numeric: tabular-nums; }
 .callout { margin: .8rem 0 0; padding: .6rem .75rem; border-radius: 8px; background: color-mix(in srgb, var(--accent) 16%, transparent); font-weight: 600; }
 
 /* ---- Games drawer ------------------------------------------------------ */

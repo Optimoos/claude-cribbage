@@ -24,7 +24,7 @@ import (
 type Config struct {
 	Addr     string // TCP host:port, or ws://host:port/rtc for WebRTC
 	Username string
-	Password string
+	Key      string // the server's bot key
 	Nickname string
 	Bot      string // local bot that makes decisions
 	// Opponent is a server-side bot to play against; empty uses matchmaking
@@ -165,10 +165,10 @@ func (r *runner) dialAuth() (*client.Client, error) {
 		a, err = c.Resume(r.token)
 		var se client.ServerError
 		if errors.As(err, &se) && se.Code == pb.ErrorCode_ERROR_CODE_INVALID_CREDENTIALS {
-			a, err = c.Login(r.cfg.Username, r.cfg.Password, r.cfg.Nickname, false)
+			a, err = c.BotLogin(r.cfg.Username, r.cfg.Nickname, r.cfg.Key)
 		}
 	} else {
-		a, err = c.Login(r.cfg.Username, r.cfg.Password, r.cfg.Nickname, true)
+		a, err = c.BotLogin(r.cfg.Username, r.cfg.Nickname, r.cfg.Key)
 	}
 	if err != nil {
 		c.Close()

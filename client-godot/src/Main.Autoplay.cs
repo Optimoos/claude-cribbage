@@ -6,8 +6,8 @@ namespace Cribbage;
 
 // Autoplay (--autoplay) lets the client play one game by itself through
 // the real UI code, so it can be tested without a person:
-//   - it registers --user (or logs in if the name is taken), unless a
-//     stored session resumes;
+//   - it signs in to the bot account --user with --bot-key (creating it
+//     if need be), unless a stored session resumes;
 //   - it carries on a game already in progress, or else starts one with
 //     --vs BOT, --open (an open game), --join (the first open game),
 //     --invite USER or --accept (the first invite to it);
@@ -34,8 +34,14 @@ public partial class Main
             if (!authSent && settings.Token == "")
             {
                 authSent = true;
-                Say($"registering {opts.User}");
-                Send(new ClientMessage { Register = new Register { Username = opts.User, Password = opts.Password, Nickname = opts.User } });
+                if (opts.BotKey == "")
+                {
+                    Say("no stored session; give --bot-key to sign in");
+                    GetTree().Quit(2);
+                    return;
+                }
+                Say($"signing in as bot {opts.User}");
+                Send(new ClientMessage { BotLogin = new BotLogin { Username = opts.User, Nickname = opts.User, Key = opts.BotKey } });
             }
             return;
         }
@@ -132,11 +138,7 @@ public partial class Main
                 Say($"signed in as {m.AuthOk.Username}");
                 break;
             case ServerMessage.BodyOneofCase.Error when me == null:
-                if (m.Error.Code == ErrorCode.UsernameTaken)
-                {
-                    Send(new ClientMessage { Login = new Login { Username = opts.User, Password = opts.Password } });
-                }
-                else if (settings.Token == "" && authSent)
+                if (settings.Token == "" && authSent)
                 {
                     Say($"cannot sign in: {m.Error.Message}");
                     GetTree().Quit(2);

@@ -37,7 +37,7 @@
         <p class="who" id="who"></p>
         <div class="row">
           <button id="account-btn" class="btn btn-ghost">Account…</button>
-          <button id="logout" class="btn btn-ghost">Log out</button>
+          <button id="logout" class="btn btn-ghost">Sign out</button>
         </div>
       </div>
       <p class="menu-links"><a data-report href="https://github.com/Optimoos" target="_blank" rel="noopener noreferrer">Report a bug</a><span aria-hidden="true">·</span><a href="privacy.html" target="_blank" rel="noopener">Privacy</a></p>
@@ -52,25 +52,58 @@
   <section id="login" class="panel login" hidden>
     <div class="login-hero"><span class="suits"><b>♠</b><b class="r">♥</b><b>♣</b><b class="r">♦</b></span>
       <h2>Fifteen two, fifteen four…</h2>
-      <p class="muted">Log in, or pick a username and password to register.</p>
+      <p class="muted">No password to remember: we email you a code to sign in.</p>
     </div>
-    <form id="login-form">
-      <label class="field">Username <input name="username" autocomplete="username" required></label>
-      <label class="field">Password <input name="password" type="password" autocomplete="current-password" required></label>
-      <label class="field">Nickname <input name="nickname" placeholder="for new accounts (optional)"></label>
+    <form id="signin-form">
+      <label class="field">Username or email <input name="name" autocomplete="username" required maxlength="254" spellcheck="false" autocapitalize="off"></label>
       <div class="row">
-        <button type="submit" name="action" value="login" class="btn btn-primary">Log in</button>
-        <button type="submit" name="action" value="register" class="btn">Register</button>
+        <button class="btn btn-primary">Email me a code</button>
+        <button type="button" id="passkey-signin" class="btn" hidden>Use a passkey</button>
       </div>
       <p id="login-error" class="error"></p>
-      <button type="button" id="forgot" class="link-btn">Forgot your password?</button>
+      <button type="button" id="to-register" class="link-btn">New here? Create an account</button>
     </form>
     <p class="menu-links login-links"><a data-report href="https://github.com/Optimoos" target="_blank" rel="noopener noreferrer">Report a bug</a><span aria-hidden="true">·</span><a href="privacy.html" target="_blank" rel="noopener">Privacy</a></p>
   </section>
-
+  <section id="register-panel" class="panel login" hidden>
+    <h2>Create an account</h2>
+    <p class="muted">We'll email you a code to finish. Your address is only for signing in; nobody else sees it. Family members can share one.</p>
+    <form id="register-form">
+      <label class="field">Username <input name="username" autocomplete="username" required minlength="3" maxlength="32" pattern="[A-Za-z0-9_\-]+" spellcheck="false" autocapitalize="off" title="3-32 letters, digits, _ or -"></label>
+      <label class="field">Nickname <input name="nickname" maxlength="24" placeholder="what other players see (optional)"></label>
+      <label class="field">Email address <input name="email" type="email" autocomplete="email" required maxlength="254"></label>
+      <div class="row">
+        <button class="btn btn-primary">Email me a code</button>
+        <button type="button" class="btn btn-ghost" data-to-login>Back</button>
+      </div>
+      <p id="register-msg" class="error"></p>
+    </form>
+  </section>
+  <section id="code-panel" class="panel login" hidden>
+    <h2>Check your email</h2>
+    <p id="code-hint" class="muted"></p>
+    <form id="signin-code-form">
+      <label class="field">Code <input name="code" class="code-input" inputmode="numeric" autocomplete="one-time-code" required maxlength="12" placeholder="1234 5678" spellcheck="false"></label>
+      <div class="row">
+        <button class="btn btn-primary">Sign in</button>
+        <button type="button" id="code-resend" class="btn">Send again</button>
+        <button type="button" class="btn btn-ghost" data-to-login>Back</button>
+      </div>
+      <p id="signin-code-msg" class="error"></p>
+    </form>
+  </section>
+  <section id="link-panel" class="panel login" hidden>
+    <h2>Finish signing in</h2>
+    <p class="muted">You opened a sign-in link from your email. Sign in on this device?</p>
+    <div class="row">
+      <button id="link-confirm" class="btn btn-primary">Sign in</button>
+      <button type="button" class="btn btn-ghost" data-to-login>Cancel</button>
+    </div>
+    <p id="link-msg" class="error"></p>
+  </section>
   <section id="delete-panel" class="panel login" hidden>
     <h2>Delete your account?</h2>
-    <p class="muted">This can't be undone. Your unfinished games end (you resign the ones in progress), your account, email address and invites are removed, and your username becomes free for anyone. Games you finished stay in your opponents' history as &ldquo;Deleted player&rdquo;.</p>
+    <p class="muted">This can't be undone. Your unfinished games end (you resign the ones in progress), your account, email address, passkeys and invites are removed, and your username becomes free for anyone. Games you finished stay in your opponents' history as &ldquo;Deleted player&rdquo;.</p>
     <div class="row">
       <button id="delete-confirm" class="btn btn-danger">Delete account</button>
       <button type="button" class="btn btn-ghost" data-to-login>Keep my account</button>
@@ -78,32 +111,7 @@
     <p id="delete-panel-msg" class="error"></p>
   </section>
 
-  <section id="forgot-panel" class="panel login" hidden>
-    <h2>Forgot your password?</h2>
-    <p class="muted">Enter your username or email address. If the account has a confirmed email address, we'll send it a link to choose a new password.</p>
-    <form id="forgot-form">
-      <label class="field">Username or email <input name="name" autocomplete="username" required maxlength="254"></label>
-      <div class="row">
-        <button class="btn btn-primary">Send link</button>
-        <button type="button" class="btn btn-ghost" data-to-login>Back</button>
-      </div>
-      <p id="forgot-msg" class="error"></p>
-    </form>
-  </section>
 
-  <section id="reset-panel" class="panel login" hidden>
-    <h2>Choose a new password</h2>
-    <p class="muted">You'll be logged out everywhere else.</p>
-    <form id="reset-form">
-      <label class="field">New password <input name="new" type="password" autocomplete="new-password" required minlength="8" maxlength="72"></label>
-      <label class="field">New password again <input name="again" type="password" autocomplete="new-password" required></label>
-      <div class="row">
-        <button class="btn btn-primary">Set password and log in</button>
-        <button type="button" class="btn btn-ghost" data-to-login>Cancel</button>
-      </div>
-      <p id="reset-msg" class="error"></p>
-    </form>
-  </section>
 
   <aside id="lobby" class="panel lobby" hidden>
     <h2>New game</h2>
@@ -230,34 +238,56 @@
     <span class="spacer"></span>
     <button id="account-close" class="icon-btn" aria-label="Close">✕</button>
   </div>
-  <p id="must-change" class="callout" hidden>Your password was reset. Choose a new password to carry on.</p>
-  <form id="password-form">
-    <h3>Change password</h3>
-    <label class="field"><span id="old-label">Current password</span> <input name="old" type="password" autocomplete="current-password" required></label>
-    <label class="field">New password <input name="new" type="password" autocomplete="new-password" required minlength="8" maxlength="72"></label>
-    <label class="field">New password again <input name="again" type="password" autocomplete="new-password" required></label>
-    <button class="btn btn-primary">Change password</button>
-    <p id="password-msg" class="error"></p>
-  </form>
   <form id="email-form">
-    <h3>Email for password resets</h3>
+    <h3>Email address</h3>
     <p id="email-status" class="hint"></p>
-    <label class="field">Email address <input name="email" type="email" autocomplete="email" maxlength="254"></label>
-    <label class="field">Current password <input name="password" type="password" autocomplete="current-password" required></label>
-    <div class="row">
-      <button class="btn btn-primary" value="save">Save</button>
-      <button id="email-remove" class="btn btn-ghost" value="remove">Remove address</button>
-    </div>
+    <label class="field">New address <input name="email" type="email" autocomplete="email" required maxlength="254"></label>
+    <button class="btn btn-primary">Change address</button>
     <p id="email-msg" class="error"></p>
   </form>
+  <section id="passkey-section" hidden>
+    <h3>Passkeys</h3>
+    <p class="hint">Sign in on this device with your fingerprint, face or screen lock instead of an emailed code. Your phone or password manager keeps the passkey.</p>
+    <ul id="passkey-list" class="passkey-list"></ul>
+    <form id="passkey-form">
+      <label class="field">Name <input name="name" maxlength="40" placeholder="e.g. My phone (optional)"></label>
+      <button class="btn">Add a passkey</button>
+      <p id="passkey-msg" class="error"></p>
+    </form>
+  </section>
+  <form id="device-form">
+    <h3>Sign in another device</h3>
+    <p class="hint">For the desktop app: choose &ldquo;Sign in with browser&rdquo; there, then enter the code it shows. Only enter a code shown on your own screen: it signs that device in as you.</p>
+    <label class="field">Code <input name="code" maxlength="12" placeholder="BCDF-GHJK" spellcheck="false" autocapitalize="characters" autocomplete="off" required></label>
+    <button class="btn">Approve</button>
+    <p id="device-msg" class="error"></p>
+  </form>
+  <div class="account-block">
+    <h3>Other devices</h3>
+    <p class="hint">Signed in somewhere you shouldn't be, like a shared computer? Sign out everywhere but here.</p>
+    <button id="sign-out-others" class="btn">Sign out other devices</button>
+    <p id="sign-out-msg" class="error"></p>
+  </div>
   <form id="delete-form">
     <h3>Delete account</h3>
     <p id="delete-status" class="hint"></p>
-    <label class="field">Current password <input name="password" type="password" autocomplete="current-password" required></label>
     <label class="field" id="delete-username">Type your username to confirm <input name="username" autocomplete="off" spellcheck="false"></label>
     <button class="btn btn-danger">Delete account</button>
     <p id="delete-msg" class="error"></p>
   </form>
+</dialog>
+<dialog id="device-dialog" class="dialog" aria-labelledby="device-title">
+  <div class="dialog-head">
+    <h2 id="device-title">Sign in another device?</h2>
+  </div>
+  <p>A device is asking to sign in as you, showing the code</p>
+  <p id="device-code" class="device-code"></p>
+  <p class="hint">Only approve it if that code is on your own screen right now. Approving signs that device in to your account. If someone sent you this link or code, don't.</p>
+  <div class="row">
+    <button id="device-approve" class="btn btn-primary">Approve</button>
+    <button id="device-cancel" class="btn btn-ghost">Don't approve</button>
+  </div>
+  <p id="device-dialog-msg" class="error"></p>
 </dialog>
 <script src="app.js"></script>
 </body>

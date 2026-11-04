@@ -10,18 +10,15 @@ import (
 	"cribbage/internal/store"
 )
 
-// deleteAccount checks the password, then either mails a confirmation
-// link or, for an account without an address, deletes it at once.
+// deleteAccount mails a confirmation link or, for a bot account (which has
+// no address), deletes it at once.
 func (s *Server) deleteAccount(c *Conn, id uint32, m *pb.DeleteAccount) {
-	if !s.allowPasswordCheck(c, id) {
-		return
-	}
-	key := passwordKey(c)
 	s.background(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()
-		u, ok := s.checkPassword(ctx, c, id, key, m.Password)
-		if !ok {
+		u, err := s.auth.Store.UserByID(ctx, c.user.ID)
+		if err != nil {
+			s.sendAccountError(c, id, "delete account", err)
 			return
 		}
 		mailed, err := s.auth.RequestDelete(ctx, u, m.Username)

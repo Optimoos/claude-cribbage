@@ -3,6 +3,8 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -18,8 +20,6 @@ import (
 	"strings"
 	"syscall"
 	"time"
-
-	"golang.org/x/crypto/bcrypt"
 
 	"cribbage/internal/ai"
 	"cribbage/internal/auth"
@@ -46,7 +46,6 @@ func main() {
 	iceServers := flag.String("ice-servers", "", "comma-separated STUN/TURN URLs for WebRTC, e.g. stun:stun.l.google.com:19302")
 	dbPath := flag.String("db", "cribbage.db", "SQLite database file; empty keeps everything in memory")
 	statsEvery := flag.Duration("stats", 10*time.Second, "log statistics at this interval (0 disables)")
-	bcryptCost := flag.Int("bcrypt-cost", bcrypt.DefaultCost, "bcrypt cost for password hashes")
 	pprofAddr := flag.String("pprof", "", "serve net/http/pprof on this address (e.g. localhost:6060)")
 	model := flag.String("model", "", "neural network model to offer as the \"nn\" bot (e.g. models/best.bin)")
 	backupDir := flag.String("backup-dir", "", "write database backups here (empty disables)")
@@ -54,15 +53,15 @@ func main() {
 	backupKeep := flag.Int("backup-keep", 7, "how many backups to keep")
 	expertPath := flag.String("expert", "", "expert bundle to offer as the \"expert\" bots (e.g. models-expert/expert.bin)")
 	adminSocket := flag.String("admin-socket", "", "listen for admin commands (cribserver admin ...) on this Unix socket, e.g. "+defaultAdminSocket+" (empty disables)")
-	publicURL := flag.String("public-url", "", "the web client's public address, for links in emails (e.g. https://cribbage.example.com)")
-	smtpAddr := flag.String("smtp", "", "mail server host:port for password reset emails (465 for TLS, else STARTTLS); empty disables email")
+	publicURL := flag.String("public-url", "", "the web client's public address, for links in emails and for passkeys (e.g. https://cribbage.example.com); defaults to http://localhost:<http port>")
+	smtpAddr := flag.String("smtp", "", "mail server host:port for sign-in codes (465 for TLS, else STARTTLS); empty writes emails to the log instead (testing only: nobody else can sign in)")
 	smtpUser := flag.String("smtp-user", "", "mail server login")
 	smtpPassFile := flag.String("smtp-password-file", "", "file holding the mail server password (or set CRIBBAGE_SMTP_PASSWORD)")
 	mailFrom := flag.String("mail-from", "", "sender address for emails, e.g. cribbage@example.com")
 	mailFromName := flag.String("mail-from-name", "Cribbage", "sender name for emails")
-	emailKeyFile := flag.String("email-key-file", "", "file holding the key (64 hex digits, from openssl rand -hex 32) that encrypts email addresses in the database (or set CRIBBAGE_EMAIL_KEY); needed with -smtp or -mail-log")
+	emailKeyFile := flag.String("email-key-file", "", "file holding the key (64 hex digits, from openssl rand -hex 32) that encrypts email addresses in the database (or set CRIBBAGE_EMAIL_KEY); without one, a key is kept beside the database in <db>.email-key")
 	reportURL := flag.String("report-url", "https://github.com/Optimoos", "where the clients' \"Report a bug\" links go (https)")
-	mailLog := flag.Bool("mail-log", false, "log emails, links included, instead of sending them (testing only)")
+	botKeyFile := flag.String("bot-key-file", "", "file holding a secret that headless bots (cmd/botclient) sign in with (or set CRIBBAGE_BOT_KEY); empty disables bot accounts")
 	configPath := flag.String("config", "", "read settings from this file (name = value per line, e.g. /etc/cribbage/cribserver.conf); flags on the command line override it")
 	printConfig := flag.Bool("print-config", false, "print a config file with every setting, using these flags' values, and exit")
 	flag.Parse()
@@ -132,11 +131,11 @@ func main() {
 		users, games = sq, sq
 	}
 
-	authSvc := &auth.Service{Store: users, BcryptCost: *bcryptCost, BaseURL: *publicURL}
-	switch {
-	case *smtpAddr != "" && *mailLog:
-		fail("email", errors.New("use -smtp or -mail-log, not both"))
-	case *smtpAddr != "":
+	authSvc := &auth.Service{Store: users, BaseURL: *publicURL}
+	if authSvc.BaseURL == "" {
+		authSvc.BaseURL = localURL(*httpAddr)
+	}
+	if *smtpAddr != "" {
 		pass := os.Getenv("CRIBBAGE_SMTP_PASSWORD")
 		if *smtpPassFile != "" {
 			b, err := os.ReadFile(*smtpPassFile)
@@ -154,12 +153,9 @@ func main() {
 		}
 		authSvc.Mailer = m
 		log.Info("email enabled", "smtp", *smtpAddr, "from", *mailFrom)
-	case *mailLog:
-		if authSvc.BaseURL == "" {
-			authSvc.BaseURL = "http://" + *httpAddr + "/"
-		}
+	} else {
 		authSvc.Mailer = mail.Log{Logger: log}
-		log.Warn("emails are logged, not sent (-mail-log): their links can reset passwords")
+		log.Warn("no -smtp: emails are written to this log instead of sent, so only someone reading it can sign in (testing only)")
 	}
 	if sq != nil {
 		key := os.Getenv("CRIBBAGE_EMAIL_KEY")
@@ -170,18 +166,39 @@ func main() {
 			}
 			key = string(b)
 		}
-		switch {
-		case key != "":
-			k, err := store.ParseEmailKey(key)
-			if err != nil {
+		if key == "" {
+			path := *dbPath + ".email-key"
+			var err error
+			if key, err = localEmailKey(path); err != nil {
 				fail("email key", err)
 			}
-			if err := sq.SetEmailKey(context.Background(), k); err != nil {
-				fail("email key", err)
-			}
-		case authSvc.Mailer != nil:
-			fail("email", errors.New("email addresses are stored encrypted: give -email-key-file (create one with openssl rand -hex 32)"))
+			log.Warn("the email key is kept beside the database; for a deployment, keep it elsewhere with -email-key-file", "path", path)
 		}
+		k, err := store.ParseEmailKey(key)
+		if err != nil {
+			fail("email key", err)
+		}
+		if err := sq.SetEmailKey(context.Background(), k); err != nil {
+			fail("email key", err)
+		}
+	}
+	if wa, err := auth.NewWebAuthn(authSvc.BaseURL); err != nil {
+		fail("passkeys", err)
+	} else if ip := net.ParseIP(hostOf(authSvc.BaseURL)); ip != nil {
+		log.Warn("passkeys are off: they need the web client's address to be a name, not an IP address (-public-url)")
+	} else {
+		authSvc.WebAuthn = wa
+	}
+	authSvc.BotKey = os.Getenv("CRIBBAGE_BOT_KEY")
+	if *botKeyFile != "" {
+		b, err := os.ReadFile(*botKeyFile)
+		if err != nil {
+			fail("bot key", err)
+		}
+		authSvc.BotKey = strings.TrimSpace(string(b))
+	}
+	if authSvc.BotKey != "" && len(authSvc.BotKey) < 16 {
+		fail("bot key", errors.New("the bot key must be at least 16 characters (try openssl rand -hex 16)"))
 	}
 	if err := checkReportURL(*reportURL); err != nil {
 		fail("report url", err)
@@ -229,6 +246,7 @@ func main() {
 			w.Header().Set("Content-Type", "application/json")
 			cfg := rtcAPI.ClientConfig()
 			cfg["reportUrl"] = *reportURL
+			cfg["passkeys"] = authSvc.WebAuthn != nil
 			json.NewEncoder(w).Encode(cfg)
 		})
 		mux.HandleFunc("/api/bots", func(w http.ResponseWriter, r *http.Request) {
@@ -411,4 +429,50 @@ func displayAddr(a net.Addr) string {
 		return "localhost:" + port
 	}
 	return a.String()
+}
+
+// localURL is the web client's address on this machine, for a server
+// without -public-url.
+func localURL(httpAddr string) string {
+	host, port, err := net.SplitHostPort(httpAddr)
+	if err != nil {
+		return "http://localhost:8080/"
+	}
+	if ip := net.ParseIP(host); host == "" || (ip != nil && (ip.IsUnspecified() || ip.IsLoopback())) {
+		host = "localhost"
+	}
+	return "http://" + net.JoinHostPort(host, port) + "/"
+}
+
+func hostOf(u string) string {
+	p, err := url.Parse(u)
+	if err != nil {
+		return ""
+	}
+	return p.Hostname()
+}
+
+// localEmailKey reads the key at path, creating it if there is none.
+func localEmailKey(path string) (string, error) {
+	b, err := os.ReadFile(path)
+	if err == nil {
+		return string(b), nil
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		return "", err
+	}
+	key := make([]byte, 32)
+	if _, err := rand.Read(key); err != nil {
+		return "", err
+	}
+	s := hex.EncodeToString(key) + "\n"
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return "", err
+	}
+	if _, err := f.WriteString(s); err != nil {
+		f.Close()
+		return "", err
+	}
+	return s, f.Close()
 }

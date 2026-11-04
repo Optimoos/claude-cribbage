@@ -14,18 +14,6 @@ import (
 	"cribbage/internal/store"
 )
 
-// hashed runs fn, which hashes a password, once a hashing slot is free.
-func hashed[T any](s *Server, ctx context.Context, fn func() (T, error)) (T, error) {
-	select {
-	case s.hashing <- struct{}{}:
-	case <-ctx.Done():
-		var zero T
-		return zero, ctx.Err()
-	}
-	defer func() { <-s.hashing }()
-	return fn()
-}
-
 // background runs fn on its own goroutine, which Shutdown waits for. It
 // reports false, without running fn, once the server is shutting down.
 func (s *Server) background(fn func()) bool {
@@ -58,9 +46,18 @@ func (s *Server) accountMessage(ctx context.Context, u *store.User) (*pb.Account
 	if err != nil {
 		return nil, err
 	}
-	return &pb.Account{
-		Email: a.Email, PendingEmail: a.PendingEmail, MustChangePassword: a.MustChange, EmailEnabled: a.EmailEnabled,
-	}, nil
+	m := &pb.Account{
+		Email: a.Email, PendingEmail: a.PendingEmail, PendingNeedsCurrent: a.PendingNeedsCurrent,
+		PasskeysEnabled: a.PasskeysEnabled,
+	}
+	for _, k := range a.Passkeys {
+		p := &pb.Passkey{Id: auth.PasskeyID(k.ID), Name: k.Name, Created: k.Created.UnixMilli()}
+		if !k.LastUsed.IsZero() {
+			p.LastUsed = k.LastUsed.UnixMilli()
+		}
+		m.Passkeys = append(m.Passkeys, p)
+	}
+	return m, nil
 }
 
 // pushAccount sends a user's account settings to each of their
@@ -78,14 +75,17 @@ func (s *Server) pushAccount(ctx context.Context, userID int64, r reply) error {
 	return nil
 }
 
-// sendAccountError reports a failed account request.
+// sendAccountError reports a failed account or sign-in request.
 func (s *Server) sendAccountError(c *Conn, id uint32, what string, err error) {
 	switch {
-	case errors.Is(err, auth.ErrInvalidInput), errors.Is(err, auth.ErrMailDisabled):
+	case errors.Is(err, auth.ErrInvalidInput), errors.Is(err, auth.ErrMailDisabled),
+		errors.Is(err, auth.ErrPasskeysDisabled):
 		c.sendError(id, pb.ErrorCode_ERROR_CODE_BAD_REQUEST, "", err.Error())
+	case errors.Is(err, store.ErrUsernameTaken):
+		c.sendError(id, pb.ErrorCode_ERROR_CODE_USERNAME_TAKEN, "", "that username is taken")
 	case errors.Is(err, auth.ErrInvalidCredentials):
-		c.sendError(id, pb.ErrorCode_ERROR_CODE_INVALID_CREDENTIALS, "", "wrong password")
-	case errors.Is(err, auth.ErrBadToken):
+		c.sendError(id, pb.ErrorCode_ERROR_CODE_INVALID_CREDENTIALS, "", err.Error())
+	case errors.Is(err, auth.ErrBadToken), errors.Is(err, auth.ErrTooManyTries):
 		c.sendError(id, pb.ErrorCode_ERROR_CODE_NOT_FOUND, "", err.Error())
 	case errors.Is(err, auth.ErrMailLimit):
 		c.sendError(id, pb.ErrorCode_ERROR_CODE_RATE_LIMITED, "", err.Error())
@@ -99,95 +99,91 @@ func (s *Server) sendAccountError(c *Conn, id uint32, what string, err error) {
 	}
 }
 
-// passwordKey is the failures limiter key for password checks by a
-// logged-in user from c's address, as for logins.
-func passwordKey(c *Conn) string {
-	return strings.ToLower(c.user.Username) + "|" + addrKey(remoteIP(c.t))
-}
-
-// allowPasswordCheck spends one of c's user's password checks and one of
-// their failures, which the caller returns with passwordChecked.
-func (s *Server) allowPasswordCheck(c *Conn, id uint32) bool {
-	if !limited(c) {
-		return true
-	}
-	now := time.Now()
-	if !s.passwordChecks.Take(c.userKey, now) || !s.failures.Take(passwordKey(c), now) {
-		c.sendError(id, pb.ErrorCode_ERROR_CODE_RATE_LIMITED, "", "too many attempts; try again later")
-		return false
-	}
-	return true
-}
-
-// passwordChecked returns the failure allowPasswordCheck took, unless the
-// password was wrong.
-func (s *Server) passwordChecked(c *Conn, key string, err error) {
-	if limited(c) && !errors.Is(err, auth.ErrInvalidCredentials) {
-		s.failures.Return(key, time.Now())
-	}
-}
-
-// changePassword runs on c's reader, like a login.
-func (s *Server) changePassword(c *Conn, id uint32, m *pb.ChangePassword) {
-	if !s.allowPasswordCheck(c, id) {
+// registerAccount mails a code that creates the account, off the reader.
+func (s *Server) registerAccount(c *Conn, id uint32, m *pb.Register) {
+	if c.user != nil {
+		c.sendError(id, pb.ErrorCode_ERROR_CODE_ALREADY_AUTHENTICATED, "", "already signed in")
 		return
 	}
-	key := passwordKey(c)
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	u, err := hashed(s, ctx, func() (*store.User, error) {
-		return s.auth.ChangePassword(ctx, c.user.ID, m.OldPassword, m.NewPassword, c.token)
+	if !s.auth.MailEnabled() {
+		c.sendError(id, pb.ErrorCode_ERROR_CODE_BAD_REQUEST, "", auth.ErrMailDisabled.Error())
+		return
+	}
+	if limited(c) {
+		now, ip := time.Now(), addrKey(remoteIP(c.t))
+		if !s.attempts.Take(ip, now) || !s.registers.Take(ip, now) {
+			c.sendError(id, pb.ErrorCode_ERROR_CODE_RATE_LIMITED, "", "too many attempts; try again later")
+			return
+		}
+	}
+	c.signingIn.Store(true)
+	s.background(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		challenge, err := s.auth.Register(ctx, m.Username, m.Nickname, m.Email)
+		if err != nil {
+			s.sendAccountError(c, id, "register", err)
+			return
+		}
+		c.send(signInStarted(id, challenge))
 	})
-	s.passwordChecked(c, key, err)
-	if err != nil {
-		s.sendAccountError(c, id, "change password", err)
-		return
-	}
-	c.mustChange.Store(false)
-	s.log.Info("password changed", "user", u.ID)
-	// Other sessions ended; close their connections too.
-	s.closeUserConns(u.ID, c)
-	a, err := s.accountMessage(ctx, u)
-	if err != nil {
-		s.sendAccountError(c, id, "account", err)
-		return
-	}
-	c.send(&pb.ServerMessage{RequestId: id, Body: &pb.ServerMessage_Account{Account: a}})
 }
 
-// checkPassword checks c's user's password, limited as allowPasswordCheck
-// says, holding a hashing slot only for the hash itself. On failure it has
-// sent the error.
-func (s *Server) checkPassword(ctx context.Context, c *Conn, id uint32, key string, password string) (*store.User, bool) {
-	u, err := hashed(s, ctx, func() (*store.User, error) {
-		return s.auth.CheckPassword(ctx, c.user.ID, password)
+func signInStarted(id uint32, challenge string) *pb.ServerMessage {
+	return &pb.ServerMessage{RequestId: id, Body: &pb.ServerMessage_SignInStarted{SignInStarted: &pb.SignInStarted{
+		Challenge: challenge, CodeLength: auth.CodeLength, ExpiresIn: uint32(auth.CodeLifetime.Seconds()),
+	}}}
+}
+
+// requestSignIn answers at once with a challenge, then looks up the
+// account and mails its code in the background, so neither the reply nor
+// its timing says whether the account exists.
+func (s *Server) requestSignIn(c *Conn, id uint32, name string) {
+	if c.user != nil {
+		c.sendError(id, pb.ErrorCode_ERROR_CODE_ALREADY_AUTHENTICATED, "", "already signed in")
+		return
+	}
+	if !s.auth.MailEnabled() {
+		c.sendError(id, pb.ErrorCode_ERROR_CODE_BAD_REQUEST, "", auth.ErrMailDisabled.Error())
+		return
+	}
+	if limited(c) {
+		now, ip := time.Now(), addrKey(remoteIP(c.t))
+		if !s.attempts.Take(ip, now) || !s.codes.Take(ip, now) {
+			c.sendError(id, pb.ErrorCode_ERROR_CODE_RATE_LIMITED, "", "too many attempts; try again later")
+			return
+		}
+	}
+	challenge, err := s.auth.NewChallenge()
+	if err != nil {
+		s.sendAccountError(c, id, "sign in", err)
+		return
+	}
+	c.signingIn.Store(true)
+	c.send(signInStarted(id, challenge))
+	s.background(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		if err := s.auth.RequestSignIn(ctx, challenge, name); err != nil {
+			s.log.Error("sign-in email", "err", err)
+		}
 	})
-	s.passwordChecked(c, key, err)
-	if err != nil {
-		s.sendAccountError(c, id, "check password", err)
-		return nil, false
-	}
-	return u, true
 }
 
-// setEmail checks the password and mails a link, off the reader.
+// setEmail mails the links that change the address, off the reader.
 func (s *Server) setEmail(c *Conn, id uint32, m *pb.SetEmail) {
 	if err := s.auth.CheckEmail(m.Email); err != nil {
 		s.sendAccountError(c, id, "set email", err)
 		return
 	}
-	if !s.allowPasswordCheck(c, id) {
-		return
-	}
-	key := passwordKey(c)
 	s.background(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()
-		u, ok := s.checkPassword(ctx, c, id, key, m.Password)
-		if !ok {
-			return
+		u, err := s.auth.Store.UserByID(ctx, c.user.ID)
+		if err == nil {
+			err = s.auth.SetEmail(ctx, u, m.Email)
 		}
-		if err := s.auth.SetEmail(ctx, u, m.Email); err != nil {
+		if err != nil {
 			s.sendAccountError(c, id, "set email", err)
 			return
 		}
@@ -197,68 +193,47 @@ func (s *Server) setEmail(c *Conn, id uint32, m *pb.SetEmail) {
 	})
 }
 
-// requestReset answers at once, then looks up the account and mails it in
-// the background, so neither the reply nor its timing says whether the
-// account exists.
-func (s *Server) requestReset(c *Conn, id uint32, name string) {
-	if !s.auth.MailEnabled() {
-		c.sendError(id, pb.ErrorCode_ERROR_CODE_BAD_REQUEST, "", auth.ErrMailDisabled.Error())
-		return
-	}
-	if !s.allowFrom(c, id, s.resetRequests) {
-		return
-	}
-	c.send(&pb.ServerMessage{RequestId: id, Body: &pb.ServerMessage_Ack{Ack: &pb.Ack{}}})
-	s.background(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-		defer cancel()
-		if err := s.auth.RequestReset(ctx, name); err != nil {
-			s.log.Error("password reset email", "err", err)
-		}
-	})
-}
-
-// resetPassword sets a new password from a reset link and logs c in.
-func (s *Server) resetPassword(c *Conn, id uint32, m *pb.ResetPassword) {
-	if c.user != nil {
-		c.sendError(id, pb.ErrorCode_ERROR_CODE_ALREADY_AUTHENTICATED, "", "already logged in")
-		return
-	}
-	if !s.allowFrom(c, id, s.attempts) {
-		return
-	}
-	s.authenticate(c, id, func(ctx context.Context) (*auth.Result, error) {
-		res, err := hashed(s, ctx, func() (*auth.Result, error) {
-			return s.auth.ResetPassword(ctx, m.Token, m.NewPassword)
-		})
-		if err == nil {
-			s.log.Info("password reset by email", "user", res.User.ID)
-			s.closeUserConns(res.User.ID, nil)
-		}
-		return res, err
-	})
-}
-
+// verifyEmail takes a token from either link of an address change, off
+// the reader (the first link sends another email).
 func (s *Server) verifyEmail(c *Conn, id uint32, token string) {
 	if !s.allowFrom(c, id, s.attempts) {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	userID, err := s.auth.VerifyEmail(ctx, token)
-	if err != nil {
-		s.sendAccountError(c, id, "verify email", err)
-		return
-	}
-	c.send(&pb.ServerMessage{RequestId: id, Body: &pb.ServerMessage_Ack{Ack: &pb.Ack{}}})
-	if err := s.pushAccount(ctx, userID, reply{}); err != nil {
-		s.log.Error("account", "user", userID, "err", err)
-	}
+	s.background(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		userID, changed, err := s.auth.VerifyEmail(ctx, token)
+		if err != nil {
+			s.sendAccountError(c, id, "verify email", err)
+			return
+		}
+		if changed {
+			s.log.Info("email changed", "user", userID)
+		}
+		c.send(&pb.ServerMessage{RequestId: id, Body: &pb.ServerMessage_Ack{Ack: &pb.Ack{}}})
+		if err := s.pushAccount(ctx, userID, reply{}); err != nil {
+			s.log.Error("account", "user", userID, "err", err)
+		}
+	})
 }
 
-// closeUserConns closes every connection logged in as userID except keep,
+// signOutOthers ends the user's other sessions and closes their other
+// connections.
+func (s *Server) signOutOthers(c *Conn, id uint32) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := s.auth.SignOutOthers(ctx, c.user.ID, c.token); err != nil {
+		s.sendAccountError(c, id, "sign out others", err)
+		return
+	}
+	s.log.Info("signed out other devices", "user", c.user.ID)
+	s.closeUserConns(c.user.ID, c)
+	c.send(&pb.ServerMessage{RequestId: id, Body: &pb.ServerMessage_Ack{Ack: &pb.Ack{}}})
+}
+
+// closeUserConns closes every connection signed in as userID except keep,
 // after their sessions have ended. Their clients reconnect, cannot resume,
-// and ask for a password.
+// and ask the player to sign in.
 func (s *Server) closeUserConns(userID int64, keep *Conn) {
 	s.cmu.RLock()
 	var cs []*Conn
@@ -273,25 +248,80 @@ func (s *Server) closeUserConns(userID int64, keep *Conn) {
 	}
 }
 
-// AdminResetPassword gives a user a temporary password that they must
-// change when they next log in, and disconnects them. It also returns the
-// email address it removed from the account, if any.
-func (s *Server) AdminResetPassword(ctx context.Context, username string) (temp, email string, err error) {
-	var u *store.User
-	_, err = hashed(s, ctx, func() (struct{}, error) {
-		var err error
-		u, temp, err = s.auth.AdminResetPassword(ctx, username)
-		return struct{}{}, err
-	})
+// AdminSetEmail recovers an account: it sets the account's address, ends
+// its sessions, removes its passkeys and disconnects it. It returns the
+// address it replaced ("" if none).
+func (s *Server) AdminSetEmail(ctx context.Context, username, email string) (old string, err error) {
+	u, err := s.auth.AdminSetEmail(ctx, username, email)
 	if errors.Is(err, store.ErrNotFound) {
-		return "", "", fmt.Errorf("no user %q", username)
+		return "", fmt.Errorf("no user %q", username)
 	}
 	if err != nil {
-		return "", "", err
+		return "", err
 	}
-	s.log.Info("password reset by admin", "user", u.ID, "username", u.Username)
+	s.log.Info("email set by admin", "user", u.ID, "username", u.Username)
 	s.closeUserConns(u.ID, nil)
-	return temp, u.Email, nil
+	return u.Email, nil
+}
+
+// Passkeys.
+
+func (s *Server) passkeySignInBegin(c *Conn, id uint32) {
+	if c.user != nil {
+		c.sendError(id, pb.ErrorCode_ERROR_CODE_ALREADY_AUTHENTICATED, "", "already signed in")
+		return
+	}
+	if !s.allowFrom(c, id, s.attempts) {
+		return
+	}
+	opts, sd, err := s.auth.BeginPasskeySignIn()
+	if err != nil {
+		s.sendAccountError(c, id, "passkey", err)
+		return
+	}
+	c.passkey = sd
+	c.signingIn.Store(true)
+	c.send(&pb.ServerMessage{RequestId: id, Body: &pb.ServerMessage_PasskeyOptions{PasskeyOptions: &pb.PasskeyOptions{OptionsJson: opts}}})
+}
+
+func (s *Server) passkeyAddBegin(c *Conn, id uint32) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	opts, sd, err := s.auth.BeginAddPasskey(ctx, c.user)
+	if err != nil {
+		s.sendAccountError(c, id, "add passkey", err)
+		return
+	}
+	c.passkey = sd
+	c.send(&pb.ServerMessage{RequestId: id, Body: &pb.ServerMessage_PasskeyOptions{PasskeyOptions: &pb.PasskeyOptions{OptionsJson: opts}}})
+}
+
+func (s *Server) passkeyAddFinish(c *Conn, id uint32, m *pb.PasskeyAddFinish) {
+	sd := c.passkey
+	c.passkey = nil
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := s.auth.FinishAddPasskey(ctx, c.user, sd, m.CredentialJson, m.Name); err != nil {
+		s.sendAccountError(c, id, "add passkey", err)
+		return
+	}
+	s.log.Info("passkey added", "user", c.user.ID)
+	if err := s.pushAccount(ctx, c.user.ID, reply{c, id}); err != nil {
+		s.sendAccountError(c, id, "account", err)
+	}
+}
+
+func (s *Server) passkeyRemove(c *Conn, id uint32, passkeyID string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := s.auth.RemovePasskey(ctx, c.user.ID, passkeyID); err != nil {
+		s.sendAccountError(c, id, "remove passkey", err)
+		return
+	}
+	s.log.Info("passkey removed", "user", c.user.ID)
+	if err := s.pushAccount(ctx, c.user.ID, reply{c, id}); err != nil {
+		s.sendAccountError(c, id, "account", err)
+	}
 }
 
 // History paging.

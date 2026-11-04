@@ -11,9 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"golang.org/x/crypto/bcrypt"
-
 	"cribbage/internal/auth"
+	"cribbage/internal/auth/passkeytest"
 	"cribbage/internal/client"
 	"cribbage/internal/protocol/pb"
 	"cribbage/internal/store"
@@ -29,25 +28,46 @@ func (f fakeMailer) Send(_ context.Context, to, subject, body string) error {
 	return nil
 }
 
-var linkRE = regexp.MustCompile(`https://crib\.example/#(reset|verify|delete)=([0-9a-f]{64})`)
+var (
+	linkRE = regexp.MustCompile(`https://crib\.example/#(signin|verify|change|delete)=([0-9a-f]{64})`)
+	codeRE = regexp.MustCompile(`\b(\d{4}) (\d{4})\b`)
+)
 
-// link waits for a message to "to" and returns its link's kind and token.
-func (f fakeMailer) link(t *testing.T, to string) (string, string) {
+// mail waits for a message to "to".
+func (f fakeMailer) mail(t *testing.T, to string) sentMail {
 	t.Helper()
 	select {
 	case m := <-f:
 		if m.to != to {
 			t.Fatalf("mail to %s, want %s", m.to, to)
 		}
-		l := linkRE.FindStringSubmatch(m.body)
-		if l == nil {
-			t.Fatalf("no link in %q", m.body)
-		}
-		return l[1], l[2]
+		return m
 	case <-time.After(5 * time.Second):
 		t.Fatal("no mail sent")
 	}
-	return "", ""
+	return sentMail{}
+}
+
+// link waits for a message to "to" and returns its link's kind and token.
+func (f fakeMailer) link(t *testing.T, to string) (string, string) {
+	t.Helper()
+	m := f.mail(t, to)
+	l := linkRE.FindStringSubmatch(m.body)
+	if l == nil {
+		t.Fatalf("no link in %q", m.body)
+	}
+	return l[1], l[2]
+}
+
+// code waits for a sign-in email to "to" and returns its code and link.
+func (f fakeMailer) code(t *testing.T, to string) (string, string) {
+	t.Helper()
+	m := f.mail(t, to)
+	c, l := codeRE.FindStringSubmatch(m.body), linkRE.FindStringSubmatch(m.body)
+	if c == nil || l == nil || l[1] != "signin" {
+		t.Fatalf("no code and link in %q", m.body)
+	}
+	return c[1] + c[2], l[2]
 }
 
 func (f fakeMailer) none(t *testing.T) {
@@ -60,11 +80,15 @@ func (f fakeMailer) none(t *testing.T) {
 }
 
 // startAccountServer starts a server whose mail goes to the returned
-// channel (none if nomail).
+// channel (none if nomail), with passkeys for https://crib.example.
 func startAccountServer(t *testing.T, nomail bool) (*Server, string, fakeMailer) {
 	t.Helper()
 	mails := make(fakeMailer, 16)
-	a := &auth.Service{Store: store.NewMemory(), BcryptCost: bcrypt.MinCost, BaseURL: "https://crib.example"}
+	wa, err := auth.NewWebAuthn("https://crib.example")
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := &auth.Service{Store: store.NewMemory(), BaseURL: "https://crib.example", BotKey: testBotKey, WebAuthn: wa}
 	if !nomail {
 		a.Mailer = mails
 	}
@@ -78,16 +102,11 @@ func startAccountServer(t *testing.T, nomail bool) (*Server, string, fakeMailer)
 	return srv, ln.Addr().String(), mails
 }
 
-// anon is a connection that has not logged in.
+// anon is a connection that has not signed in.
 func anon(t *testing.T, addr string) *tclient {
 	c := connect(t, addr)
 	c.startReading()
 	return c
-}
-
-func loginAs(t *testing.T, addr, user, password string) (*pb.AuthOk, error) {
-	t.Helper()
-	return connect(t, addr).Login(user, password, "", false)
 }
 
 // closed waits for the server to close c.
@@ -106,224 +125,325 @@ func closed(t *testing.T, c *tclient) {
 	}
 }
 
-func changePassword(old, new string) *pb.ClientMessage {
-	return &pb.ClientMessage{Body: &pb.ClientMessage_ChangePassword{ChangePassword: &pb.ChangePassword{OldPassword: old, NewPassword: new}}}
-}
-
-func setEmail(email, password string) *pb.ClientMessage {
-	return &pb.ClientMessage{Body: &pb.ClientMessage_SetEmail{SetEmail: &pb.SetEmail{Email: email, Password: password}}}
+func msg(body any) *pb.ClientMessage {
+	m := &pb.ClientMessage{}
+	switch b := body.(type) {
+	case *pb.Register:
+		m.Body = &pb.ClientMessage_Register{Register: b}
+	case *pb.RequestSignIn:
+		m.Body = &pb.ClientMessage_RequestSignIn{RequestSignIn: b}
+	case *pb.EnterCode:
+		m.Body = &pb.ClientMessage_EnterCode{EnterCode: b}
+	case *pb.UseSignInLink:
+		m.Body = &pb.ClientMessage_UseSignInLink{UseSignInLink: b}
+	case *pb.StartDeviceSignIn:
+		m.Body = &pb.ClientMessage_StartDeviceSignIn{StartDeviceSignIn: b}
+	case *pb.ClaimDeviceSignIn:
+		m.Body = &pb.ClientMessage_ClaimDeviceSignIn{ClaimDeviceSignIn: b}
+	case *pb.ApproveDevice:
+		m.Body = &pb.ClientMessage_ApproveDevice{ApproveDevice: b}
+	case *pb.SetEmail:
+		m.Body = &pb.ClientMessage_SetEmail{SetEmail: b}
+	case *pb.VerifyEmail:
+		m.Body = &pb.ClientMessage_VerifyEmail{VerifyEmail: b}
+	case *pb.SignOutOthers:
+		m.Body = &pb.ClientMessage_SignOutOthers{SignOutOthers: b}
+	case *pb.PasskeySignInBegin:
+		m.Body = &pb.ClientMessage_PasskeySignInBegin{PasskeySignInBegin: b}
+	case *pb.PasskeySignInFinish:
+		m.Body = &pb.ClientMessage_PasskeySignInFinish{PasskeySignInFinish: b}
+	case *pb.PasskeyAddBegin:
+		m.Body = &pb.ClientMessage_PasskeyAddBegin{PasskeyAddBegin: b}
+	case *pb.PasskeyAddFinish:
+		m.Body = &pb.ClientMessage_PasskeyAddFinish{PasskeyAddFinish: b}
+	case *pb.PasskeyRemove:
+		m.Body = &pb.ClientMessage_PasskeyRemove{PasskeyRemove: b}
+	default:
+		panic("msg: unknown body")
+	}
+	return m
 }
 
 func listGames() *pb.ClientMessage {
 	return &pb.ClientMessage{Body: &pb.ClientMessage_ListGames{ListGames: &pb.ListGames{}}}
 }
 
-func TestChangePassword(t *testing.T) {
-	_, addr, _ := startAccountServer(t, false)
-	a := login(t, addr, "alice")
-	other := connect(t, addr)
-	if _, err := other.Resume(a.auth.Token); err != nil {
-		t.Fatal(err)
-	}
-	other.startReading()
-	b, _ := loginAs(t, addr, "alice", "password123") // a second session
-	bob := login(t, addr, "bob")
-
-	wantError(t, a.next(t, replyTo(a.send(t, changePassword("wrong-password", "new-password")))), pb.ErrorCode_ERROR_CODE_INVALID_CREDENTIALS)
-	wantError(t, a.next(t, replyTo(a.send(t, changePassword("password123", "short")))), pb.ErrorCode_ERROR_CODE_BAD_REQUEST)
-	wantError(t, a.next(t, replyTo(a.send(t, changePassword("password123", "password123")))), pb.ErrorCode_ERROR_CODE_BAD_REQUEST)
-
-	m := a.next(t, replyTo(a.send(t, changePassword("password123", "new-password"))))
-	if m.GetAccount() == nil {
-		t.Fatalf("change password: %v", m)
-	}
-	// This connection carries on; the others, on this session or another,
-	// are closed and cannot resume. Other users are untouched.
-	if a.next(t, replyTo(a.send(t, listGames()))).GetGameList() == nil {
-		t.Fatal("connection unusable after changing password")
-	}
-	closed(t, other)
-	if _, err := connect(t, addr).Resume(b.Token); err == nil {
-		t.Fatal("other session survived a password change")
-	}
-	if _, err := connect(t, addr).Resume(a.auth.Token); err != nil {
-		t.Fatalf("this session ended: %v", err)
-	}
-	if bob.next(t, replyTo(bob.send(t, listGames()))).GetGameList() == nil {
-		t.Fatal("another user was disturbed")
-	}
-	if _, err := loginAs(t, addr, "alice", "password123"); err == nil {
-		t.Fatal("old password still works")
-	}
-	if _, err := loginAs(t, addr, "alice", "new-password"); err != nil {
-		t.Fatal(err)
-	}
+// call sends m on c and returns the reply.
+func (c *tclient) call(t *testing.T, m *pb.ClientMessage) *pb.ServerMessage {
+	t.Helper()
+	return c.next(t, replyTo(c.send(t, m)))
 }
 
-func TestEmailVerifyAndReset(t *testing.T) {
-	_, addr, mails := startAccountServer(t, false)
-	a := login(t, addr, "alice")
-	if acct := a.auth.Account; acct == nil || !acct.EmailEnabled || acct.Email != "" {
-		t.Fatalf("account at login: %v", acct)
+// signUp registers a person's account through the emailed code and
+// returns a connection signed in to it.
+func signUp(t *testing.T, addr string, mails fakeMailer, user, email string) *tclient {
+	t.Helper()
+	c := anon(t, addr)
+	st := c.call(t, msg(&pb.Register{Username: user, Email: email})).GetSignInStarted()
+	if st == nil || st.CodeLength != auth.CodeLength {
+		t.Fatalf("register: %v", st)
 	}
-
-	wantError(t, a.next(t, replyTo(a.send(t, setEmail("alice@example.com", "wrong-password")))), pb.ErrorCode_ERROR_CODE_INVALID_CREDENTIALS)
-	wantError(t, a.next(t, replyTo(a.send(t, setEmail("not an address", "password123")))), pb.ErrorCode_ERROR_CODE_BAD_REQUEST)
-	wantError(t, a.next(t, replyTo(a.send(t, setEmail("Al <alice@example.com>", "password123")))), pb.ErrorCode_ERROR_CODE_BAD_REQUEST)
-	mails.none(t)
-
-	acct := a.next(t, replyTo(a.send(t, setEmail("alice@example.com", "password123")))).GetAccount()
-	if acct == nil || acct.Email != "" || acct.PendingEmail != "alice@example.com" {
-		t.Fatalf("after SetEmail: %v", acct)
+	code, _ := mails.code(t, email)
+	a := c.call(t, msg(&pb.EnterCode{Challenge: st.Challenge, Code: code})).GetAuthOk()
+	if a == nil {
+		t.Fatal("register: no AuthOk")
 	}
-	kind, verify := mails.link(t, "alice@example.com")
-	if kind != "verify" {
-		t.Fatalf("link kind %s", kind)
-	}
-
-	// A reset before the address is verified sends nothing.
-	n := anon(t, addr)
-	reset := func(name string) *pb.ClientMessage {
-		return &pb.ClientMessage{Body: &pb.ClientMessage_RequestPasswordReset{RequestPasswordReset: &pb.RequestPasswordReset{Username: name}}}
-	}
-	if n.next(t, replyTo(n.send(t, reset("alice")))).GetAck() == nil {
-		t.Fatal("reset request not acknowledged")
-	}
-	mails.none(t)
-
-	verifyMsg := &pb.ClientMessage{Body: &pb.ClientMessage_VerifyEmail{VerifyEmail: &pb.VerifyEmail{Token: verify}}}
-	if n.next(t, replyTo(n.send(t, verifyMsg))).GetAck() == nil {
-		t.Fatal("verify not acknowledged")
-	}
-	pushed := a.next(t, func(m *pb.ServerMessage) bool { return m.GetAccount() != nil }).GetAccount()
-	if pushed.Email != "alice@example.com" || pushed.PendingEmail != "" {
-		t.Fatalf("account after verifying: %v", pushed)
-	}
-	wantError(t, n.next(t, replyTo(n.send(t, verifyMsg))), pb.ErrorCode_ERROR_CODE_NOT_FOUND)
-
-	// Unknown names and addresses get the same answer, and no mail.
-	for _, name := range []string{"nobody", "nobody@example.com", "bad name!"} {
-		if n.next(t, replyTo(n.send(t, reset(name)))).GetAck() == nil {
-			t.Fatalf("reset request for %q not acknowledged", name)
-		}
-	}
-	mails.none(t)
-
-	// By address, in any case.
-	n.next(t, replyTo(n.send(t, reset("ALICE@example.com"))))
-	kind, token := mails.link(t, "alice@example.com")
-	if kind != "reset" {
-		t.Fatalf("link kind %s", kind)
-	}
-	resetMsg := func(tok, pw string) *pb.ClientMessage {
-		return &pb.ClientMessage{Body: &pb.ClientMessage_ResetPassword{ResetPassword: &pb.ResetPassword{Token: tok, NewPassword: pw}}}
-	}
-	// A password that is too short does not use up the link.
-	wantError(t, n.next(t, replyTo(n.send(t, resetMsg(token, "short")))), pb.ErrorCode_ERROR_CODE_BAD_REQUEST)
-	wantError(t, n.next(t, replyTo(n.send(t, resetMsg(strings.Repeat("0", 64), "brand-new-pw")))), pb.ErrorCode_ERROR_CODE_NOT_FOUND)
-	ok := n.next(t, replyTo(n.send(t, resetMsg(token, "brand-new-pw")))).GetAuthOk()
-	if ok == nil || ok.Username != "alice" || ok.Account.GetEmail() != "alice@example.com" {
-		t.Fatalf("reset: %v", ok)
-	}
-	closed(t, a)
-	if _, err := connect(t, addr).Resume(a.auth.Token); err == nil {
-		t.Fatal("old session survived a reset")
-	}
-	m := anon(t, addr)
-	wantError(t, m.next(t, replyTo(m.send(t, resetMsg(token, "another-pw-1")))), pb.ErrorCode_ERROR_CODE_NOT_FOUND)
-	if _, err := loginAs(t, addr, "alice", "brand-new-pw"); err != nil {
-		t.Fatal(err)
-	}
-
-	// Removing the address.
-	c := login(t, addr, "carol")
-	c.next(t, replyTo(c.send(t, setEmail("carol@example.com", "password123"))))
-	_, verify = mails.link(t, "carol@example.com")
-	n.next(t, replyTo(n.send(t, &pb.ClientMessage{Body: &pb.ClientMessage_VerifyEmail{VerifyEmail: &pb.VerifyEmail{Token: verify}}})))
-	c.next(t, func(m *pb.ServerMessage) bool { return m.GetAccount().GetEmail() != "" })
-	if acct := c.next(t, replyTo(c.send(t, setEmail("", "password123")))).GetAccount(); acct.GetEmail() != "" {
-		t.Fatalf("address not removed: %v", acct)
-	}
-	if m := <-mails; m.to != "carol@example.com" || !strings.Contains(m.body, "was removed") {
-		t.Fatalf("removal notice: %+v", m)
-	}
-	n.next(t, replyTo(n.send(t, reset("carol"))))
-	mails.none(t)
+	c.auth = a
+	return c
 }
 
-func TestMailLimitPerAccount(t *testing.T) {
+// signIn signs in to an account by emailed code on a new connection.
+func signIn(t *testing.T, addr string, mails fakeMailer, user, email string) *tclient {
+	t.Helper()
+	c := anon(t, addr)
+	st := c.call(t, msg(&pb.RequestSignIn{Name: user})).GetSignInStarted()
+	code, _ := mails.code(t, email)
+	a := c.call(t, msg(&pb.EnterCode{Challenge: st.GetChallenge(), Code: code})).GetAuthOk()
+	if a == nil {
+		t.Fatal("sign in: no AuthOk")
+	}
+	c.auth = a
+	return c
+}
+
+func TestRegisterAndSignIn(t *testing.T) {
 	_, addr, mails := startAccountServer(t, false)
-	a := login(t, addr, "alice")
-	a.next(t, replyTo(a.send(t, setEmail("alice@example.com", "password123"))))
-	mails.link(t, "alice@example.com")
-	a.next(t, replyTo(a.send(t, setEmail("alice2@example.com", "password123"))))
-	mails.link(t, "alice2@example.com")
-	a.next(t, replyTo(a.send(t, setEmail("alice3@example.com", "password123"))))
-	mails.link(t, "alice3@example.com")
-	wantError(t, a.next(t, replyTo(a.send(t, setEmail("alice4@example.com", "password123")))), pb.ErrorCode_ERROR_CODE_RATE_LIMITED)
+	a := signUp(t, addr, mails, "alice", "alice@example.com")
+	if a.auth.Username != "alice" || a.auth.Account.GetEmail() != "alice@example.com" || !a.auth.Account.GetPasskeysEnabled() {
+		t.Fatalf("auth: %v", a.auth)
+	}
+	wantError(t, anon(t, addr).call(t, msg(&pb.Register{Username: "Alice", Email: "x@example.com"})), pb.ErrorCode_ERROR_CODE_USERNAME_TAKEN)
+	wantError(t, anon(t, addr).call(t, msg(&pb.Register{Username: "bob", Email: "nope"})), pb.ErrorCode_ERROR_CODE_BAD_REQUEST)
+
+	// By code, by email address.
+	b := signIn(t, addr, mails, "ALICE@example.com", "alice@example.com")
+	if b.auth.UserId != a.auth.UserId || b.auth.Token == a.auth.Token {
+		t.Fatalf("second sign-in: %v", b.auth)
+	}
+	// By link, on another connection than the one that asked.
+	c := anon(t, addr)
+	c.call(t, msg(&pb.RequestSignIn{Name: "alice"}))
+	code, link := mails.code(t, "alice@example.com")
+	d := anon(t, addr)
+	if m := d.call(t, msg(&pb.UseSignInLink{Token: link})); m.GetAuthOk().GetUserId() != a.auth.UserId {
+		t.Fatalf("link: %v", m)
+	}
+	wantError(t, anon(t, addr).call(t, msg(&pb.UseSignInLink{Token: link})), pb.ErrorCode_ERROR_CODE_NOT_FOUND)
+	_ = code
+
+	// Wrong codes, then too many.
+	st := c.call(t, msg(&pb.RequestSignIn{Name: "alice"})).GetSignInStarted()
+	mails.code(t, "alice@example.com")
+	for i := 0; i < 4; i++ {
+		wantError(t, c.call(t, msg(&pb.EnterCode{Challenge: st.Challenge, Code: "1"})), pb.ErrorCode_ERROR_CODE_INVALID_CREDENTIALS)
+	}
+	wantError(t, c.call(t, msg(&pb.EnterCode{Challenge: st.Challenge, Code: "1"})), pb.ErrorCode_ERROR_CODE_NOT_FOUND)
+
+	// Signed in already.
+	wantError(t, a.call(t, msg(&pb.RequestSignIn{Name: "alice"})), pb.ErrorCode_ERROR_CODE_ALREADY_AUTHENTICATED)
+}
+
+// An unknown name gets the same answer, and no email.
+func TestSignInUnknownName(t *testing.T) {
+	_, addr, mails := startAccountServer(t, false)
+	c := anon(t, addr)
+	if st := c.call(t, msg(&pb.RequestSignIn{Name: "nobody@example.com"})).GetSignInStarted(); st == nil || st.Challenge == "" {
+		t.Fatal("no challenge for an unknown address")
+	}
 	mails.none(t)
 }
 
 func TestNoMail(t *testing.T) {
 	_, addr, _ := startAccountServer(t, true)
-	a := login(t, addr, "alice")
-	if a.auth.Account.GetEmailEnabled() {
-		t.Fatal("email enabled without a mailer")
-	}
-	wantError(t, a.next(t, replyTo(a.send(t, setEmail("alice@example.com", "password123")))), pb.ErrorCode_ERROR_CODE_BAD_REQUEST)
-	n := anon(t, addr)
-	m := n.next(t, replyTo(n.send(t, &pb.ClientMessage{Body: &pb.ClientMessage_RequestPasswordReset{
-		RequestPasswordReset: &pb.RequestPasswordReset{Username: "alice"}}})))
-	wantError(t, m, pb.ErrorCode_ERROR_CODE_BAD_REQUEST)
+	c := anon(t, addr)
+	wantError(t, c.call(t, msg(&pb.RequestSignIn{Name: "alice"})), pb.ErrorCode_ERROR_CODE_BAD_REQUEST)
+	wantError(t, c.call(t, msg(&pb.Register{Username: "alice", Email: "a@example.com"})), pb.ErrorCode_ERROR_CODE_BAD_REQUEST)
 }
 
-func TestAdminResetPassword(t *testing.T) {
-	srv, addr, _ := startAccountServer(t, true)
-	a := login(t, addr, "alice")
-	ctx := context.Background()
-	if _, _, err := srv.AdminResetPassword(ctx, "nobody"); err == nil {
-		t.Fatal("reset an unknown user")
+func TestMailLimitPerAccount(t *testing.T) {
+	_, addr, mails := startAccountServer(t, false)
+	signUp(t, addr, mails, "alice", "alice@example.com")
+	c := anon(t, addr)
+	for i := 0; i < 10; i++ {
+		c.call(t, msg(&pb.RequestSignIn{Name: "alice"}))
+		mails.mail(t, "alice@example.com")
 	}
-	// An address someone else may have set goes with the password.
-	if err := srv.auth.Store.SetEmail(ctx, a.auth.UserId, "thief@example.com"); err != nil {
+	c.call(t, msg(&pb.RequestSignIn{Name: "alice"}))
+	mails.none(t)
+}
+
+// Changing the address takes the current address's link, then the new
+// one's; signed-in connections see each step.
+func TestChangeEmail(t *testing.T) {
+	_, addr, mails := startAccountServer(t, false)
+	a := signUp(t, addr, mails, "alice", "old@example.com")
+	acct := a.call(t, msg(&pb.SetEmail{Email: "new@example.com"})).GetAccount()
+	if acct.GetPendingEmail() != "new@example.com" || !acct.GetPendingNeedsCurrent() {
+		t.Fatalf("after asking: %v", acct)
+	}
+	kind, token := mails.link(t, "old@example.com")
+	if kind != "change" {
+		t.Fatalf("first link is %q", kind)
+	}
+	n := anon(t, addr)
+	if m := n.call(t, msg(&pb.VerifyEmail{Token: token})); m.GetAck() == nil {
+		t.Fatalf("first link: %v", m)
+	}
+	a.next(t, func(m *pb.ServerMessage) bool { return m.GetAccount() != nil && !m.GetAccount().PendingNeedsCurrent })
+	kind, token = mails.link(t, "new@example.com")
+	if kind != "verify" {
+		t.Fatalf("second link is %q", kind)
+	}
+	n.call(t, msg(&pb.VerifyEmail{Token: token}))
+	a.next(t, func(m *pb.ServerMessage) bool { return m.GetAccount().GetEmail() == "new@example.com" })
+	if m := mails.mail(t, "old@example.com"); !strings.Contains(m.body, "now go to another address") {
+		t.Fatalf("notice: %+v", m)
+	}
+	wantError(t, n.call(t, msg(&pb.VerifyEmail{Token: token})), pb.ErrorCode_ERROR_CODE_NOT_FOUND)
+	wantError(t, a.call(t, msg(&pb.SetEmail{Email: ""})), pb.ErrorCode_ERROR_CODE_BAD_REQUEST)
+}
+
+func TestSignOutOthers(t *testing.T) {
+	_, addr, mails := startAccountServer(t, false)
+	a := signUp(t, addr, mails, "alice", "alice@example.com")
+	other := connect(t, addr)
+	if _, err := other.Resume(a.auth.Token); err != nil {
 		t.Fatal(err)
 	}
-	temp, removed, err := srv.AdminResetPassword(ctx, "ALICE")
+	other.startReading()
+	b := signIn(t, addr, mails, "alice", "alice@example.com")
+	bob := signUp(t, addr, mails, "bob", "bob@example.com")
+	if m := b.call(t, msg(&pb.SignOutOthers{})); m.GetAck() == nil {
+		t.Fatalf("sign out others: %v", m)
+	}
+	closed(t, a)
+	closed(t, other)
+	if _, err := connect(t, addr).Resume(a.auth.Token); err == nil {
+		t.Fatal("an ended session resumed")
+	}
+	if m := b.call(t, listGames()); m.GetGameList() == nil {
+		t.Fatalf("this device was signed out too: %v", m)
+	}
+	if m := bob.call(t, listGames()); m.GetGameList() == nil {
+		t.Fatalf("another user was signed out: %v", m)
+	}
+}
+
+func TestDeviceSignIn(t *testing.T) {
+	_, addr, mails := startAccountServer(t, false)
+	a := signUp(t, addr, mails, "alice", "alice@example.com")
+	dev := anon(t, addr)
+	dc := dev.call(t, msg(&pb.StartDeviceSignIn{})).GetDeviceCode()
+	if dc == nil || len(dc.Code) != 9 || dc.Url != "https://crib.example/#device="+dc.Code {
+		t.Fatalf("device code: %v", dc)
+	}
+	if m := dev.call(t, msg(&pb.ClaimDeviceSignIn{Challenge: dc.Challenge})); m.GetAck() == nil {
+		t.Fatalf("claim before approval: %v", m)
+	}
+	wantError(t, dev.call(t, msg(&pb.ClaimDeviceSignIn{Challenge: "nope"})), pb.ErrorCode_ERROR_CODE_NOT_FOUND)
+	wantError(t, a.call(t, msg(&pb.ApproveDevice{Code: "BCDF-BCDF"})), pb.ErrorCode_ERROR_CODE_NOT_FOUND)
+	// Case, spaces and the dash do not matter.
+	typed := strings.ToLower(strings.ReplaceAll(dc.Code, "-", " "))
+	if m := a.call(t, msg(&pb.ApproveDevice{Code: typed})); m.GetAck() == nil {
+		t.Fatalf("approve: %v", m)
+	}
+	dev.next(t, func(m *pb.ServerMessage) bool { return m.GetDeviceApproved() != nil })
+	ok := dev.call(t, msg(&pb.ClaimDeviceSignIn{Challenge: dc.Challenge})).GetAuthOk()
+	if ok.GetUserId() != a.auth.UserId || ok.Token == a.auth.Token {
+		t.Fatalf("device signed in as %v", ok)
+	}
+	if m := dev.call(t, listGames()); m.GetGameList() == nil {
+		t.Fatalf("device: %v", m)
+	}
+	// Each code is approved and claimed once.
+	wantError(t, a.call(t, msg(&pb.ApproveDevice{Code: dc.Code})), pb.ErrorCode_ERROR_CODE_NOT_FOUND)
+	wantError(t, anon(t, addr).call(t, msg(&pb.ClaimDeviceSignIn{Challenge: dc.Challenge})), pb.ErrorCode_ERROR_CODE_NOT_FOUND)
+
+	// Approved while the device was away: it claims on its return.
+	dev2 := anon(t, addr)
+	dc2 := dev2.call(t, msg(&pb.StartDeviceSignIn{})).GetDeviceCode()
+	a.call(t, msg(&pb.ApproveDevice{Code: dc2.Code}))
+	back := anon(t, addr)
+	if m := back.call(t, msg(&pb.ClaimDeviceSignIn{Challenge: dc2.Challenge})); m.GetAuthOk().GetUserId() != a.auth.UserId {
+		t.Fatalf("claim after reconnecting: %v", m)
+	}
+}
+
+func TestPasskeySignIn(t *testing.T) {
+	_, addr, mails := startAccountServer(t, false)
+	a := signUp(t, addr, mails, "alice", "alice@example.com")
+	dev := &passkeytest.Authenticator{Origin: "https://crib.example"}
+	opts := a.call(t, msg(&pb.PasskeyAddBegin{})).GetPasskeyOptions()
+	cred, err := dev.Create(opts.GetOptionsJson())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if u, _ := srv.auth.Store.UserByID(ctx, a.auth.UserId); removed != "thief@example.com" || u.Email != "" {
-		t.Fatalf("removed %q, address now %q", removed, u.Email)
+	acct := a.call(t, msg(&pb.PasskeyAddFinish{CredentialJson: cred, Name: "Phone"})).GetAccount()
+	if len(acct.GetPasskeys()) != 1 || acct.Passkeys[0].Name != "Phone" {
+		t.Fatalf("account: %v", acct)
 	}
-	if !regexp.MustCompile(`^[a-z2-9]{4}-[a-z2-9]{4}-[a-z2-9]{4}$`).MatchString(temp) {
-		t.Fatalf("temporary password %q", temp)
+	// A second finish without a begin is refused.
+	wantError(t, a.call(t, msg(&pb.PasskeyAddFinish{CredentialJson: cred})), pb.ErrorCode_ERROR_CODE_BAD_REQUEST)
+
+	c := anon(t, addr)
+	opts = c.call(t, msg(&pb.PasskeySignInBegin{})).GetPasskeyOptions()
+	got, err := dev.Get(opts.GetOptionsJson(), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m := c.call(t, msg(&pb.PasskeySignInFinish{CredentialJson: got})); m.GetAuthOk().GetUserId() != a.auth.UserId {
+		t.Fatalf("passkey sign-in: %v", m)
+	}
+	// The answer cannot be used again, on this connection or another.
+	d := anon(t, addr)
+	d.call(t, msg(&pb.PasskeySignInBegin{}))
+	wantError(t, d.call(t, msg(&pb.PasskeySignInFinish{CredentialJson: got})), pb.ErrorCode_ERROR_CODE_INVALID_CREDENTIALS)
+
+	acct = a.call(t, msg(&pb.PasskeyRemove{Id: acct.Passkeys[0].Id})).GetAccount()
+	if len(acct.GetPasskeys()) != 0 {
+		t.Fatalf("after removing: %v", acct)
+	}
+	wantError(t, a.call(t, msg(&pb.PasskeyRemove{Id: "AAAA"})), pb.ErrorCode_ERROR_CODE_BAD_REQUEST)
+}
+
+// The admin recovers an account: a new address, every device signed out,
+// passkeys gone.
+func TestAdminSetEmail(t *testing.T) {
+	srv, addr, mails := startAccountServer(t, false)
+	a := signUp(t, addr, mails, "alice", "thief@example.com")
+	ctx := context.Background()
+	if err := srv.auth.Store.AddPasskey(ctx, &store.Passkey{ID: []byte("k"), UserID: a.auth.UserId, Data: []byte("{}"), Created: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := srv.AdminSetEmail(ctx, "nobody", "a@example.com"); err == nil {
+		t.Fatal("set an unknown user's address")
+	}
+	old, err := srv.AdminSetEmail(ctx, "ALICE", "owner@example.com")
+	if err != nil || old != "thief@example.com" {
+		t.Fatalf("admin: %q, %v", old, err)
 	}
 	closed(t, a)
-	var se client.ServerError
-	if _, err := connect(t, addr).Resume(a.auth.Token); !errors.As(err, &se) {
-		t.Fatalf("session survived an admin reset: %v", err)
+	if _, err := connect(t, addr).Resume(a.auth.Token); err == nil {
+		t.Fatal("session survived")
 	}
-	if _, err := loginAs(t, addr, "alice", "password123"); err == nil {
-		t.Fatal("old password still works")
+	if keys, _ := srv.auth.Store.Passkeys(ctx, a.auth.UserId); len(keys) != 0 {
+		t.Fatal("passkey survived")
 	}
+	mails.mail(t, "thief@example.com") // told
+	signIn(t, addr, mails, "alice", "owner@example.com")
+}
 
-	c := connect(t, addr)
-	ok, err := c.Login("alice", temp, "", false)
-	if err != nil || !ok.Account.GetMustChangePassword() {
-		t.Fatalf("login with temporary password: %v, %v", ok, err)
+// A bot's key cannot sign in to a person's account.
+func TestBotKeyOnlyForBots(t *testing.T) {
+	_, addr, mails := startAccountServer(t, false)
+	signUp(t, addr, mails, "alice", "alice@example.com")
+	_, err := connect(t, addr).BotLogin("alice", "", testBotKey)
+	var se client.ServerError
+	if !errors.As(err, &se) || se.Code != pb.ErrorCode_ERROR_CODE_INVALID_CREDENTIALS {
+		t.Fatalf("bot key on a person's account: %v", err)
 	}
-	c.startReading()
-	wantError(t, c.next(t, replyTo(c.send(t, listGames()))), pb.ErrorCode_ERROR_CODE_PASSWORD_CHANGE_REQUIRED)
-	wantError(t, c.next(t, replyTo(c.send(t, createGame("random")))), pb.ErrorCode_ERROR_CODE_PASSWORD_CHANGE_REQUIRED)
-	acct := c.next(t, replyTo(c.send(t, changePassword(temp, "chosen-password")))).GetAccount()
-	if acct == nil || acct.MustChangePassword {
-		t.Fatalf("after changing: %v", acct)
-	}
-	if c.next(t, replyTo(c.send(t, listGames()))).GetGameList() == nil {
-		t.Fatal("still blocked after changing password")
-	}
-	if ok, err := loginAs(t, addr, "alice", "chosen-password"); err != nil || ok.Account.GetMustChangePassword() {
-		t.Fatalf("login after changing: %v, %v", ok, err)
+	if _, err := connect(t, addr).BotLogin("robot", "", "not-the-key-at-all"); err == nil {
+		t.Fatal("wrong bot key accepted")
 	}
 }
 

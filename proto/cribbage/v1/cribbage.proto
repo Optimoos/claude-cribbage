@@ -15,7 +15,7 @@ option go_package = "cribbage/internal/protocol/pb";
 // a change would break clients built against the previous version.
 enum ProtocolVersion {
   PROTOCOL_VERSION_UNSPECIFIED = 0;
-  PROTOCOL_VERSION_CURRENT = 1;
+  PROTOCOL_VERSION_CURRENT = 2;
 }
 
 // ---------------------------------------------------------------------------
@@ -30,9 +30,16 @@ message ClientMessage {
   uint32 protocol_version = 2;
   oneof body {
     Register register = 10;
-    Login login = 11;
+    RequestSignIn request_sign_in = 11;
     Resume resume = 12;
     Logout logout = 13;
+    EnterCode enter_code = 14;
+    UseSignInLink use_sign_in_link = 15;
+    StartDeviceSignIn start_device_sign_in = 16;
+    ClaimDeviceSignIn claim_device_sign_in = 17;
+    PasskeySignInBegin passkey_sign_in_begin = 18;
+    PasskeySignInFinish passkey_sign_in_finish = 19;
+    BotLogin bot_login = 9;
     CreateGame create_game = 20;
     JoinGame join_game = 21;
     ListGames list_games = 22;
@@ -46,25 +53,146 @@ message ClientMessage {
     Act act = 30;
     Resign resign = 31;
     Ping ping = 40;
-    ChangePassword change_password = 50;
     SetEmail set_email = 51;
-    RequestPasswordReset request_password_reset = 52;
-    ResetPassword reset_password = 53;
     VerifyEmail verify_email = 54;
     DeleteAccount delete_account = 55;
     ConfirmDeleteAccount confirm_delete_account = 56;
+    SignOutOthers sign_out_others = 57;
+    ApproveDevice approve_device = 58;
+    PasskeyAddBegin passkey_add_begin = 59;
+    PasskeyAddFinish passkey_add_finish = 60;
+    PasskeyRemove passkey_remove = 61;
   }
+  reserved 50, 52, 53; // password messages, removed
 }
 
+// There are no passwords. People sign in with a code mailed to them
+// (RequestSignIn, EnterCode), the link in the same email (UseSignInLink),
+// a passkey (PasskeySignIn...), or by approving a new device from one that
+// is signed in (StartDeviceSignIn, ApproveDevice). Each ends in AuthOk,
+// whose token signs the device in again later (Resume).
+
+// Register starts creating an account: it mails a code (and link) to email,
+// and the reply is SignInStarted. The account is created, signed in, when
+// the code is entered (EnterCode) or the link opened (UseSignInLink).
+// USERNAME_TAKEN if the username is in use, BAD_REQUEST if a field is
+// invalid. Several accounts may share an address.
 message Register {
   string username = 1;
-  string password = 2;
   string nickname = 3;
+  string email = 4;
+  reserved 2;
 }
 
-message Login {
+// RequestSignIn mails a sign-in code and link to the account with this
+// username, or to every account with this email address. The reply is
+// SignInStarted whether or not any account matched, so it does not reveal
+// who has one. A code asked for again within its lifetime is sent again,
+// unchanged.
+message RequestSignIn {
+  string name = 1; // a username or an email address
+}
+
+// SignInStarted: enter the emailed code with this challenge (EnterCode).
+message SignInStarted {
+  string challenge = 1;
+  uint32 code_length = 2; // digits in the code
+  uint32 expires_in = 3; // seconds
+}
+
+// EnterCode finishes signing in (or registering) with the code from the
+// email. The reply is AuthOk; INVALID_CREDENTIALS for a wrong code;
+// NOT_FOUND once the challenge has expired or had too many wrong codes, or
+// RATE_LIMITED after too many wrong codes for the account. If an address
+// shared by several accounts was given, each account's code signs in that
+// account.
+message EnterCode {
+  string challenge = 1;
+  string code = 2;
+}
+
+// UseSignInLink signs in with the token from an emailed link (the web
+// client's #signin=...). It signs in the device that opens the link, not
+// the one that asked for it. The reply is AuthOk, or NOT_FOUND if the link
+// has expired or was used.
+message UseSignInLink {
+  string token = 1;
+}
+
+// StartDeviceSignIn begins signing in by approval from another device: the
+// reply is DeviceCode. Show its code and URL, and send ClaimDeviceSignIn;
+// once a signed-in user approves the code (ApproveDevice), claim it again
+// to be signed in as them.
+message StartDeviceSignIn {}
+
+message DeviceCode {
+  string challenge = 1; // secret: for ClaimDeviceSignIn only
+  string code = 2; // to show, e.g. "BCDF-GHJK"
+  string url = 3; // where to approve it, with the code filled in
+  uint32 expires_in = 4; // seconds
+}
+
+// ClaimDeviceSignIn signs in with an approved DeviceCode: the reply is
+// AuthOk. Until it is approved the reply is Ack, and the server sends this
+// connection DeviceApproved when it is; claim it again then. NOT_FOUND once
+// it has expired (or was claimed). A connection waiting for approval is not
+// closed for failing to sign in; after reconnecting, claim it again.
+message ClaimDeviceSignIn {
+  string challenge = 1;
+}
+
+// DeviceApproved: the DeviceCode this connection is waiting for was
+// approved; send ClaimDeviceSignIn.
+message DeviceApproved {}
+
+// ApproveDevice signs in the device showing this code (DeviceCode.code;
+// case, spaces and dashes are ignored) as the user. The reply is Ack, or
+// NOT_FOUND for an unknown or expired code.
+message ApproveDevice {
+  string code = 1;
+}
+
+// Passkeys (WebAuthn), for clients that can use them; Account says whether
+// the server offers them. The JSON is what the browser's WebAuthn API takes
+// and returns (PublicKeyCredential.toJSON()).
+//
+// PasskeySignInBegin's reply is PasskeyOptions, for
+// navigator.credentials.get(); PasskeySignInFinish sends the credential it
+// returns, and the reply is AuthOk or INVALID_CREDENTIALS.
+message PasskeySignInBegin {}
+
+message PasskeySignInFinish {
+  string credential_json = 1;
+}
+
+// PasskeyAddBegin's reply is PasskeyOptions, for
+// navigator.credentials.create(); PasskeyAddFinish sends the new
+// credential, and the reply is Account.
+message PasskeyAddBegin {}
+
+message PasskeyAddFinish {
+  string credential_json = 1;
+  string name = 2; // e.g. "iPhone"; may be empty
+}
+
+// PasskeyRemove removes one of the user's passkeys. The reply is Account.
+message PasskeyRemove {
+  string id = 1; // Passkey.id
+}
+
+message PasskeyOptions {
+  string options_json = 1;
+}
+
+// BotLogin signs in a headless client (cmd/botclient) with the server's bot
+// key, creating a bot account if there is none with this username. Bot
+// accounts have no email address and cannot sign in otherwise; no other
+// account can sign in this way. INVALID_CREDENTIALS if the key is wrong or
+// the server has none.
+message BotLogin {
   string username = 1;
-  string password = 2;
+  string nickname = 2; // for a new account; the username if empty
+  string key = 3;
 }
 
 // Resume authenticates with a token from a previous AuthOk.
@@ -145,70 +273,50 @@ message GetHistory {
   uint32 limit = 2; // games per page: 0 means 50, and at most 100
 }
 
-// ChangePassword sets a new password. The user's other sessions end and
-// their other connections close; this one stays logged in. The reply is
-// Account, or INVALID_CREDENTIALS if old_password is wrong.
-message ChangePassword {
-  string old_password = 1;
-  string new_password = 2;
-}
-
-// SetEmail sets the address that password reset links go to. The server
-// mails a link to it, and the address is used once the link is opened
-// (VerifyEmail); until then it is Account.pending_email. An empty email
-// removes the address. password is the current password. The reply is
-// Account.
+// SetEmail changes the address that sign-in codes go to. The server mails
+// a link to the current address to confirm the change and, once that is
+// opened, a link to the new address; the address changes when that one is
+// opened (both links send VerifyEmail). Until then it is
+// Account.pending_email. An account with no address (a bot) gets only the
+// second link. The reply is Account.
 message SetEmail {
   string email = 1;
-  string password = 2;
+  reserved 2;
 }
 
-// RequestPasswordReset mails a reset link to each account with this
-// username or verified email address. The reply is Ack whether or not any
-// account matched, so it does not reveal who has an account; BAD_REQUEST
-// if the server cannot send mail. Allowed before logging in.
-message RequestPasswordReset {
-  string username = 1; // or an email address
-}
-
-// ResetPassword sets a new password with the token from a reset link, ends
-// every session of the account, and logs this connection in: the reply is
-// AuthOk. NOT_FOUND if the link has expired or was used. Allowed only before
-// logging in.
-message ResetPassword {
-  string token = 1;
-  string new_password = 2;
-}
-
-// VerifyEmail confirms an address with the token from a SetEmail link. The
-// reply is Ack, and connections logged in as that user receive Account.
-// NOT_FOUND if the link has expired or was used. Allowed before logging in.
+// VerifyEmail confirms a step of an address change with the token from
+// either SetEmail link (the web client's #change=... and #verify=...). The
+// reply is Ack, and connections signed in as that user receive Account.
+// NOT_FOUND if the link has expired or was used. Allowed before signing in.
 message VerifyEmail {
   string token = 1;
 }
 
-// DeleteAccount starts deleting the user's account, given their password.
-// With a verified email address (and a server that can send mail), the
-// reply is Ack and a link is mailed to that address; the account is
-// deleted only when ConfirmDeleteAccount sends the link's token. Without
-// one, username must be typed again to confirm, and the account is deleted
-// at once: the reply is AccountDeleted, and the server closes every
-// connection of the account.
+// DeleteAccount starts deleting the user's account. The reply is Ack and a
+// link is mailed to the account's address; the account is deleted only
+// when ConfirmDeleteAccount sends the link's token. A bot account, which
+// has no address, is deleted at once if username is its username: the
+// reply is AccountDeleted, and the server closes every connection of the
+// account.
 //
 // Deleting ends the user's unfinished games (resigning active ones), drops
 // their invites, and removes the account. Finished games stay in their
 // opponents' history, with the player shown as "Deleted player".
 message DeleteAccount {
-  string password = 1;
   string username = 2;
+  reserved 1;
 }
 
 // ConfirmDeleteAccount deletes an account with the token from a
 // DeleteAccount link. The reply is AccountDeleted. NOT_FOUND if the link
-// has expired or was used. Allowed before logging in.
+// has expired or was used. Allowed before signing in.
 message ConfirmDeleteAccount {
   string token = 1;
 }
+
+// SignOutOthers ends every session of the user but this one and closes
+// their other connections. The reply is Ack.
+message SignOutOthers {}
 
 // ---------------------------------------------------------------------------
 // Server -> client
@@ -227,6 +335,10 @@ message ServerMessage {
     Invites invites = 24; // the user's pending invites, whenever they change
     History history = 25;
     AccountDeleted account_deleted = 26;
+    SignInStarted sign_in_started = 27;
+    DeviceCode device_code = 28;
+    PasskeyOptions passkey_options = 29;
+    DeviceApproved device_approved = 30;
     Account account = 12; // the user's account settings, whenever they change
     Pong pong = 40;
   }
@@ -246,9 +358,7 @@ enum ErrorCode {
   ERROR_CODE_INTERNAL = 10;
   ERROR_CODE_RATE_LIMITED = 11; // too many attempts; try again later
   ERROR_CODE_TOO_MANY_GAMES = 12; // a player is at a limit on games or invites
-  // The admin reset this user's password: ChangePassword (or Logout) is
-  // the only request allowed until a new one is chosen.
-  ERROR_CODE_PASSWORD_CHANGE_REQUIRED = 13;
+  reserved 13; // PASSWORD_CHANGE_REQUIRED, removed
   // The client was built for another ProtocolVersion; the server closes
   // the connection after sending this.
   ERROR_CODE_UPGRADE_REQUIRED = 14;
@@ -269,20 +379,29 @@ message AuthOk {
   Account account = 5;
 }
 
-// Account is what a user can change about their account.
 // AccountDeleted: the account is gone, and the server closes every
 // connection logged in as it.
 message AccountDeleted {
   string username = 1;
 }
 
+// Account is what a user can see and change about their account.
 message Account {
-  string email = 1; // verified address for reset links; empty if none
-  string pending_email = 2; // set but not yet verified
-  // The admin reset the password: the user must choose a new one with
-  // ChangePassword before anything else.
-  bool must_change_password = 3;
-  bool email_enabled = 4; // the server can send mail
+  string email = 1; // verified address for sign-in codes; empty for a bot
+  string pending_email = 2; // asked for but not yet confirmed
+  // The change of address waits for the link sent to the current address;
+  // after that, for the one sent to pending_email.
+  bool pending_needs_current = 7;
+  bool passkeys_enabled = 5; // the server offers passkeys
+  repeated Passkey passkeys = 6;
+  reserved 3, 4;
+}
+
+message Passkey {
+  string id = 1; // base64url credential ID
+  string name = 2;
+  int64 created = 3; // Unix ms
+  int64 last_used = 4; // Unix ms; 0 if never
 }
 
 message MatchQueued {}

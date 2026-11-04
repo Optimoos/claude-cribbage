@@ -11,8 +11,6 @@ import (
 	"testing"
 	"time"
 
-	"golang.org/x/crypto/bcrypt"
-
 	"google.golang.org/protobuf/proto"
 
 	"cribbage/internal/auth"
@@ -253,7 +251,7 @@ func (f *failingActions) CommitGame(ctx context.Context, id string, g *store.Gam
 func TestUnsavedStartIsCancelled(t *testing.T) {
 	games := &failingActions{Memory: store.NewMemory()}
 	srv := New(Config{
-		Auth:       &auth.Service{Store: store.NewMemory(), BcryptCost: bcrypt.MinCost},
+		Auth:       &auth.Service{Store: store.NewMemory(), BotKey: testBotKey},
 		Games:      games,
 		Logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
 		GameLimits: loadLimits,

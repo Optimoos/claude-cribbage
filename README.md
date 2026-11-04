@@ -14,6 +14,9 @@ go run ./cmd/cribserver -db ""      # in-memory only (nothing survives a restart
 go run ./cmd/cribserver -model models-ft/best.bin   # also offer the "nn" bot
 go run ./cmd/cribserver -expert models-expert/expert.bin   # also offer the "expert" bots (three levels)
 go run ./cmd/cribserver -config cribserver.conf   # read settings from a file (see deploy/cribserver.conf)
+# Bots sign in with the server's bot key: start the server with
+# -bot-key-file bot.key (or CRIBBAGE_BOT_KEY), and give the bots the same.
+export CRIBBAGE_BOT_KEY=$(openssl rand -hex 16)
 go run ./cmd/botclient -user alice -opponent heuristic -games 1000 -concurrent 100
 go run ./cmd/botclient -user bob -games 1000      # matchmaking: run two of these
 go run ./cmd/botclient -addr ws://localhost:8080/rtc -user carol -opponent random   # over WebRTC
@@ -180,7 +183,7 @@ godot --path .          # or open project.godot in the editor
 
 ```sh
 godot --headless --path . -- --server ws://127.0.0.1:8080/rtc --profile t1 \
-  --autoplay --user t1 --password password123 --vs heuristic   # or --open / --join
+  --autoplay --user t1 --bot-key "$CRIBBAGE_BOT_KEY" --vs heuristic   # or --open / --join
 ```
 
   Autoplay plays random legal moves through the UI code and quits when the
@@ -206,16 +209,24 @@ systemd behind Caddy for HTTPS, with UDP 7778 open for WebRTC, daily
 database backups (`-backup-dir`, `-backup-every`, `-backup-keep`), rate
 limits and `-rtc-public-only`. The server stops cleanly on SIGINT or SIGTERM.
 
-**Accounts.** Players can change their password, and can add a confirmed
-email address for "Forgot your password?" links (`-smtp`, `-mail-from`,
-`-public-url`). Addresses are stored encrypted under `-email-key-file`
-(64 hex digits: `openssl rand -hex 32`), which email needs. For local
-testing, `-mail-log` writes emails, links included, to the log instead of
-sending them. Players can delete their accounts, confirmed by an emailed
-link if they have an address. The admin resets anyone's password with
-`cribserver admin reset-password <user>` and deletes accounts with
+**Accounts.** There are no passwords. Players sign in with a code emailed
+to them (or the link in the same email), with a passkey in the web
+client, or, in the desktop app, by approving the code it shows from a
+signed-in device ("Sign in with browser"). Registering takes an email
+address, which family members can share; sessions last 90 days from last
+use. Email needs `-smtp`, `-mail-from` and `-public-url` (which passkeys
+are tied to). Without `-smtp`, emails, codes included, are written to the
+log, which is fine for testing on your own machine. Addresses are stored
+encrypted under `-email-key-file` (64 hex digits: `openssl rand -hex 32`;
+without it, a key is kept beside the database in `<db>.email-key`).
+Changing an address is confirmed from the old address and then the new
+one. Players can sign out their other devices, and delete their accounts
+by an emailed link. The admin recovers an account with
+`cribserver admin set-email <user> <address>` (which also signs it out
+everywhere and removes its passkeys) and deletes accounts with
 `cribserver admin delete-account <user>`, which reach the running server
-through `-admin-socket`.
+through `-admin-socket`. Headless bots sign in to bot accounts with
+`-bot-key-file`.
 
 **Versions, bugs and privacy.** Every client message carries a protocol
 version; the server refuses others and tells the client to update. Both

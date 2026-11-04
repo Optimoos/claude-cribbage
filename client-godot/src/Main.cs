@@ -36,8 +36,9 @@ public partial class Main : Control
 
     // Login
     Control loginView = null!;
-    LineEdit serverEdit = null!, userEdit = null!, passEdit = null!, nickEdit = null!;
+    LineEdit serverEdit = null!, userEdit = null!;
     Label loginError = null!;
+    bool shownOnce;
 
     // Lobby
     Control lobbyView = null!;
@@ -92,6 +93,7 @@ public partial class Main : Control
     {
         conn?.Poll();
         PollWaiters();
+        LoginTick();
         if (opts.Autoplay)
         {
             AutoplayTick();
@@ -116,7 +118,7 @@ public partial class Main : Control
         if (!SafeServer(url))
         {
             // Over plain ws:// anyone on the network path could swap the
-            // WebRTC answer and read the password off the data channel.
+            // WebRTC answer and read the session token off the data channel.
             conn = null;
             SetStatus("use wss:// for a server on the internet");
             return;
@@ -288,6 +290,7 @@ public partial class Main : Control
         else
         {
             ShowLogin(true);
+            ResumeLogin();
         }
     }
 
@@ -313,17 +316,9 @@ public partial class Main : Control
                 settings.Token = me.Token;
                 settings.LastUser = me.Username;
                 loginError.Text = "";
-                forgotWindow?.QueueFree();
-                forgotWindow = null;
+                ResetLogin();
                 ShowLogin(false);
-                if (account.MustChangePassword)
-                {
-                    ShowAccount();
-                }
-                else
-                {
-                    Send(new ClientMessage { ListGames = new ListGames() });
-                }
+                Send(new ClientMessage { ListGames = new ListGames() });
                 RenderAll();
                 if (opts.Show == "history")
                 {
@@ -377,6 +372,9 @@ public partial class Main : Control
             case ServerMessage.BodyOneofCase.AccountDeleted:
                 AccountDeleted();
                 break;
+            case ServerMessage.BodyOneofCase.DeviceApproved:
+                OnDeviceApproved();
+                break;
         }
         AutoplayMessage(m);
     }
@@ -407,7 +405,7 @@ public partial class Main : Control
                     AccountDeleted(); // the reply was lost as the server closed
                     return;
                 }
-                settings.Token = ""; // stale session; ask for a password
+                settings.Token = ""; // stale session; sign in again
                 CloseAccountWindows();
                 ShowLogin(true);
                 return;
@@ -417,15 +415,6 @@ public partial class Main : Control
             return;
         }
         awaiting = false;
-        if (e.Code == ErrorCode.PasswordChangeRequired)
-        {
-            account.MustChangePassword = true;
-            if (accountWindow == null)
-            {
-                ShowAccount();
-            }
-            return;
-        }
         Notice(e.Message);
         if (selected != null && games.TryGetValue(selected, out var gs) && gs.Update != null && !gs.V.Busy)
         {
@@ -578,54 +567,6 @@ public partial class Main : Control
         RenderAll();
     }
 
-    Control BuildLogin()
-    {
-        var shade = new ColorRect { Color = Style.P.Page with { A = 0.94f } };
-        var center = new CenterContainer();
-        shade.AddChild(center);
-        center.SetAnchorsAndOffsetsPreset(LayoutPreset.FullRect);
-        var panel = new PanelContainer { CustomMinimumSize = new Vector2(380, 0) };
-        center.AddChild(panel);
-        var box = new VBoxContainer();
-        box.AddThemeConstantOverride("separation", 10);
-        panel.AddChild(box);
-        box.AddChild(Style.Label("♠ Cribbage", 32, Style.P.Accent));
-        box.AddChild(Style.Label("Log in or create an account.", 15, Style.P.Muted));
-
-        LineEdit Field(string label, string placeholder)
-        {
-            box.AddChild(Style.Label(label, 14, Style.P.Muted));
-            var e = new LineEdit { PlaceholderText = placeholder };
-            box.AddChild(e);
-            return e;
-        }
-        serverEdit = Field("Server", "wss://host/rtc");
-        serverEdit.Text = settings.Server;
-        serverEdit.TextSubmitted += _ => ChangeServer();
-        serverEdit.FocusExited += ChangeServer;
-        userEdit = Field("Username", "");
-        userEdit.Text = settings.LastUser;
-        passEdit = Field("Password", "");
-        passEdit.Secret = true;
-        passEdit.TextSubmitted += _ => Login(false);
-        nickEdit = Field("Nickname", "for new accounts (optional)");
-
-        var row = new HBoxContainer();
-        row.AddThemeConstantOverride("separation", 10);
-        box.AddChild(row);
-        row.AddChild(Style.Primary("Log in", () => Login(false)));
-        row.AddChild(Style.Button("Register", () => Login(true)));
-        loginError = Style.Label("", 14, Style.P.Theirs);
-        loginError.AutowrapMode = TextServer.AutowrapMode.WordSmart;
-        box.AddChild(loginError);
-        var forgot = new LinkButton { Text = "Forgot your password?", Underline = LinkButton.UnderlineMode.OnHover };
-        forgot.AddThemeColorOverride("font_color", Style.P.Accent);
-        forgot.Pressed += ShowForgot;
-        box.AddChild(forgot);
-        box.AddChild(Links());
-        return shade;
-    }
-
     void ChangeServer()
     {
         var url = serverEdit.Text.Trim();
@@ -636,25 +577,6 @@ public partial class Main : Control
         settings.Server = url;
         Connect();
         FetchBots();
-    }
-
-    void Login(bool register)
-    {
-        ChangeServer();
-        if (conn is not { IsOpen: true })
-        {
-            LoginMessage(upgradeMessage != "" ? upgradeMessage : "Not connected yet…");
-            return;
-        }
-        LoginMessage("");
-        if (register)
-        {
-            Send(new ClientMessage { Register = new Register { Username = userEdit.Text, Password = passEdit.Text, Nickname = nickEdit.Text } });
-        }
-        else
-        {
-            Send(new ClientMessage { Login = new Login { Username = userEdit.Text, Password = passEdit.Text } });
-        }
     }
 
     // LoginMessage shows text under the login form: an error, or (ok) news.
@@ -668,14 +590,25 @@ public partial class Main : Control
     {
         loginShown = show && !opts.Autoplay;
         loginView.Visible = loginShown;
-        if (loginShown && opts.Show == "forgot" && forgotWindow == null)
+        if (loginShown && !shownOnce && conn is { IsOpen: true })
         {
-            ShowForgot();
+            // --show: open a sign-in screen once connected, for screenshots.
+            shownOnce = true;
+            switch (opts.Show)
+            {
+                case "register":
+                    SetLoginStage(LoginStage.Register);
+                    break;
+                case "code":
+                    userEdit.Text = opts.User != "" ? opts.User : userEdit.Text;
+                    RequestCode();
+                    break;
+                case "device":
+                    StartDevice();
+                    break;
+            }
         }
-        if (loginShown)
-        {
-            (userEdit.Text == "" ? userEdit : passEdit).GrabFocus();
-        }
+        FocusLogin();
     }
 
     Control BuildLobby()
@@ -705,7 +638,7 @@ public partial class Main : Control
         acct.AddChild(who);
         status = Style.Label("", 13, Style.P.Muted);
         acct.AddChild(status);
-        acct.AddChild(Style.Button("Log out", Logout));
+        acct.AddChild(Style.Button("Sign out", Logout));
         box.AddChild(acct);
 
         box.AddChild(Heading("New game"));

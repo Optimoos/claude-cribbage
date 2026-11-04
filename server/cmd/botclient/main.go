@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 	"time"
 
 	"cribbage/internal/ai"
@@ -21,8 +22,8 @@ import (
 func main() {
 	var cfg botclient.Config
 	flag.StringVar(&cfg.Addr, "addr", "localhost:7777", "server address: TCP host:port, or ws://host:port/rtc for WebRTC")
-	flag.StringVar(&cfg.Username, "user", "bot1", "username (registered on first use)")
-	flag.StringVar(&cfg.Password, "pass", "botpassword", "password")
+	flag.StringVar(&cfg.Username, "user", "bot1", "bot account username (created on first use)")
+	keyFile := flag.String("key-file", "", "file holding the server's bot key (cribserver -bot-key-file), or set CRIBBAGE_BOT_KEY")
 	flag.StringVar(&cfg.Nickname, "nick", "", "nickname (defaults to username)")
 	flag.StringVar(&cfg.Bot, "bot", "heuristic", "local bot that makes decisions")
 	flag.StringVar(&cfg.Opponent, "opponent", "", "server-side bot opponent; empty uses matchmaking")
@@ -32,6 +33,19 @@ func main() {
 	flag.DurationVar(&cfg.Reconnect, "reconnect", 30*time.Second, "how long to keep retrying a lost connection (negative disables)")
 	model := flag.String("model", "", "neural network model, playable locally with -bot nn")
 	flag.Parse()
+	cfg.Key = os.Getenv("CRIBBAGE_BOT_KEY")
+	if *keyFile != "" {
+		b, err := os.ReadFile(*keyFile)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
+		cfg.Key = strings.TrimSpace(string(b))
+	}
+	if cfg.Key == "" {
+		fmt.Fprintln(os.Stderr, "error: bots sign in with the server's bot key: pass -key-file or set CRIBBAGE_BOT_KEY")
+		os.Exit(2)
+	}
 
 	if *model != "" {
 		if _, err := ai.Register(*model); err != nil {

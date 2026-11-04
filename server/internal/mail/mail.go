@@ -1,5 +1,5 @@
-// Package mail sends plain-text email: password reset and address
-// verification links.
+// Package mail sends plain-text email: sign-in codes and links, and
+// account links (address changes, deletion).
 package mail
 
 import (
@@ -169,12 +169,13 @@ func (m *SMTP) message(to, subject, body string) ([]byte, error) {
 }
 
 // Log writes messages to a logger instead of sending them, for testing.
-// The links in them are secrets: do not use it on a public server.
+// The codes and links in them sign people in: do not use it on a public
+// server.
 type Log struct {
 	Logger *slog.Logger
 }
 
 func (l Log) Send(_ context.Context, to, subject, body string) error {
-	l.Logger.Info("mail (not sent: -mail-log)", "to", to, "subject", subject, "body", body)
+	l.Logger.Info("mail (not sent: no -smtp)", "to", to, "subject", subject, "body", body)
 	return nil
 }

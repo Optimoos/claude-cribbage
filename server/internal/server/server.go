@@ -12,7 +12,6 @@ import (
 	"net"
 	"runtime"
 	"strconv"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -44,7 +43,7 @@ type Config struct {
 	Games      store.GameStore // defaults to an in-memory store
 	Logger     *slog.Logger
 	OutboxSize int // per-connection outbound queue; default 4096
-	// AuthLimits bounds login and registration attempts; nil uses
+	// AuthLimits bounds sign-in and registration attempts; nil uses
 	// DefaultAuthLimits.
 	AuthLimits *AuthLimits
 	// GameLimits bounds games and invites per player and sets how long
@@ -89,25 +88,24 @@ var DefaultGameLimits = GameLimits{
 	SweepEvery: time.Hour,
 }
 
-// AuthLimits bounds password attempts from remote clients, as token buckets
+// AuthLimits bounds sign-in attempts from remote clients, as token buckets
 // (a burst, then one more per interval). Connections from loopback or with
 // no address (in-process transports) are not limited.
 type AuthLimits struct {
-	AttemptsPerIP   int // logins and registrations from one address
-	AttemptEvery    time.Duration
-	RegistersPerIP  int // registrations from one address
-	RegisterEvery   time.Duration
-	FailuresPerUser int // failed logins to one username
-	FailureEvery    time.Duration
+	AttemptsPerIP  int // sign-in attempts (codes, links, passkeys) from one address
+	AttemptEvery   time.Duration
+	RegistersPerIP int // registrations from one address
+	RegisterEvery  time.Duration
+	CodesPerIP     int // sign-in codes asked for from one address
+	CodeEvery      time.Duration
 	// Connections: at most ConnsPerAddr from one address (as limited
-	// above) and Conns in all; one that has not logged in after
-	// LoginWithin is closed.
+	// above) and Conns in all; one that has not signed in after
+	// LoginWithin is closed, or after SignInWithin if it started signing
+	// in (asked for a code, say).
 	ConnsPerAddr int
 	Conns        int
 	LoginWithin  time.Duration
-	// Hashing is how many bcrypt operations may run at once (default
-	// GOMAXPROCS-1), so a flood of logins cannot starve the games.
-	Hashing int
+	SignInWithin time.Duration
 	// Requests after logging in: ActionsPerUser at once, then one more
 	// every ActionEvery, across all of a player's connections. Zero uses
 	// the default.
@@ -116,15 +114,16 @@ type AuthLimits struct {
 }
 
 // DefaultAuthLimits allows 20 quick attempts per address then 10 a minute,
-// 5 registrations then 5 an hour, and 10 failed logins per username from
-// one address then 1 a minute. IPv6 addresses count by their /64. A player
-// may make 60 requests at once, then 10 a second: far more than anyone
-// clicking, but it bounds a script.
+// 5 registrations then 5 an hour, and 10 sign-in codes then 1 a minute.
+// (Each account and address also gets few emails, and few wrong codes: see
+// the auth package.) IPv6 addresses count by their /64. A player may make
+// 60 requests at once, then 10 a second: far more than anyone clicking,
+// but it bounds a script.
 var DefaultAuthLimits = AuthLimits{
 	AttemptsPerIP: 20, AttemptEvery: 6 * time.Second,
 	RegistersPerIP: 5, RegisterEvery: 12 * time.Minute,
-	FailuresPerUser: 10, FailureEvery: time.Minute,
-	ConnsPerAddr: 20, Conns: 5000, LoginWithin: 30 * time.Second,
+	CodesPerIP: 10, CodeEvery: time.Minute,
+	ConnsPerAddr: 20, Conns: 5000, LoginWithin: 30 * time.Second, SignInWithin: 20 * time.Minute,
 	ActionsPerUser: 60, ActionEvery: 100 * time.Millisecond,
 }
 
@@ -153,10 +152,9 @@ type Server struct {
 	qmu   sync.Mutex
 	queue []matchRequest
 
-	attempts, registers, failures *ratelimit.Limiter
-	hashing                       chan struct{}
-	actions                       *ratelimit.Limiter // requests per user, once logged in
-	botMoves                      chan struct{}      // bot decisions in progress
+	attempts, registers, codes *ratelimit.Limiter
+	actions                    *ratelimit.Limiter // requests per user, once signed in
+	botMoves                   chan struct{}      // bot decisions in progress
 
 	limits  GameLimits
 	authLim AuthLimits // connection limits (cmu guards connsByAddr)
@@ -173,8 +171,8 @@ type Server struct {
 	imu                    sync.Mutex
 	inv                    invites
 	invitesSent, codeTries *ratelimit.Limiter
-	resetRequests          *ratelimit.Limiter // password reset emails asked for, by address
-	passwordChecks         *ratelimit.Limiter // password checks by a logged-in user, right or wrong
+
+	devices devices // sign-ins waiting for approval from another device
 
 	bg sync.WaitGroup // background requests, such as sending email
 
@@ -207,8 +205,8 @@ func New(cfg Config) *Server {
 	if cfg.AuthLimits != nil {
 		lim = *cfg.AuthLimits
 	}
-	if lim.Hashing <= 0 {
-		lim.Hashing = max(1, runtime.GOMAXPROCS(0)-1) // leave a core for the games
+	if lim.SignInWithin < lim.LoginWithin {
+		lim.SignInWithin = max(lim.LoginWithin, DefaultAuthLimits.SignInWithin)
 	}
 	if lim.ActionsPerUser <= 0 {
 		lim.ActionsPerUser, lim.ActionEvery = DefaultAuthLimits.ActionsPerUser, DefaultAuthLimits.ActionEvery
@@ -219,8 +217,7 @@ func New(cfg Config) *Server {
 	s := &Server{
 		attempts:    ratelimit.New(lim.AttemptsPerIP, lim.AttemptEvery),
 		registers:   ratelimit.New(lim.RegistersPerIP, lim.RegisterEvery),
-		failures:    ratelimit.New(lim.FailuresPerUser, lim.FailureEvery),
-		hashing:     make(chan struct{}, lim.Hashing),
+		codes:       ratelimit.New(lim.CodesPerIP, lim.CodeEvery),
 		actions:     ratelimit.New(lim.ActionsPerUser, lim.ActionEvery),
 		botMoves:    make(chan struct{}, gl.BotMoves),
 		limits:      gl,
@@ -233,22 +230,17 @@ func New(cfg Config) *Server {
 		// one a minute.
 		invitesSent: ratelimit.New(10, 6*time.Minute),
 		codeTries:   ratelimit.New(10, time.Minute),
-		// Five password reset requests from an address, then one every ten
-		// minutes. Each account also gets few emails (auth.Service).
-		resetRequests: ratelimit.New(5, 10*time.Minute),
-		// Five password checks (changing the password or email), then one
-		// a minute, so nobody can keep the bcrypt slots busy.
-		passwordChecks: ratelimit.New(5, time.Minute),
-		auth:           cfg.Auth,
-		gameStore:      cfg.Games,
-		log:            cfg.Logger,
-		outbox:         cfg.OutboxSize,
-		quit:           make(chan struct{}),
-		allConns:       map[*Conn]struct{}{},
-		games:          map[string]*game{},
-		userGames:      map[int64]map[string]*game{},
-		open:           map[string]*game{},
-		conns:          map[int64]map[*Conn]struct{}{},
+		devices:     newDevices(),
+		auth:        cfg.Auth,
+		gameStore:   cfg.Games,
+		log:         cfg.Logger,
+		outbox:      cfg.OutboxSize,
+		quit:        make(chan struct{}),
+		allConns:    map[*Conn]struct{}{},
+		games:       map[string]*game{},
+		userGames:   map[int64]map[string]*game{},
+		open:        map[string]*game{},
+		conns:       map[int64]map[*Conn]struct{}{},
 	}
 	go s.sweep()
 	return s
@@ -309,11 +301,18 @@ func (s *Server) ServeConn(t Transport) {
 	}
 	s.cmu.Unlock()
 	if c.addr != "" {
-		// Remote connections must log in promptly.
-		t := time.AfterFunc(s.authLim.LoginWithin, func() {
-			if !c.authed.Load() {
-				c.close()
+		// Remote connections must sign in promptly, or soon after they
+		// start to (asking for a code, say).
+		var t *time.Timer
+		t = time.AfterFunc(s.authLim.LoginWithin, func() {
+			if c.authed.Load() {
+				return
 			}
+			if c.signingIn.CompareAndSwap(true, false) {
+				t.Reset(s.authLim.SignInWithin - s.authLim.LoginWithin)
+				return
+			}
+			c.close()
 		})
 		defer t.Stop()
 	}
@@ -364,55 +363,61 @@ func (s *Server) refuseVersion(c *Conn, m *pb.ClientMessage) {
 }
 
 // maxPreLogin is how many messages a remote connection may send before it
-// logs in: plenty for a client that mistypes a password a few times.
+// signs in: plenty for a client that mistypes a code a few times.
 const maxPreLogin = 50
 
 func (s *Server) handle(c *Conn, m *pb.ClientMessage) {
 	id := m.RequestId
 	switch b := m.Body.(type) {
 	case *pb.ClientMessage_Register:
-		if !s.allowAuth(c, id, "", true) {
-			return
-		}
-		s.authenticate(c, id, func(ctx context.Context) (*auth.Result, error) {
-			return hashed(s, ctx, func() (*auth.Result, error) {
-				return s.auth.Register(ctx, b.Register.Username, b.Register.Password, b.Register.Nickname)
-			})
-		})
+		s.registerAccount(c, id, b.Register)
 		return
-	case *pb.ClientMessage_Login:
-		// A name that cannot exist is refused before it costs a hash, a
-		// lookup or a place in the limiter's table.
-		if c.user == nil && !auth.ValidUsername(b.Login.Username) {
-			c.sendError(id, pb.ErrorCode_ERROR_CODE_INVALID_CREDENTIALS, "", auth.ErrInvalidCredentials.Error())
-			return
-		}
-		// Failures count per username and address together, so nobody can
-		// lock a player out by guessing wrong from elsewhere.
-		key := strings.ToLower(b.Login.Username) + "|" + addrKey(remoteIP(c.t))
-		if !s.allowAuth(c, id, key, false) {
-			return
-		}
-		s.authenticate(c, id, func(ctx context.Context) (*auth.Result, error) {
-			res, err := hashed(s, ctx, func() (*auth.Result, error) {
-				return s.auth.Login(ctx, b.Login.Username, b.Login.Password)
+	case *pb.ClientMessage_RequestSignIn:
+		s.requestSignIn(c, id, b.RequestSignIn.Name)
+		return
+	case *pb.ClientMessage_EnterCode:
+		if s.allowSignIn(c, id) {
+			s.authenticate(c, id, func(ctx context.Context) (*auth.Result, error) {
+				return s.auth.EnterCode(ctx, b.EnterCode.Challenge, b.EnterCode.Code)
 			})
-			if !errors.Is(err, auth.ErrInvalidCredentials) && limited(c) {
-				s.failures.Return(key, time.Now())
-			}
-			return res, err
-		})
+		}
+		return
+	case *pb.ClientMessage_UseSignInLink:
+		if s.allowSignIn(c, id) {
+			s.authenticate(c, id, func(ctx context.Context) (*auth.Result, error) {
+				return s.auth.UseSignInLink(ctx, b.UseSignInLink.Token)
+			})
+		}
+		return
+	case *pb.ClientMessage_PasskeySignInBegin:
+		s.passkeySignInBegin(c, id)
+		return
+	case *pb.ClientMessage_PasskeySignInFinish:
+		if s.allowSignIn(c, id) {
+			sd := c.passkey
+			c.passkey = nil
+			s.authenticate(c, id, func(ctx context.Context) (*auth.Result, error) {
+				return s.auth.FinishPasskeySignIn(ctx, sd, b.PasskeySignInFinish.CredentialJson)
+			})
+		}
+		return
+	case *pb.ClientMessage_StartDeviceSignIn:
+		s.startDeviceSignIn(c, id)
+		return
+	case *pb.ClientMessage_ClaimDeviceSignIn:
+		s.claimDeviceSignIn(c, id, b.ClaimDeviceSignIn.Challenge)
+		return
+	case *pb.ClientMessage_BotLogin:
+		if s.allowSignIn(c, id) {
+			s.authenticate(c, id, func(ctx context.Context) (*auth.Result, error) {
+				return s.auth.BotLogin(ctx, b.BotLogin.Username, b.BotLogin.Nickname, b.BotLogin.Key)
+			})
+		}
 		return
 	case *pb.ClientMessage_Resume:
 		s.authenticate(c, id, func(ctx context.Context) (*auth.Result, error) {
 			return s.auth.Resume(ctx, b.Resume.Token)
 		})
-		return
-	case *pb.ClientMessage_RequestPasswordReset:
-		s.requestReset(c, id, b.RequestPasswordReset.Username)
-		return
-	case *pb.ClientMessage_ResetPassword:
-		s.resetPassword(c, id, b.ResetPassword)
 		return
 	case *pb.ClientMessage_VerifyEmail:
 		s.verifyEmail(c, id, b.VerifyEmail.Token)
@@ -438,23 +443,23 @@ func (s *Server) handle(c *Conn, m *pb.ClientMessage) {
 		c.sendError(id, pb.ErrorCode_ERROR_CODE_RATE_LIMITED, "", "too many requests; slow down")
 		return
 	}
-	if c.mustChange.Load() {
-		switch m.Body.(type) {
-		case *pb.ClientMessage_ChangePassword, *pb.ClientMessage_Logout:
-		default:
-			c.sendError(id, pb.ErrorCode_ERROR_CODE_PASSWORD_CHANGE_REQUIRED, "", "choose a new password first")
-			return
-		}
-	}
 	switch b := m.Body.(type) {
 	case *pb.ClientMessage_GetHistory:
 		s.getHistory(c, id, b.GetHistory)
-	case *pb.ClientMessage_ChangePassword:
-		s.changePassword(c, id, b.ChangePassword)
 	case *pb.ClientMessage_SetEmail:
 		s.setEmail(c, id, b.SetEmail)
 	case *pb.ClientMessage_DeleteAccount:
 		s.deleteAccount(c, id, b.DeleteAccount)
+	case *pb.ClientMessage_SignOutOthers:
+		s.signOutOthers(c, id)
+	case *pb.ClientMessage_ApproveDevice:
+		s.approveDevice(c, id, b.ApproveDevice.Code)
+	case *pb.ClientMessage_PasskeyAddBegin:
+		s.passkeyAddBegin(c, id)
+	case *pb.ClientMessage_PasskeyAddFinish:
+		s.passkeyAddFinish(c, id, b.PasskeyAddFinish)
+	case *pb.ClientMessage_PasskeyRemove:
+		s.passkeyRemove(c, id, b.PasskeyRemove.Id)
 	case *pb.ClientMessage_CreateGame:
 		s.createGame(c, id, b.CreateGame.Bot)
 	case *pb.ClientMessage_JoinGame:
@@ -524,48 +529,25 @@ func limited(c *Conn) bool {
 // addrKey is the limiter key for an address (IPv6 by its /64).
 func addrKey(addr string) string { return netkey.Of(addr) }
 
-// allowAuth checks the rate limits for a login (to user) or registration,
-// sending an error if c is over them.
-func (s *Server) allowAuth(c *Conn, id uint32, user string, register bool) bool {
-	if c.user != nil || !limited(c) {
-		return true // authenticate reports "already logged in"
+// allowSignIn spends one of c's sign-in attempts, sending an error if
+// there are none left.
+func (s *Server) allowSignIn(c *Conn, id uint32) bool {
+	if c.user != nil {
+		return true // authenticate reports "already signed in"
 	}
-	now := time.Now()
-	ip := addrKey(remoteIP(c.t))
-	ok := s.attempts.Take(ip, now) &&
-		(!register || s.registers.Take(ip, now)) &&
-		(register || s.failures.Take(user, now)) // returned on success
-	if !ok {
-		c.sendError(id, pb.ErrorCode_ERROR_CODE_RATE_LIMITED, "", "too many attempts; try again later")
-	}
-	return ok
+	return s.allowFrom(c, id, s.attempts)
 }
 
 func (s *Server) authenticate(c *Conn, id uint32, fn func(context.Context) (*auth.Result, error)) {
 	if c.user != nil {
-		c.sendError(id, pb.ErrorCode_ERROR_CODE_ALREADY_AUTHENTICATED, "", "already logged in")
+		c.sendError(id, pb.ErrorCode_ERROR_CODE_ALREADY_AUTHENTICATED, "", "already signed in")
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	res, err := fn(ctx)
-	switch {
-	case err == nil:
-	case errors.Is(err, auth.ErrInvalidInput):
-		c.sendError(id, pb.ErrorCode_ERROR_CODE_BAD_REQUEST, "", err.Error())
-		return
-	case errors.Is(err, store.ErrUsernameTaken):
-		c.sendError(id, pb.ErrorCode_ERROR_CODE_USERNAME_TAKEN, "", "username taken")
-		return
-	case errors.Is(err, auth.ErrInvalidCredentials):
-		c.sendError(id, pb.ErrorCode_ERROR_CODE_INVALID_CREDENTIALS, "", err.Error())
-		return
-	case errors.Is(err, auth.ErrBadToken):
-		c.sendError(id, pb.ErrorCode_ERROR_CODE_NOT_FOUND, "", err.Error())
-		return
-	default:
-		s.log.Error("authentication failed", "err", err)
-		c.sendError(id, pb.ErrorCode_ERROR_CODE_INTERNAL, "", "internal error")
+	if err != nil {
+		s.sendAccountError(c, id, "sign in", err)
 		return
 	}
 	acct, err := s.accountMessage(ctx, res.User)
@@ -575,13 +557,13 @@ func (s *Server) authenticate(c *Conn, id uint32, fn func(context.Context) (*aut
 		return
 	}
 	c.user, c.token, c.userKey = res.User, res.Token, strconv.FormatInt(res.User.ID, 10)
-	c.mustChange.Store(res.User.MustChange)
+	c.passkey = nil
 	c.authed.Store(true)
 	s.registerConn(c)
-	// A password change ends sessions and then closes the connections it
-	// can see. One that ended this session before c was registered missed
-	// c, so make sure the session is still there.
-	if uid, err := s.auth.Store.SessionUser(ctx, res.Token); err != nil || uid != res.User.ID {
+	// Signing out other devices (or the admin) ends sessions and then
+	// closes the connections it can see. One that ended this session before
+	// c was registered missed c, so make sure the session is still there.
+	if uid, _, err := s.auth.Store.SessionUser(ctx, res.Token); err != nil || uid != res.User.ID {
 		if !errors.Is(err, store.ErrNotFound) && err != nil {
 			s.log.Error("session check", "user", res.User.ID, "err", err)
 		}

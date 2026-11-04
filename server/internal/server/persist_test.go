@@ -10,7 +10,6 @@ import (
 	"testing"
 	"time"
 
-	"golang.org/x/crypto/bcrypt"
 	"google.golang.org/protobuf/proto"
 
 	"cribbage/internal/auth"
@@ -35,7 +34,7 @@ func startPersistent(t *testing.T, path, addr string) *instance {
 		t.Fatal(err)
 	}
 	srv := New(Config{
-		Auth:       &auth.Service{Store: db, BcryptCost: bcrypt.MinCost},
+		Auth:       &auth.Service{Store: db, BotKey: testBotKey},
 		Games:      db,
 		Logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
 		GameLimits: loadLimits,
@@ -186,7 +185,7 @@ func TestBotclientsSurviveServerRestart(t *testing.T) {
 	results := make([]botclient.Stats, len(configs))
 	errs := make([]error, len(configs))
 	for i, cfg := range configs {
-		cfg.Addr, cfg.Password, cfg.Bot, cfg.Games = addr, "password123", "heuristic", games
+		cfg.Addr, cfg.Key, cfg.Bot, cfg.Games = addr, testBotKey, "heuristic", games
 		cfg.Logger = slog.New(slog.NewTextHandler(testWriter{t}, nil))
 		wg.Add(1)
 		go func(i int, cfg botclient.Config) {
@@ -245,7 +244,7 @@ func TestBadCredentialsDoNotRetry(t *testing.T) {
 	c.Close()
 	start := time.Now()
 	_, err = botclient.Run(context.Background(), botclient.Config{
-		Addr: addr, Username: "x", Password: "password123", Bot: "heuristic", Games: 1,
+		Addr: addr, Username: "x", Key: testBotKey, Bot: "heuristic", Games: 1,
 	})
 	if err == nil || time.Since(start) > 5*time.Second {
 		t.Fatalf("invalid username should fail fast, got %v after %v", err, time.Since(start))

@@ -36,30 +36,30 @@ func forEachStore(t *testing.T, fn func(t *testing.T, s both)) {
 func TestUsersAndSessions(t *testing.T) {
 	forEachStore(t, func(t *testing.T, s both) {
 		ctx := context.Background()
-		u := &User{Username: "Alice", Nickname: "Al", PasswordHash: []byte("hash"), Created: time.Now()}
+		u := &User{Username: "Alice", Nickname: "Al", Created: time.Now()}
 		if err := s.CreateUser(ctx, u); err != nil || u.ID == 0 {
 			t.Fatalf("create: %v id=%d", err, u.ID)
 		}
-		if err := s.CreateUser(ctx, &User{Username: "ALICE", PasswordHash: []byte("x")}); !errors.Is(err, ErrUsernameTaken) {
+		if err := s.CreateUser(ctx, &User{Username: "ALICE"}); !errors.Is(err, ErrUsernameTaken) {
 			t.Fatalf("duplicate: %v", err)
 		}
 		got, err := s.UserByUsername(ctx, "alice")
-		if err != nil || got.ID != u.ID || got.Username != "Alice" || string(got.PasswordHash) != "hash" {
+		if err != nil || got.ID != u.ID || got.Username != "Alice" {
 			t.Fatalf("by name: %+v %v", got, err)
 		}
 		if _, err := s.UserByID(ctx, 999); !errors.Is(err, ErrNotFound) {
 			t.Fatalf("missing id: %v", err)
 		}
-		if err := s.CreateSession(ctx, "tok", u.ID, u.PasswordHash, time.Now().Add(time.Hour)); err != nil {
+		if err := s.CreateSession(ctx, "tok", u.ID, time.Now().Add(time.Hour)); err != nil {
 			t.Fatal(err)
 		}
-		if err := s.CreateSession(ctx, "old", u.ID, u.PasswordHash, time.Now().Add(-time.Hour)); err != nil {
+		if err := s.CreateSession(ctx, "old", u.ID, time.Now().Add(-time.Hour)); err != nil {
 			t.Fatal(err)
 		}
-		if id, err := s.SessionUser(ctx, "tok"); err != nil || id != u.ID {
+		if id, _, err := s.SessionUser(ctx, "tok"); err != nil || id != u.ID {
 			t.Fatalf("session: %d %v", id, err)
 		}
-		if _, err := s.SessionUser(ctx, "old"); !errors.Is(err, ErrNotFound) {
+		if _, _, err := s.SessionUser(ctx, "old"); !errors.Is(err, ErrNotFound) {
 			t.Fatalf("expired session: %v", err)
 		}
 		if n, err := s.DeleteExpiredSessions(ctx, time.Now()); err != nil || n != 1 {
@@ -68,7 +68,7 @@ func TestUsersAndSessions(t *testing.T) {
 		if err := s.DeleteSession(ctx, "tok"); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := s.SessionUser(ctx, "tok"); !errors.Is(err, ErrNotFound) {
+		if _, _, err := s.SessionUser(ctx, "tok"); !errors.Is(err, ErrNotFound) {
 			t.Fatalf("deleted session: %v", err)
 		}
 		if err := s.DeleteSession(ctx, "never"); err != nil {
@@ -85,18 +85,18 @@ func TestSQLiteSessionTokensHashed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	u := &User{Username: "alice", Nickname: "A", PasswordHash: []byte("h"), Created: time.Now()}
+	u := &User{Username: "alice", Nickname: "A", Created: time.Now()}
 	if err := s.CreateUser(ctx, u); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.CreateSession(ctx, "new-token", u.ID, u.PasswordHash, time.Now().Add(time.Hour)); err != nil {
+	if err := s.CreateSession(ctx, "new-token", u.ID, time.Now().Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	var stored string
 	if err := s.db.QueryRow(`SELECT token FROM sessions`).Scan(&stored); err != nil || stored == "new-token" || len(stored) != 64 {
 		t.Fatalf("stored token %q, %v", stored, err)
 	}
-	if id, err := s.SessionUser(ctx, "new-token"); err != nil || id != u.ID {
+	if id, _, err := s.SessionUser(ctx, "new-token"); err != nil || id != u.ID {
 		t.Fatalf("session: %d, %v", id, err)
 	}
 	s.Close()
@@ -215,7 +215,7 @@ func TestSQLiteReopen(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
-	u := &User{Username: "bob", Nickname: "Bob", PasswordHash: []byte("h"), Created: time.Now()}
+	u := &User{Username: "bob", Nickname: "Bob", Created: time.Now()}
 	if err := s.CreateUser(ctx, u); err != nil {
 		t.Fatal(err)
 	}
@@ -394,7 +394,7 @@ func TestSQLiteBatchFailure(t *testing.T) {
 	defer s.Close()
 	ctx := context.Background()
 	user := func(name string) error {
-		return s.CreateUser(ctx, &User{Username: name, Nickname: name, PasswordHash: []byte("h"), Created: time.Now()})
+		return s.CreateUser(ctx, &User{Username: name, Nickname: name, Created: time.Now()})
 	}
 	if err := user("dup"); err != nil {
 		t.Fatal(err)
@@ -430,47 +430,71 @@ func TestSQLiteBatchFailure(t *testing.T) {
 	}
 }
 
-func TestAccountTokensAndPasswords(t *testing.T) {
+func TestAccountTokensAndSessions(t *testing.T) {
 	forEachStore(t, func(t *testing.T, s both) {
 		ctx := context.Background()
-		a := &User{Username: "alice", Nickname: "A", PasswordHash: []byte("h1"), Created: time.Now()}
-		b := &User{Username: "bob", Nickname: "B", PasswordHash: []byte("h2"), Created: time.Now()}
+		a := &User{Username: "alice", Nickname: "A", Created: time.Now(), Email: "first@example.com"}
+		b := &User{Username: "bob", Nickname: "B", Created: time.Now(), Bot: true}
 		for _, u := range []*User{a, b} {
 			if err := s.CreateUser(ctx, u); err != nil {
 				t.Fatal(err)
 			}
 		}
+		if u, _ := s.UserByID(ctx, a.ID); u.Email != "first@example.com" || u.Bot {
+			t.Fatalf("created user: %+v", u)
+		}
+		if u, _ := s.UserByID(ctx, b.ID); !u.Bot || u.Email != "" {
+			t.Fatalf("created bot: %+v", u)
+		}
 		for _, tok := range []string{"s1", "s2"} {
-			if err := s.CreateSession(ctx, tok, a.ID, a.PasswordHash, time.Now().Add(time.Hour)); err != nil {
+			if err := s.CreateSession(ctx, tok, a.ID, time.Now().Add(time.Hour)); err != nil {
 				t.Fatal(err)
 			}
 		}
-		if err := s.CreateSession(ctx, "sb", b.ID, b.PasswordHash, time.Now().Add(time.Hour)); err != nil {
+		if err := s.CreateSession(ctx, "sb", b.ID, time.Now().Add(time.Hour)); err != nil {
 			t.Fatal(err)
 		}
+		if err := s.CreateSession(ctx, "nobody", 999, time.Now().Add(time.Hour)); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("session for no user: %v", err)
+		}
 
-		// Verification: one pending token per user, single use.
+		// Sessions are renewed by moving their expiry.
+		later := time.Now().Add(48 * time.Hour).Truncate(time.Millisecond)
+		if err := s.ExtendSession(ctx, "s1", later); err != nil {
+			t.Fatal(err)
+		}
+		if id, exp, err := s.SessionUser(ctx, "s1"); err != nil || id != a.ID || !exp.Equal(later) {
+			t.Fatalf("extended session: %d %v %v", id, exp, err)
+		}
+		if err := s.ExtendSession(ctx, "unknown", later); err != nil {
+			t.Fatalf("extending an unknown session: %v", err)
+		}
+
+		// Address changes: one pending token of each kind per user, single use.
 		exp := time.Now().Add(time.Hour)
 		for _, tok := range []*AccountToken{
 			{Token: "v1", UserID: a.ID, Kind: TokenVerify, Email: "old@example.com", Expires: exp},
 			{Token: "v2", UserID: a.ID, Kind: TokenVerify, Email: "A@Example.com", Expires: exp},
-			{Token: "r1", UserID: a.ID, Kind: TokenReset, Expires: exp},
-			{Token: "late", UserID: b.ID, Kind: TokenReset, Expires: time.Now().Add(-time.Second)},
+			{Token: "c1", UserID: a.ID, Kind: TokenChange, Email: "next@example.com", Expires: exp},
+			{Token: "late", UserID: b.ID, Kind: TokenDelete, Expires: time.Now().Add(-time.Second)},
 		} {
 			if err := s.CreateAccountToken(ctx, tok); err != nil {
 				t.Fatal(err)
 			}
 		}
-		if p, err := s.PendingEmail(ctx, a.ID); err != nil || p != "A@Example.com" {
+		if p, err := s.PendingEmail(ctx, a.ID, TokenVerify); err != nil || p != "A@Example.com" {
 			t.Fatalf("pending %q, %v", p, err)
+		}
+		if p, err := s.PendingEmail(ctx, a.ID, TokenChange); err != nil || p != "next@example.com" {
+			t.Fatalf("pending change %q, %v", p, err)
 		}
 		if _, err := s.TakeAccountToken(ctx, "v1", TokenVerify); !errors.Is(err, ErrNotFound) {
 			t.Fatalf("replaced token: %v", err)
 		}
-		if _, err := s.TakeAccountToken(ctx, "v2", TokenReset); !errors.Is(err, ErrNotFound) {
+		if _, err := s.TakeAccountToken(ctx, "v2", TokenDelete); !errors.Is(err, ErrNotFound) {
 			t.Fatalf("token of the wrong kind: %v", err)
 		}
-		if _, err := s.TakeAccountToken(ctx, "late", TokenReset); !errors.Is(err, ErrNotFound) {
+		if _, err := s.TakeAccountToken(ctx, "late", TokenDelete); !errors.Is(err, ErrNotFound) {
 			t.Fatalf("expired token: %v", err)
 		}
 		tok, err := s.TakeAccountToken(ctx, "v2", TokenVerify)
@@ -483,8 +507,16 @@ func TestAccountTokensAndPasswords(t *testing.T) {
 		if err := s.SetEmail(ctx, a.ID, tok.Email); err != nil {
 			t.Fatal(err)
 		}
+		// A new address ends the account's other links.
+		if _, err := s.TakeAccountToken(ctx, "c1", TokenChange); !errors.Is(err, ErrNotFound) {
+			t.Fatal("change link survived a new address")
+		}
+		// A bot given an address is a bot no more.
 		if err := s.SetEmail(ctx, b.ID, "a@example.com"); err != nil {
 			t.Fatal(err)
+		}
+		if u, _ := s.UserByID(ctx, b.ID); u.Bot {
+			t.Fatal("a bot with an address is still a bot")
 		}
 		us, err := s.UsersByEmail(ctx, "a@EXAMPLE.com")
 		if err != nil || len(us) != 2 || us[0].ID != a.ID || us[1].ID != b.ID {
@@ -494,58 +526,91 @@ func TestAccountTokensAndPasswords(t *testing.T) {
 			t.Fatalf("users with no email: %v", us)
 		}
 
-		// A new address ends a reset link sent to the old one.
-		if _, err := s.TakeAccountToken(ctx, "r1", TokenReset); !errors.Is(err, ErrNotFound) {
-			t.Fatal("reset link survived a new address")
+		// Signing out others keeps one session and leaves other users alone.
+		if err := s.DeleteSessions(ctx, a.ID, "s2"); err != nil {
+			t.Fatal(err)
 		}
-		for _, tok := range []*AccountToken{
-			{Token: "r2", UserID: a.ID, Kind: TokenReset, Expires: exp},
-			{Token: "v3", UserID: a.ID, Kind: TokenVerify, Email: "thief@example.com", Expires: exp},
-		} {
-			if err := s.CreateAccountToken(ctx, tok); err != nil {
+		if _, _, err := s.SessionUser(ctx, "s1"); !errors.Is(err, ErrNotFound) {
+			t.Fatal("other session survived")
+		}
+		if _, _, err := s.SessionUser(ctx, "s2"); err != nil {
+			t.Fatal("kept session ended")
+		}
+		if _, _, err := s.SessionUser(ctx, "sb"); err != nil {
+			t.Fatal("another user's session ended")
+		}
+		if err := s.DeleteSessions(ctx, a.ID, ""); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := s.SessionUser(ctx, "s2"); !errors.Is(err, ErrNotFound) {
+			t.Fatal("session survived signing out everywhere")
+		}
+	})
+}
+
+func TestPasskeys(t *testing.T) {
+	forEachStore(t, func(t *testing.T, s both) {
+		ctx := context.Background()
+		a := &User{Username: "alice", Nickname: "A", Created: time.Now(), Email: "a@example.com"}
+		b := &User{Username: "bob", Nickname: "B", Created: time.Now(), Email: "b@example.com"}
+		for _, u := range []*User{a, b} {
+			if err := s.CreateUser(ctx, u); err != nil {
 				t.Fatal(err)
 			}
 		}
-
-		// A new password keeps one session, ends the others and every
-		// account link, and leaves other users alone.
-		if err := s.SetPassword(ctx, a.ID, []byte("h3"), true, "s2"); err != nil {
+		t0 := time.Now().Truncate(time.Millisecond)
+		for i, p := range []*Passkey{
+			{ID: []byte("k1"), UserID: a.ID, Name: "Phone", Data: []byte("d1"), Created: t0},
+			{ID: []byte("k2"), UserID: a.ID, Name: "Laptop", Data: []byte("d2"), Created: t0.Add(time.Second)},
+			{ID: []byte("k3"), UserID: b.ID, Name: "Bob's", Data: []byte("d3"), Created: t0},
+		} {
+			if err := s.AddPasskey(ctx, p); err != nil {
+				t.Fatalf("add %d: %v", i, err)
+			}
+		}
+		if err := s.AddPasskey(ctx, &Passkey{ID: []byte("k1"), UserID: b.ID, Data: []byte("x"), Created: t0}); err == nil {
+			t.Fatal("a credential ID was stored twice")
+		}
+		keys, err := s.Passkeys(ctx, a.ID)
+		if err != nil || len(keys) != 2 || string(keys[0].ID) != "k1" || keys[1].Name != "Laptop" || !keys[0].LastUsed.IsZero() {
+			t.Fatalf("passkeys: %+v, %v", keys, err)
+		}
+		used := t0.Add(time.Minute)
+		if err := s.UpdatePasskey(ctx, &Passkey{ID: []byte("k1"), UserID: a.ID, Data: []byte("d1b"), LastUsed: used}); err != nil {
 			t.Fatal(err)
 		}
-		u, _ := s.UserByID(ctx, a.ID)
-		if string(u.PasswordHash) != "h3" || !u.MustChange || u.Email != "A@Example.com" {
-			t.Fatalf("user after SetPassword: %+v", u)
-		}
-		if _, err := s.SessionUser(ctx, "s1"); !errors.Is(err, ErrNotFound) {
-			t.Fatal("other session survived")
-		}
-		if _, err := s.SessionUser(ctx, "s2"); err != nil {
-			t.Fatal("kept session ended")
-		}
-		if _, err := s.SessionUser(ctx, "sb"); err != nil {
-			t.Fatal("another user's session ended")
-		}
-		if _, err := s.TakeAccountToken(ctx, "r2", TokenReset); !errors.Is(err, ErrNotFound) {
-			t.Fatal("reset link survived a new password")
-		}
-		if _, err := s.TakeAccountToken(ctx, "v3", TokenVerify); !errors.Is(err, ErrNotFound) {
-			t.Fatal("verification link survived a new password")
-		}
-		// A session for a password checked before the change is refused.
-		if err := s.CreateSession(ctx, "stale", a.ID, []byte("h1"), time.Now().Add(time.Hour)); !errors.Is(err, ErrNotFound) {
-			t.Fatalf("session for an old password: %v", err)
-		}
-		if err := s.CreateSession(ctx, "fresh", a.ID, []byte("h3"), time.Now().Add(time.Hour)); err != nil {
+		// Another user's passkey is not theirs to change or remove.
+		if err := s.UpdatePasskey(ctx, &Passkey{ID: []byte("k3"), UserID: a.ID, Data: []byte("evil"), LastUsed: used}); err != nil {
 			t.Fatal(err)
 		}
-		if err := s.SetPassword(ctx, a.ID, []byte("h4"), false, ""); err != nil {
+		if err := s.DeletePasskey(ctx, a.ID, []byte("k3")); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("removing another user's passkey: %v", err)
+		}
+		keys, _ = s.Passkeys(ctx, a.ID)
+		if string(keys[0].Data) != "d1b" || !keys[0].LastUsed.Equal(used) {
+			t.Fatalf("updated passkey: %+v", keys[0])
+		}
+		if bk, _ := s.Passkeys(ctx, b.ID); len(bk) != 1 || string(bk[0].Data) != "d3" {
+			t.Fatalf("bob's passkeys: %+v", bk)
+		}
+		if err := s.DeletePasskey(ctx, a.ID, []byte("k1")); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := s.SessionUser(ctx, "s2"); !errors.Is(err, ErrNotFound) {
-			t.Fatal("session survived SetPassword keeping none")
+		if keys, _ := s.Passkeys(ctx, a.ID); len(keys) != 1 || string(keys[0].ID) != "k2" {
+			t.Fatalf("after removing one: %+v", keys)
 		}
-		if err := s.SetPassword(ctx, 999, []byte("x"), false, ""); !errors.Is(err, ErrNotFound) {
-			t.Fatalf("unknown user: %v", err)
+		if err := s.DeletePasskeys(ctx, a.ID); err != nil {
+			t.Fatal(err)
+		}
+		if keys, _ := s.Passkeys(ctx, a.ID); len(keys) != 0 {
+			t.Fatalf("after removing all: %+v", keys)
+		}
+		// Deleting a user removes their passkeys.
+		if err := s.DeleteUser(ctx, b.ID); err != nil {
+			t.Fatal(err)
+		}
+		if bk, _ := s.Passkeys(ctx, b.ID); len(bk) != 0 {
+			t.Fatalf("a deleted user's passkeys: %+v", bk)
 		}
 	})
 }
@@ -621,14 +686,14 @@ func TestHistoryAndRecords(t *testing.T) {
 func TestDeleteUser(t *testing.T) {
 	forEachStore(t, func(t *testing.T, s both) {
 		ctx := context.Background()
-		a := &User{Username: "alice", Nickname: "Al", PasswordHash: []byte("h"), Created: time.Now()}
-		b := &User{Username: "bob", Nickname: "Bo", PasswordHash: []byte("h"), Created: time.Now()}
+		a := &User{Username: "alice", Nickname: "Al", Created: time.Now()}
+		b := &User{Username: "bob", Nickname: "Bo", Created: time.Now()}
 		for _, u := range []*User{b, a} { // alice has the highest ID
 			if err := s.CreateUser(ctx, u); err != nil {
 				t.Fatal(err)
 			}
 		}
-		if err := s.CreateSession(ctx, "sa", a.ID, a.PasswordHash, time.Now().Add(time.Hour)); err != nil {
+		if err := s.CreateSession(ctx, "sa", a.ID, time.Now().Add(time.Hour)); err != nil {
 			t.Fatal(err)
 		}
 		if err := s.CreateAccountToken(ctx, &AccountToken{Token: "d", UserID: a.ID, Kind: TokenDelete, Expires: time.Now().Add(time.Hour)}); err != nil {
@@ -665,7 +730,7 @@ func TestDeleteUser(t *testing.T) {
 		if _, err := s.UserByUsername(ctx, "alice"); !errors.Is(err, ErrNotFound) {
 			t.Fatalf("username still taken: %v", err)
 		}
-		if _, err := s.SessionUser(ctx, "sa"); !errors.Is(err, ErrNotFound) {
+		if _, _, err := s.SessionUser(ctx, "sa"); !errors.Is(err, ErrNotFound) {
 			t.Fatal("session survived")
 		}
 		if _, err := s.TakeAccountToken(ctx, "d", TokenDelete); !errors.Is(err, ErrNotFound) {
@@ -682,7 +747,7 @@ func TestDeleteUser(t *testing.T) {
 		if len(invs) != 1 || invs[0].ID != "i2" {
 			t.Fatalf("invites: %+v", invs)
 		}
-		c := &User{Username: "alice", Nickname: "New", PasswordHash: []byte("h"), Created: time.Now()}
+		c := &User{Username: "alice", Nickname: "New", Created: time.Now()}
 		if err := s.CreateUser(ctx, c); err != nil {
 			t.Fatal(err)
 		}

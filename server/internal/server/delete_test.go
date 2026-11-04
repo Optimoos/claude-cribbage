@@ -2,15 +2,14 @@ package server
 
 import (
 	"context"
-	"strings"
 	"testing"
 
 	"cribbage/internal/protocol/pb"
 	"cribbage/internal/store"
 )
 
-func deleteAccount(password, username string) *pb.ClientMessage {
-	return &pb.ClientMessage{Body: &pb.ClientMessage_DeleteAccount{DeleteAccount: &pb.DeleteAccount{Password: password, Username: username}}}
+func deleteAccount(username string) *pb.ClientMessage {
+	return &pb.ClientMessage{Body: &pb.ClientMessage_DeleteAccount{DeleteAccount: &pb.DeleteAccount{Username: username}}}
 }
 
 func confirmDelete(token string) *pb.ClientMessage {
@@ -26,23 +25,19 @@ func startHumanGame(t *testing.T, a, b *tclient) string {
 	return gameID
 }
 
-// With an email address, deleting takes a link sent there. The account's
+// Deleting takes a link sent to the account's address. The account's
 // games end, its opponent wins, and its history is kept for the opponent.
 func TestDeleteAccountByEmail(t *testing.T) {
 	srv, addr, mails := startAccountServer(t, false)
-	a, b := login(t, addr, "alice"), login(t, addr, "bob")
+	a, b := signUp(t, addr, mails, "alice", "alice@example.com"), login(t, addr, "bob")
 	ctx := context.Background()
-	if err := srv.auth.Store.SetEmail(ctx, a.auth.UserId, "alice@example.com"); err != nil {
-		t.Fatal(err)
-	}
 	gameID := startHumanGame(t, a, b)
 	bot := a.next(t, replyTo(a.send(t, &pb.ClientMessage{Body: &pb.ClientMessage_CreateGame{CreateGame: &pb.CreateGame{Bot: "random"}}}))).GetGameUpdate().Game.GameId
 	if m := a.next(t, replyTo(a.send(t, &pb.ClientMessage{Body: &pb.ClientMessage_SendInvite{SendInvite: &pb.SendInvite{Username: "bob"}}}))); m.GetInvites() == nil {
 		t.Fatalf("invite: %v", m)
 	}
 
-	wantError(t, a.next(t, replyTo(a.send(t, deleteAccount("wrong-password", "")))), pb.ErrorCode_ERROR_CODE_INVALID_CREDENTIALS)
-	if m := a.next(t, replyTo(a.send(t, deleteAccount("password123", "")))); m.GetAck() == nil {
+	if m := a.next(t, replyTo(a.send(t, deleteAccount("")))); m.GetAck() == nil {
 		t.Fatalf("delete request: %v", m)
 	}
 	kind, token := mails.link(t, "alice@example.com")
@@ -71,8 +66,8 @@ func TestDeleteAccountByEmail(t *testing.T) {
 	if g, err := srv.gameStore.(*store.Memory).LoadGame(ctx, bot); err == nil && g.Game.Status != store.StatusFinished {
 		t.Fatalf("bot game still going: %+v", g.Game)
 	}
-	if _, err := loginAs(t, addr, "alice", "password123"); err == nil {
-		t.Fatal("deleted account can log in")
+	if _, err := srv.auth.Store.UserByUsername(ctx, "alice"); err == nil {
+		t.Fatal("deleted account still there")
 	}
 	h := b.next(t, replyTo(b.send(t, &pb.ClientMessage{Body: &pb.ClientMessage_GetHistory{GetHistory: &pb.GetHistory{}}}))).GetHistory()
 	if len(h.Games) != 1 || h.Games[0].Players[0].Nickname != store.DeletedNickname {
@@ -80,10 +75,10 @@ func TestDeleteAccountByEmail(t *testing.T) {
 	}
 	wantError(t, n.next(t, replyTo(n.send(t, confirmDelete(token)))), pb.ErrorCode_ERROR_CODE_NOT_FOUND)
 	// The name is free again.
-	login(t, addr, "alice")
+	signUp(t, addr, mails, "alice", "alice@example.com")
 }
 
-// Without an address, the username is typed again and the account is
+// A bot account has no address: its username is typed again and it is
 // deleted at once.
 func TestDeleteAccountWithoutEmail(t *testing.T) {
 	srv, addr, _ := startAccountServer(t, false)
@@ -93,8 +88,8 @@ func TestDeleteAccountWithoutEmail(t *testing.T) {
 		t.Fatal(err)
 	}
 	other.startReading()
-	wantError(t, a.next(t, replyTo(a.send(t, deleteAccount("password123", "alicia")))), pb.ErrorCode_ERROR_CODE_BAD_REQUEST)
-	if m := a.next(t, replyTo(a.send(t, deleteAccount("password123", "ALICE")))); m.GetAccountDeleted() == nil {
+	wantError(t, a.next(t, replyTo(a.send(t, deleteAccount("alicia")))), pb.ErrorCode_ERROR_CODE_BAD_REQUEST)
+	if m := a.next(t, replyTo(a.send(t, deleteAccount("ALICE")))); m.GetAccountDeleted() == nil {
 		t.Fatalf("delete: %v", m)
 	}
 	closed(t, a)
@@ -115,30 +110,7 @@ func TestAdminDeleteAccount(t *testing.T) {
 		t.Fatal(err)
 	}
 	closed(t, a)
-	if _, err := loginAs(t, addr, "alice", "password123"); err == nil {
-		t.Fatal("deleted account can log in")
-	}
-}
-
-// Changing or removing an address tells the old one.
-func TestOldAddressTold(t *testing.T) {
-	srv, addr, mails := startAccountServer(t, false)
-	a := login(t, addr, "alice")
-	if err := srv.auth.Store.SetEmail(context.Background(), a.auth.UserId, "old@example.com"); err != nil {
-		t.Fatal(err)
-	}
-	if m := a.next(t, replyTo(a.send(t, setEmail("new@example.com", "password123")))); m.GetAccount() == nil {
-		t.Fatalf("set email: %v", m)
-	}
-	_, token := mails.link(t, "new@example.com")
-	n := anon(t, addr)
-	n.next(t, replyTo(n.send(t, &pb.ClientMessage{Body: &pb.ClientMessage_VerifyEmail{VerifyEmail: &pb.VerifyEmail{Token: token}}})))
-	m := <-mails
-	if m.to != "old@example.com" || !strings.Contains(m.body, "changed to another address") {
-		t.Fatalf("notice: %+v", m)
-	}
-	a.next(t, replyTo(a.send(t, setEmail("", "password123"))))
-	if m := <-mails; m.to != "new@example.com" || !strings.Contains(m.body, "removed") {
-		t.Fatalf("removal notice: %+v", m)
+	if _, err := srv.auth.Store.UserByUsername(ctx, "alice"); err == nil {
+		t.Fatal("deleted account still there")
 	}
 }

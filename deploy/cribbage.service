@@ -12,11 +12,12 @@ Group=cribbage
 WorkingDirectory=/var/lib/cribbage
 # Settings are in /etc/cribbage/cribserver.conf (deploy/cribserver.conf).
 ExecStart=/opt/cribbage/cribserver -config /etc/cribbage/cribserver.conf
-# Password reset emails (see README.md): uncomment both lines, create
-# /etc/cribbage/smtp-password and /etc/cribbage/email-key (mode 0600, owned
-# by root), and uncomment the email settings in cribserver.conf.
-#LoadCredential=smtp-password:/etc/cribbage/smtp-password
-#LoadCredential=email-key:/etc/cribbage/email-key
+# Secrets (see README.md): /etc/cribbage/smtp-password and
+# /etc/cribbage/email-key, mode 0600, owned by root. systemd hands them to
+# the server; cribserver.conf names them.
+LoadCredential=smtp-password:/etc/cribbage/smtp-password
+LoadCredential=email-key:/etc/cribbage/email-key
+#LoadCredential=bot-key:/etc/cribbage/bot-key
 # /run/cribbage holds the admin socket (cribserver admin ...).
 RuntimeDirectory=cribbage
 RuntimeDirectoryMode=0700

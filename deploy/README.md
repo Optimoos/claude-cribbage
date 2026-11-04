@@ -49,13 +49,15 @@ install -d -m 0755 /opt/cribbage
 install -m 0755 /tmp/cribserver /opt/cribbage/
 install -m 0644 /tmp/expert.bin /opt/cribbage/
 
-# Settings, then the service.
+# Settings, then the service. Edit cribserver.conf first (your domain and
+# mail account) and create the secrets: see "Signing in and email" below.
+# The service does not start without them.
 install -d -m 0755 /etc/cribbage
 install -m 0644 cribserver.conf /etc/cribbage/
 cp cribbage.service /etc/systemd/system/
 systemctl daemon-reload
 systemctl enable --now cribbage
-journalctl -u cribbage -f          # "web client" and "database backed up" lines
+journalctl -u cribbage -f          # "email enabled", "web client" and "database backed up" lines
 
 # Caddy (https://caddyserver.com/docs/install), then:
 cp Caddyfile /etc/caddy/Caddyfile  # with your domain
@@ -85,24 +87,26 @@ offers on private, loopback or link-local networks, so nobody can make it
 send packets into its own network. Leave it off to play on one machine or
 a LAN.
 
-## Password resets
+## Signing in and email
 
-Players can change their password from **Account** in the settings menu.
-Changing it, or resetting it, logs them out everywhere else.
+There are no passwords. Players sign in with an 8-digit code the server
+emails them (the same email has a link that signs in the browser it is
+opened in), with a passkey in the web client, or, in the desktop app, by
+approving the code it shows from a device that is already signed in
+("Sign in with browser"). An account needs an email address; family
+members can share one, and then the email has a code for each account.
+Sessions last 90 days from the last time the device was used.
 
-**By email.** A player can add an email address under **Account**. The
-server mails a link to confirm it, which works for 48 hours. After that,
-"Forgot your password?" on the login screen mails a link that works for an
-hour, opens the web client, and lets them choose a new password. Each
-account gets at most 3 emails at once, then 1 every 20 minutes, and each
-address may ask for 5 resets, then 1 every 10 minutes. The answer is the
-same whether or not the account exists. Without `-smtp` there is no email:
-the Account screen says so, and only the admin can reset passwords.
+Codes work for 15 minutes. Five wrong codes end a sign-in, and ten wrong
+codes for an account, from anywhere, stop its codes working for a while
+(one more an hour); the link still works. Each account gets 10 emails,
+then 1 every 5 minutes, and each address 20, then 1 every 5 minutes. The
+reply to "email me a code" is the same whether or not the account exists.
 
-To turn email on you need an SMTP account that may send from your domain,
-for example Postmark, Resend, Amazon SES, or your mailbox provider's SMTP
-login. Set up SPF and DKIM for the sender domain as the provider describes,
-or the mail lands in spam. Then:
+So email must work before anyone can play. You need an SMTP account that
+may send from your domain, for example Postmark, Resend, Amazon SES, or
+your mailbox provider's SMTP login. Set up SPF and DKIM for the sender
+domain as the provider describes, or the codes land in spam. Then:
 
 ```sh
 install -m 0600 /dev/stdin /etc/cribbage/smtp-password <<< 'the-smtp-password'
@@ -111,40 +115,57 @@ openssl rand -hex 32 | install -m 0600 /dev/stdin /etc/cribbage/email-key
 
 Email addresses are stored encrypted with that key (AES-256-GCM), so the
 database and its backups reveal none without it. **Back the key up
-somewhere safe, apart from the database backups.** Losing it loses the
-addresses (players can add them again), and the server refuses to start
-with a different key than the one the database was first used with.
+somewhere safe, apart from the database backups.** Without it nobody can
+sign in by email until you set each account's address again (below), and
+the server refuses to start with a different key than the one the
+database was first used with.
 
-In `/etc/cribbage/cribserver.conf`, uncomment the `public-url`, `smtp...`,
-`email-key-file` and `mail-from` settings with your values; in
-`cribbage.service`, uncomment both `LoadCredential=` lines; then run
+Put your values in `/etc/cribbage/cribserver.conf` (`public-url`, `smtp`,
+`smtp-user`, `mail-from`), then run
 `systemctl daemon-reload && systemctl restart cribbage`. The log says
 `email enabled`. Port 465 uses TLS from the start; other ports must offer
 STARTTLS, and the server refuses to send without it. `public-url` must be
-the HTTPS address players use, since the links point there.
+the HTTPS address players use: the links point there, and passkeys are
+tied to its host name, so changing the domain later makes existing
+passkeys stop working (players sign in by email and add new ones).
 
-**By the admin.** On the server:
+Without `smtp`, the server writes every email, codes included, to its log
+instead. That is only for testing on your own machine: nobody else can
+sign in.
+
+**Changing an address** takes two links: one sent to the current address
+(so someone using a device left signed in cannot take the account), then
+one to the new address. **Account → Sign out other devices** ends every
+other session.
+
+**When someone cannot sign in** (they lost access to their email, or
+someone else changed it), check that it is really them, then on the
+server:
 
 ```sh
-sudo cribserver admin -socket /run/cribbage/admin.sock reset-password <username>
+sudo cribserver admin -socket /run/cribbage/admin.sock set-email <username> <address>
 ```
 
-This prints a temporary password such as `k7mq-x2r9-pd4h` and logs the
-player out everywhere. It also removes the account's email address, since
-whoever got into the account may have set it to their own, and prints the
-address it removed; the player can add theirs again. Pass the password on
-however you like. When they log in with it,
-they must choose a new password before they can do anything else. The
-command talks to the running server through `/run/cribbage/admin.sock`,
-which only root and the `cribbage` user can open (`/opt/cribbage/cribserver`
-if it is not on your PATH).
+Codes then go to the new address, every device is signed out, and the
+account's passkeys are removed, since whoever took the account may have
+added one; the old address is told. The command talks to the running
+server through `/run/cribbage/admin.sock`, which only root and the
+`cribbage` user can open (`/opt/cribbage/cribserver` if it is not on your
+PATH).
+
+**Bots.** Headless clients (`cmd/botclient`) cannot read email. They sign
+in to bot accounts, which have no address, with a shared secret: create
+`/etc/cribbage/bot-key` (`openssl rand -hex 16`), uncomment `bot-key-file`
+in `cribserver.conf` and its `LoadCredential=` line in `cribbage.service`,
+and run `botclient -key-file`. Without a bot key, bots cannot sign in.
+The bot key cannot sign in to a person's account.
 
 ## Deleting accounts
 
-Players delete their own accounts under **Account**. With a confirmed
-email address, a link is mailed there (it works for an hour) and the
-account goes only when they open it and confirm; without one, they type
-their username again. Deleting ends their unfinished games (resigning those
+Players delete their own accounts under **Account**. A link is mailed to
+their address (it works for an hour) and the account goes only when they
+open it and confirm. (A bot account, which has no address, is deleted
+when its username is typed again.) Deleting ends their unfinished games (resigning those
 in progress), removes the account, its address and invites, and frees the
 username. Their finished games stay in their opponents' history as
 "Deleted player". To delete an account yourself:
@@ -198,9 +219,10 @@ it, for example with a nightly cron job on another machine:
 rsync -a root@SERVER:/var/lib/cribbage/backups/ ~/cribbage-backups/
 ```
 
-or with your provider's volume snapshots. The files contain password
-hashes; keep them private. Session tokens are stored hashed, so a backup
-cannot be used to sign in as anyone.
+or with your provider's volume snapshots. Keep them private, although
+there is little in them to use: there are no passwords, addresses are
+encrypted, and session tokens are stored hashed, so a backup cannot be
+used to sign in as anyone.
 
 You cannot copy the live `cribbage.db` with `sqlite3 .backup` or
 Litestream while the server runs: it holds an exclusive lock.
@@ -221,22 +243,23 @@ systemctl start cribbage
 All built in; the numbers are in `internal/server` (`DefaultAuthLimits`,
 `DefaultGameLimits`).
 
-**Logins.** Remote clients get 20 login or registration attempts, then 10
-a minute; 5 registrations per address, then 5 an hour; and 10 failed
-logins per username *from one address*, then 1 a minute, so a stranger's
-wrong guesses cannot lock a player out. IPv6 addresses count by their /64.
-The address is the one WebRTC packets come from, so it is the player's
-real address even though signaling passes through Caddy. Connections from
-localhost (bots on the server) are not limited. Password hashing uses all
-but one CPU at most, so a flood of logins cannot stall the games.
+**Signing in.** Remote clients get 20 sign-in attempts (codes, links,
+passkeys), then 10 a minute; 10 emailed codes per address, then 1 a
+minute; and 5 registrations, then 5 an hour. Wrong codes and emails are
+also limited per account and per email address (see "Signing in and
+email"). IPv6 addresses count by their /64. The address is the one
+WebRTC packets come from, so it is the player's real address even though
+signaling passes through Caddy. Connections from localhost (bots on the
+server) are not limited.
 
 **Connections.** At most 20 per address and 5,000 in all; one that has
-not logged in within 30 seconds is closed. Messages over 64 KB are
+not signed in within 30 seconds is closed, or within 20 minutes once it
+has asked for a code (time to read the email). Messages over 64 KB are
 refused. WebRTC connection setups: 10 at once per address and 200 in all,
 each with at most 32 network addresses. HTTP requests time out after 30
 seconds.
 
-**Requests and CPU.** Once logged in, a player may make 60 requests at
+**Requests and CPU.** Once signed in, a player may make 60 requests at
 once, then 10 a second, across all their connections. Bot moves are
 computed on all but one CPU at most, so bot games played as fast as a
 script can go cannot slow everyone else.

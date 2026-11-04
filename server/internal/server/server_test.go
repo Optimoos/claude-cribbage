@@ -12,8 +12,6 @@ import (
 	"testing"
 	"time"
 
-	"golang.org/x/crypto/bcrypt"
-
 	"cribbage/internal/ai"
 	"cribbage/internal/ai/encode"
 	"cribbage/internal/ai/nn"
@@ -33,6 +31,9 @@ var loadLimits = func() *GameLimits {
 	return &l
 }()
 
+// testBotKey is the bot key of test servers; test players are bots.
+const testBotKey = "test-bot-key-0123456789"
+
 func startServer(t *testing.T) (*Server, string) {
 	t.Helper()
 	return startServerWith(t, loadLimits)
@@ -45,7 +46,7 @@ func startServerWith(t *testing.T, limits *GameLimits) (*Server, string) {
 	al := DefaultAuthLimits
 	al.ActionsPerUser = 1 << 20
 	srv := New(Config{
-		Auth:       &auth.Service{Store: store.NewMemory(), BcryptCost: bcrypt.MinCost},
+		Auth:       &auth.Service{Store: store.NewMemory(), BotKey: testBotKey},
 		Logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
 		GameLimits: limits,
 		AuthLimits: &al,
@@ -92,7 +93,7 @@ func (c *tclient) startReading() {
 func login(t *testing.T, addr, user string) *tclient {
 	t.Helper()
 	c := connect(t, addr)
-	a, err := c.Login(user, "password123", "Nick "+user, true)
+	a, err := c.BotLogin(user, "Nick "+user, testBotKey)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -143,7 +144,7 @@ func wantError(t *testing.T, m *pb.ServerMessage, code pb.ErrorCode) {
 func TestBotclientVsServerBots(t *testing.T) {
 	_, addr := startServer(t)
 	st, err := botclient.Run(context.Background(), botclient.Config{
-		Addr: addr, Username: "alice", Password: "password123", Bot: "heuristic",
+		Addr: addr, Username: "alice", Key: testBotKey, Bot: "heuristic",
 		Opponent: "random", Concurrent: 100, Games: 1000,
 	})
 	if err != nil {
@@ -168,7 +169,7 @@ func TestMatchmakingBetweenClients(t *testing.T) {
 		go func(i int, user string) {
 			defer wg.Done()
 			results[i], errs[i] = botclient.Run(context.Background(), botclient.Config{
-				Addr: addr, Username: user, Password: "password123", Bot: "heuristic",
+				Addr: addr, Username: user, Key: testBotKey, Bot: "heuristic",
 				Concurrent: 100, Games: 1000, Seed: uint64(i),
 			})
 		}(i, user)
@@ -193,38 +194,26 @@ func TestMatchmakingBetweenClients(t *testing.T) {
 }
 
 func TestAuthErrors(t *testing.T) {
-	_, addr := startServer(t)
-	c := connect(t, addr)
-	c.startReading()
-
-	id := c.send(t, &pb.ClientMessage{Body: &pb.ClientMessage_CreateGame{CreateGame: &pb.CreateGame{Bot: "random"}}})
-	wantError(t, c.next(t, replyTo(id)), pb.ErrorCode_ERROR_CODE_UNAUTHENTICATED)
-
-	id = c.send(t, &pb.ClientMessage{Body: &pb.ClientMessage_Register{Register: &pb.Register{Username: "x", Password: "password123"}}})
-	wantError(t, c.next(t, replyTo(id)), pb.ErrorCode_ERROR_CODE_BAD_REQUEST)
-
-	id = c.send(t, &pb.ClientMessage{Body: &pb.ClientMessage_Register{Register: &pb.Register{Username: "carol", Password: "short"}}})
-	wantError(t, c.next(t, replyTo(id)), pb.ErrorCode_ERROR_CODE_BAD_REQUEST)
-
-	id = c.send(t, &pb.ClientMessage{Body: &pb.ClientMessage_Login{Login: &pb.Login{Username: "nobody", Password: "password123"}}})
-	wantError(t, c.next(t, replyTo(id)), pb.ErrorCode_ERROR_CODE_INVALID_CREDENTIALS)
-
-	id = c.send(t, &pb.ClientMessage{Body: &pb.ClientMessage_Resume{Resume: &pb.Resume{Token: "bogus"}}})
-	wantError(t, c.next(t, replyTo(id)), pb.ErrorCode_ERROR_CODE_INVALID_CREDENTIALS)
-
-	id = c.send(t, &pb.ClientMessage{Body: &pb.ClientMessage_Register{Register: &pb.Register{Username: "Carol", Password: "password123"}}})
-	if a := c.next(t, replyTo(id)).GetAuthOk(); a == nil || a.Nickname != "Carol" || a.Token == "" {
-		t.Fatalf("register failed: %v", a)
+	_, addr := startServer(t) // no mail, no passkeys
+	c := anon(t, addr)
+	wantError(t, c.call(t, &pb.ClientMessage{Body: &pb.ClientMessage_CreateGame{CreateGame: &pb.CreateGame{Bot: "random"}}}),
+		pb.ErrorCode_ERROR_CODE_UNAUTHENTICATED)
+	bot := func(user, key string) *pb.ClientMessage {
+		return &pb.ClientMessage{Body: &pb.ClientMessage_BotLogin{BotLogin: &pb.BotLogin{Username: user, Key: key}}}
 	}
-	id = c.send(t, &pb.ClientMessage{Body: &pb.ClientMessage_Login{Login: &pb.Login{Username: "carol", Password: "password123"}}})
-	wantError(t, c.next(t, replyTo(id)), pb.ErrorCode_ERROR_CODE_ALREADY_AUTHENTICATED)
+	wantError(t, c.call(t, bot("x", testBotKey)), pb.ErrorCode_ERROR_CODE_BAD_REQUEST)
+	wantError(t, c.call(t, bot("carol", "wrong-key-wrong-key")), pb.ErrorCode_ERROR_CODE_INVALID_CREDENTIALS)
+	wantError(t, c.call(t, &pb.ClientMessage{Body: &pb.ClientMessage_Resume{Resume: &pb.Resume{Token: "bogus"}}}),
+		pb.ErrorCode_ERROR_CODE_INVALID_CREDENTIALS)
+	wantError(t, c.call(t, msg(&pb.EnterCode{Challenge: "nope", Code: "12345678"})), pb.ErrorCode_ERROR_CODE_NOT_FOUND)
+	wantError(t, c.call(t, msg(&pb.UseSignInLink{Token: "nope"})), pb.ErrorCode_ERROR_CODE_NOT_FOUND)
+	wantError(t, c.call(t, msg(&pb.PasskeySignInBegin{})), pb.ErrorCode_ERROR_CODE_BAD_REQUEST)
+	wantError(t, c.call(t, msg(&pb.RequestSignIn{Name: "carol"})), pb.ErrorCode_ERROR_CODE_BAD_REQUEST)
 
-	d := connect(t, addr)
-	d.startReading()
-	id = d.send(t, &pb.ClientMessage{Body: &pb.ClientMessage_Register{Register: &pb.Register{Username: "CAROL", Password: "password123"}}})
-	wantError(t, d.next(t, replyTo(id)), pb.ErrorCode_ERROR_CODE_USERNAME_TAKEN)
-	id = d.send(t, &pb.ClientMessage{Body: &pb.ClientMessage_Login{Login: &pb.Login{Username: "carol", Password: "wrongpassword"}}})
-	wantError(t, d.next(t, replyTo(id)), pb.ErrorCode_ERROR_CODE_INVALID_CREDENTIALS)
+	if a := c.call(t, bot("Carol", testBotKey)).GetAuthOk(); a == nil || a.Nickname != "Carol" || a.Token == "" {
+		t.Fatalf("bot login failed: %v", a)
+	}
+	wantError(t, c.call(t, bot("carol", testBotKey)), pb.ErrorCode_ERROR_CODE_ALREADY_AUTHENTICATED)
 }
 
 func isUpdate(gameID string) func(*pb.ServerMessage) bool {
@@ -467,7 +456,7 @@ func TestNNBotOpponent(t *testing.T) {
 	}
 	_, addr := startServer(t)
 	st, err := botclient.Run(context.Background(), botclient.Config{
-		Addr: addr, Username: "nnfan", Password: "password123", Bot: "random",
+		Addr: addr, Username: "nnfan", Key: testBotKey, Bot: "random",
 		Opponent: ai.BotName, Concurrent: 20, Games: 200,
 	})
 	if err != nil {
@@ -510,7 +499,7 @@ func TestExpertBotOpponents(t *testing.T) {
 	_, addr := startServer(t)
 	for _, l := range expert.Levels {
 		st, err := botclient.Run(context.Background(), botclient.Config{
-			Addr: addr, Username: "expertfan", Password: "password123", Bot: "random",
+			Addr: addr, Username: "expertfan", Key: testBotKey, Bot: "random",
 			Opponent: l.Name, Concurrent: 10, Games: 30,
 		})
 		if err != nil {

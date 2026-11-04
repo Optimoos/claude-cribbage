@@ -26,14 +26,13 @@ import (
 // which keeps action_log small and startup fast.
 const schema = `
 CREATE TABLE IF NOT EXISTS users (
-	id            INTEGER PRIMARY KEY AUTOINCREMENT, -- never reused: deleted users' games keep their ID
-	username      TEXT NOT NULL UNIQUE COLLATE NOCASE,
-	nickname      TEXT NOT NULL,
-	password_hash BLOB NOT NULL,
-	created       INTEGER NOT NULL,
-	email         TEXT NOT NULL DEFAULT '', -- verified, for reset links; encrypted (emailkey.go)
-	email_index   TEXT NOT NULL DEFAULT '', -- keyed hash of the address, for lookups
-	must_change   INTEGER NOT NULL DEFAULT 0 -- the admin reset the password
+	id          INTEGER PRIMARY KEY AUTOINCREMENT, -- never reused: deleted users' games keep their ID
+	username    TEXT NOT NULL UNIQUE COLLATE NOCASE,
+	nickname    TEXT NOT NULL,
+	created     INTEGER NOT NULL,
+	email       TEXT NOT NULL DEFAULT '', -- verified, for sign-in codes; encrypted (emailkey.go)
+	email_index TEXT NOT NULL DEFAULT '', -- keyed hash of the address, for lookups
+	bot         INTEGER NOT NULL DEFAULT 0 -- signs in with the bot key, not by email
 );
 CREATE INDEX IF NOT EXISTS users_email ON users(email_index) WHERE email_index != '';
 CREATE TABLE IF NOT EXISTS meta (
@@ -80,6 +79,15 @@ CREATE TABLE IF NOT EXISTS account_tokens (
 	expires INTEGER NOT NULL,
 	UNIQUE (user_id, kind)
 );
+CREATE TABLE IF NOT EXISTS passkeys (
+	id        BLOB PRIMARY KEY, -- credential ID
+	user_id   INTEGER NOT NULL REFERENCES users(id),
+	name      TEXT NOT NULL,
+	data      BLOB NOT NULL,
+	created   INTEGER NOT NULL,
+	last_used INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS passkeys_user ON passkeys(user_id);
 CREATE TABLE IF NOT EXISTS action_log (
 	id      INTEGER PRIMARY KEY,
 	game_id TEXT NOT NULL,
@@ -402,17 +410,28 @@ func isUniqueViolation(err error) bool {
 }
 
 func (s *SQLite) CreateUser(ctx context.Context, u *User) error {
+	if u.Email != "" && s.emails == nil {
+		return ErrNoEmailKey
+	}
 	var id int64
 	err := s.write(ctx, func(tx *writeTx) error {
-		res, err := tx.Exec(`INSERT INTO users (username, nickname, password_hash, created) VALUES (?, ?, ?, ?)`,
-			u.Username, u.Nickname, u.PasswordHash, u.Created.UnixMilli())
+		res, err := tx.Exec(`INSERT INTO users (username, nickname, created, bot) VALUES (?, ?, ?, ?)`,
+			u.Username, u.Nickname, u.Created.UnixMilli(), boolInt(u.Bot))
 		if isUniqueViolation(err) {
 			return ErrUsernameTaken
 		}
 		if err != nil {
 			return err
 		}
-		id, err = res.LastInsertId()
+		if id, err = res.LastInsertId(); err != nil {
+			return err
+		}
+		// The address is sealed to the user's ID, known only now.
+		sealed, index, err := s.sealEmail(id, u.Email)
+		if err != nil {
+			return err
+		}
+		_, err = tx.Exec(`UPDATE users SET email = ?, email_index = ? WHERE id = ?`, sealed, index, id)
 		return err
 	}, nil)
 	if err == nil {
@@ -432,12 +451,12 @@ func (s *SQLite) scanUser(row *sql.Row) (*User, error) {
 func (s *SQLite) scanUserRow(row scanner) (*User, error) {
 	var u User
 	var created int64
-	var must int
+	var bot int
 	var sealed string
-	if err := row.Scan(&u.ID, &u.Username, &u.Nickname, &u.PasswordHash, &created, &sealed, &must); err != nil {
+	if err := row.Scan(&u.ID, &u.Username, &u.Nickname, &created, &sealed, &bot); err != nil {
 		return nil, err
 	}
-	u.Created, u.MustChange = time.UnixMilli(created), must != 0
+	u.Created, u.Bot = time.UnixMilli(created), bot != 0
 	u.Email = s.openEmail(u.ID, sealed)
 	return &u, nil
 }
@@ -499,7 +518,7 @@ func (s *SQLite) openEmail(userID int64, sealed string) string {
 	return email
 }
 
-const userCols = `id, username, nickname, password_hash, created, email, must_change`
+const userCols = `id, username, nickname, created, email, bot`
 
 func (s *SQLite) UserByUsername(ctx context.Context, username string) (*User, error) {
 	return s.scanUser(s.db.QueryRowContext(ctx, `SELECT `+userCols+` FROM users WHERE username = ?`, username))
@@ -517,11 +536,11 @@ func tokenKey(token string) string {
 	return hex.EncodeToString(h[:])
 }
 
-func (s *SQLite) CreateSession(ctx context.Context, token string, userID int64, hash []byte, expires time.Time) error {
+func (s *SQLite) CreateSession(ctx context.Context, token string, userID int64, expires time.Time) error {
 	return s.write(ctx, func(tx *writeTx) error {
 		res, err := tx.Exec(`INSERT INTO sessions (token, user_id, expires)
-			SELECT ?, id, ? FROM users WHERE id = ? AND password_hash = ?`,
-			tokenKey(token), expires.UnixMilli(), userID, hash)
+			SELECT ?, id, ? FROM users WHERE id = ?`,
+			tokenKey(token), expires.UnixMilli(), userID)
 		if err != nil {
 			return err
 		}
@@ -534,14 +553,28 @@ func (s *SQLite) CreateSession(ctx context.Context, token string, userID int64, 
 	}, nil)
 }
 
-func (s *SQLite) SessionUser(ctx context.Context, token string) (int64, error) {
-	var id int64
-	err := s.db.QueryRowContext(ctx, `SELECT user_id FROM sessions WHERE token = ? AND expires > ?`,
-		tokenKey(token), time.Now().UnixMilli()).Scan(&id)
+func (s *SQLite) SessionUser(ctx context.Context, token string) (int64, time.Time, error) {
+	var id, expires int64
+	err := s.db.QueryRowContext(ctx, `SELECT user_id, expires FROM sessions WHERE token = ? AND expires > ?`,
+		tokenKey(token), time.Now().UnixMilli()).Scan(&id, &expires)
 	if errors.Is(err, sql.ErrNoRows) {
-		return 0, ErrNotFound
+		return 0, time.Time{}, ErrNotFound
 	}
-	return id, err
+	return id, time.UnixMilli(expires), err
+}
+
+func (s *SQLite) ExtendSession(ctx context.Context, token string, expires time.Time) error {
+	return s.write(ctx, func(tx *writeTx) error {
+		_, err := tx.Exec(`UPDATE sessions SET expires = ? WHERE token = ?`, expires.UnixMilli(), tokenKey(token))
+		return err
+	}, nil)
+}
+
+func (s *SQLite) DeleteSessions(ctx context.Context, userID int64, keep string) error {
+	return s.write(ctx, func(tx *writeTx) error {
+		_, err := tx.Exec(`DELETE FROM sessions WHERE user_id = ? AND token != ?`, userID, keepKey(keep))
+		return err
+	}, nil)
 }
 
 func (s *SQLite) DeleteSession(ctx context.Context, token string) error {
@@ -567,25 +600,6 @@ func (s *SQLite) DeleteExpiredSessions(ctx context.Context, t time.Time) (int64,
 	return n, err
 }
 
-func (s *SQLite) SetPassword(ctx context.Context, userID int64, hash []byte, mustChange bool, keep string) error {
-	return s.write(ctx, func(tx *writeTx) error {
-		res, err := tx.Exec(`UPDATE users SET password_hash = ?, must_change = ? WHERE id = ?`, hash, boolInt(mustChange), userID)
-		if err != nil {
-			return err
-		}
-		if n, err := res.RowsAffected(); err != nil {
-			return err
-		} else if n == 0 {
-			return ErrNotFound
-		}
-		if _, err := tx.Exec(`DELETE FROM sessions WHERE user_id = ? AND token != ?`, userID, keepKey(keep)); err != nil {
-			return err
-		}
-		_, err = tx.Exec(`DELETE FROM account_tokens WHERE user_id = ?`, userID)
-		return err
-	}, nil)
-}
-
 // keepKey is the stored key of a session to keep, or one that matches none.
 func keepKey(token string) string {
 	if token == "" {
@@ -600,7 +614,7 @@ func (s *SQLite) SetEmail(ctx context.Context, userID int64, email string) error
 		return err
 	}
 	return s.write(ctx, func(tx *writeTx) error {
-		res, err := tx.Exec(`UPDATE users SET email = ?, email_index = ? WHERE id = ?`, sealed, index, userID)
+		res, err := tx.Exec(`UPDATE users SET email = ?, email_index = ?, bot = bot AND ? = '' WHERE id = ?`, sealed, index, sealed, userID)
 		if err != nil {
 			return err
 		}
@@ -678,6 +692,7 @@ func (s *SQLite) DeleteUser(ctx context.Context, userID int64) error {
 		for _, q := range []string{
 			`DELETE FROM sessions WHERE user_id = ?`,
 			`DELETE FROM account_tokens WHERE user_id = ?`,
+			`DELETE FROM passkeys WHERE user_id = ?`,
 			`DELETE FROM users WHERE id = ?`,
 		} {
 			if _, err := tx.Exec(q, userID); err != nil {
@@ -703,14 +718,74 @@ func (s *SQLite) ForgetUser(ctx context.Context, userID int64) error {
 	}, nil)
 }
 
-func (s *SQLite) PendingEmail(ctx context.Context, userID int64) (string, error) {
+func (s *SQLite) PendingEmail(ctx context.Context, userID int64, kind int) (string, error) {
 	var email string
 	err := s.db.QueryRowContext(ctx, `SELECT email FROM account_tokens WHERE user_id = ? AND kind = ? AND expires > ?`,
-		userID, TokenVerify, time.Now().UnixMilli()).Scan(&email)
+		userID, kind, time.Now().UnixMilli()).Scan(&email)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil
 	}
 	return s.openEmail(userID, email), err
+}
+
+func (s *SQLite) AddPasskey(ctx context.Context, p *Passkey) error {
+	return s.write(ctx, func(tx *writeTx) error {
+		_, err := tx.Exec(`INSERT INTO passkeys (id, user_id, name, data, created) SELECT ?, id, ?, ?, ? FROM users WHERE id = ?`,
+			p.ID, p.Name, p.Data, p.Created.UnixMilli(), p.UserID)
+		return err
+	}, nil)
+}
+
+func (s *SQLite) Passkeys(ctx context.Context, userID int64) ([]Passkey, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, name, data, created, last_used FROM passkeys WHERE user_id = ? ORDER BY created, id`, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Passkey
+	for rows.Next() {
+		p := Passkey{UserID: userID}
+		var created, used int64
+		if err := rows.Scan(&p.ID, &p.Name, &p.Data, &created, &used); err != nil {
+			return nil, err
+		}
+		p.Created = time.UnixMilli(created)
+		if used != 0 {
+			p.LastUsed = time.UnixMilli(used)
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+func (s *SQLite) UpdatePasskey(ctx context.Context, p *Passkey) error {
+	return s.write(ctx, func(tx *writeTx) error {
+		_, err := tx.Exec(`UPDATE passkeys SET data = ?, last_used = ? WHERE id = ? AND user_id = ?`,
+			p.Data, p.LastUsed.UnixMilli(), p.ID, p.UserID)
+		return err
+	}, nil)
+}
+
+func (s *SQLite) DeletePasskey(ctx context.Context, userID int64, id []byte) error {
+	return s.write(ctx, func(tx *writeTx) error {
+		res, err := tx.Exec(`DELETE FROM passkeys WHERE id = ? AND user_id = ?`, id, userID)
+		if err != nil {
+			return err
+		}
+		if n, err := res.RowsAffected(); err != nil {
+			return err
+		} else if n == 0 {
+			return ErrNotFound
+		}
+		return nil
+	}, nil)
+}
+
+func (s *SQLite) DeletePasskeys(ctx context.Context, userID int64) error {
+	return s.write(ctx, func(tx *writeTx) error {
+		_, err := tx.Exec(`DELETE FROM passkeys WHERE user_id = ?`, userID)
+		return err
+	}, nil)
 }
 
 func boolInt(b bool) int {

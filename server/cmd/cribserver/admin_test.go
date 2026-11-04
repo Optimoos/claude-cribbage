@@ -10,8 +10,6 @@ import (
 	"path/filepath"
 	"testing"
 
-	"golang.org/x/crypto/bcrypt"
-
 	"cribbage/internal/auth"
 	"cribbage/internal/server"
 	"cribbage/internal/store"
@@ -19,8 +17,8 @@ import (
 
 func TestAdminSocket(t *testing.T) {
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	a := &auth.Service{Store: store.NewMemory(), BcryptCost: bcrypt.MinCost}
-	if _, err := a.Register(context.Background(), "alice", "password123", ""); err != nil {
+	a := &auth.Service{Store: store.NewMemory(), BotKey: "admin-test-bot-key"}
+	if _, err := a.BotLogin(context.Background(), "alice", "", a.BotKey); err != nil {
 		t.Fatal(err)
 	}
 	srv := server.New(server.Config{Auth: a, Logger: log})
@@ -55,18 +53,23 @@ func TestAdminSocket(t *testing.T) {
 		}
 		return resp
 	}
-	if r := call(adminRequest{Cmd: "reset-password", Username: "nobody"}); r.OK || r.Error == "" {
+	if r := call(adminRequest{Cmd: "set-email", Username: "nobody", Email: "a@example.com"}); r.OK || r.Error == "" {
 		t.Fatalf("unknown user: %+v", r)
+	}
+	if r := call(adminRequest{Cmd: "set-email", Username: "alice", Email: "not-an-address"}); r.OK {
+		t.Fatalf("bad address: %+v", r)
 	}
 	if r := call(adminRequest{Cmd: "frobnicate"}); r.OK {
 		t.Fatalf("unknown command: %+v", r)
 	}
-	r := call(adminRequest{Cmd: "reset-password", Username: "alice"})
-	if !r.OK || r.Password == "" {
-		t.Fatalf("reset: %+v", r)
+	if r := call(adminRequest{Cmd: "set-email", Username: "alice", Email: "alice@example.com"}); !r.OK || r.OldEmail != "" {
+		t.Fatalf("set email: %+v", r)
 	}
-	res, err := a.Login(context.Background(), "alice", r.Password)
-	if err != nil || !res.User.MustChange {
-		t.Fatalf("login with temporary password: %+v, %v", res, err)
+	u, err := a.Store.UserByUsername(context.Background(), "alice")
+	if err != nil || u.Email != "alice@example.com" || u.Bot {
+		t.Fatalf("after set-email: %+v, %v", u, err)
+	}
+	if r := call(adminRequest{Cmd: "delete-account", Username: "alice"}); !r.OK {
+		t.Fatalf("delete: %+v", r)
 	}
 }

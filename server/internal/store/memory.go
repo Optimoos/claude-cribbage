@@ -23,6 +23,7 @@ type Memory struct {
 	recent   map[int64][]Game // newest last, capped at maxRecent
 	invites  map[string]Invite
 	tokens   map[string]AccountToken
+	passkeys map[string]Passkey // by ID
 }
 
 const maxRecent = 50
@@ -41,6 +42,7 @@ func NewMemory() *Memory {
 		recent:   map[int64][]Game{},
 		invites:  map[string]Invite{},
 		tokens:   map[string]AccountToken{},
+		passkeys: map[string]Passkey{},
 	}
 }
 
@@ -59,6 +61,7 @@ func (m *Memory) DeleteUser(_ context.Context, userID int64) error {
 		}
 	}
 	m.deleteTokens(userID)
+	m.deletePasskeys(userID)
 	return nil
 }
 
@@ -149,24 +152,45 @@ func (m *Memory) UserByID(_ context.Context, id int64) (*User, error) {
 	return &c, nil
 }
 
-func (m *Memory) CreateSession(_ context.Context, token string, userID int64, hash []byte, expires time.Time) error {
+func (m *Memory) CreateSession(_ context.Context, token string, userID int64, expires time.Time) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if u, ok := m.byID[userID]; !ok || !bytes.Equal(u.PasswordHash, hash) {
+	if _, ok := m.byID[userID]; !ok {
 		return ErrNotFound
 	}
 	m.sessions[token] = session{userID: userID, expires: expires}
 	return nil
 }
 
-func (m *Memory) SessionUser(_ context.Context, token string) (int64, error) {
+func (m *Memory) SessionUser(_ context.Context, token string) (int64, time.Time, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	s, ok := m.sessions[token]
 	if !ok || time.Now().After(s.expires) {
-		return 0, ErrNotFound
+		return 0, time.Time{}, ErrNotFound
 	}
-	return s.userID, nil
+	return s.userID, s.expires, nil
+}
+
+func (m *Memory) ExtendSession(_ context.Context, token string, expires time.Time) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if s, ok := m.sessions[token]; ok {
+		s.expires = expires
+		m.sessions[token] = s
+	}
+	return nil
+}
+
+func (m *Memory) DeleteSessions(_ context.Context, userID int64, keep string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for k, s := range m.sessions {
+		if s.userID == userID && k != keep {
+			delete(m.sessions, k)
+		}
+	}
+	return nil
 }
 
 func (m *Memory) DeleteSession(_ context.Context, token string) error {
@@ -194,23 +218,6 @@ func (m *Memory) DeleteExpiredSessions(_ context.Context, t time.Time) (int64, e
 	return n, nil
 }
 
-func (m *Memory) SetPassword(_ context.Context, userID int64, hash []byte, mustChange bool, keep string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	u, ok := m.byID[userID]
-	if !ok {
-		return ErrNotFound
-	}
-	u.PasswordHash, u.MustChange = append([]byte(nil), hash...), mustChange
-	for k, s := range m.sessions {
-		if s.userID == userID && k != keep {
-			delete(m.sessions, k)
-		}
-	}
-	m.deleteTokens(userID)
-	return nil
-}
-
 // deleteTokens removes a user's account tokens of the given kinds, or of
 // every kind if none are given. Callers hold mu.
 func (m *Memory) deleteTokens(userID int64, kinds ...int) {
@@ -229,6 +236,9 @@ func (m *Memory) SetEmail(_ context.Context, userID int64, email string) error {
 		return ErrNotFound
 	}
 	u.Email = email
+	if email != "" {
+		u.Bot = false
+	}
 	m.deleteTokens(userID)
 	return nil
 }
@@ -272,15 +282,85 @@ func (m *Memory) TakeAccountToken(_ context.Context, token string, kind int) (*A
 	return &t, nil
 }
 
-func (m *Memory) PendingEmail(_ context.Context, userID int64) (string, error) {
+func (m *Memory) PendingEmail(_ context.Context, userID int64, kind int) (string, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	for _, t := range m.tokens {
-		if t.UserID == userID && t.Kind == TokenVerify && time.Now().Before(t.Expires) {
+		if t.UserID == userID && t.Kind == kind && time.Now().Before(t.Expires) {
 			return t.Email, nil
 		}
 	}
 	return "", nil
+}
+
+func (m *Memory) AddPasskey(_ context.Context, p *Passkey) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, ok := m.byID[p.UserID]; !ok {
+		return ErrNotFound
+	}
+	if _, ok := m.passkeys[string(p.ID)]; ok {
+		return fmt.Errorf("passkey exists")
+	}
+	c := *p
+	c.ID, c.Data = bytes.Clone(p.ID), bytes.Clone(p.Data)
+	m.passkeys[string(p.ID)] = c
+	return nil
+}
+
+func (m *Memory) Passkeys(_ context.Context, userID int64) ([]Passkey, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	var out []Passkey
+	for _, p := range m.passkeys {
+		if p.UserID == userID {
+			p.ID, p.Data = bytes.Clone(p.ID), bytes.Clone(p.Data)
+			out = append(out, p)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if !out[i].Created.Equal(out[j].Created) {
+			return out[i].Created.Before(out[j].Created)
+		}
+		return bytes.Compare(out[i].ID, out[j].ID) < 0
+	})
+	return out, nil
+}
+
+func (m *Memory) UpdatePasskey(_ context.Context, p *Passkey) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if q, ok := m.passkeys[string(p.ID)]; ok && q.UserID == p.UserID {
+		q.Data, q.LastUsed = bytes.Clone(p.Data), p.LastUsed
+		m.passkeys[string(p.ID)] = q
+	}
+	return nil
+}
+
+func (m *Memory) DeletePasskey(_ context.Context, userID int64, id []byte) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if q, ok := m.passkeys[string(id)]; !ok || q.UserID != userID {
+		return ErrNotFound
+	}
+	delete(m.passkeys, string(id))
+	return nil
+}
+
+func (m *Memory) DeletePasskeys(_ context.Context, userID int64) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.deletePasskeys(userID)
+	return nil
+}
+
+// deletePasskeys removes a user's passkeys. Callers hold mu.
+func (m *Memory) deletePasskeys(userID int64) {
+	for k, p := range m.passkeys {
+		if p.UserID == userID {
+			delete(m.passkeys, k)
+		}
+	}
 }
 
 func (m *Memory) CreateGame(_ context.Context, g *Game) error {

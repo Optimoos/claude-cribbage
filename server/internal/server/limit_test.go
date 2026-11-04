@@ -1,17 +1,15 @@
 package server
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"log/slog"
 	"net"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
-
-	"golang.org/x/crypto/bcrypt"
 
 	"cribbage/internal/auth"
 	"cribbage/internal/bots"
@@ -46,7 +44,7 @@ func startRemoteFrom(t *testing.T, ip *atomic.Value, lim AuthLimits) string {
 		lim.ConnsPerAddr, lim.Conns, lim.LoginWithin = 100, 100, time.Minute
 	}
 	srv := New(Config{
-		Auth:       &auth.Service{Store: store.NewMemory(), BcryptCost: bcrypt.MinCost},
+		Auth:       &auth.Service{Store: store.NewMemory(), BotKey: testBotKey, Mailer: discardMail{}},
 		Logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
 		AuthLimits: &lim,
 	})
@@ -67,58 +65,46 @@ func startRemoteFrom(t *testing.T, ip *atomic.Value, lim AuthLimits) string {
 	return ln.Addr().String()
 }
 
-func authMsg(register bool, user, pass string) *pb.ClientMessage {
-	if register {
-		return &pb.ClientMessage{Body: &pb.ClientMessage_Register{Register: &pb.Register{Username: user, Password: pass}}}
-	}
-	return &pb.ClientMessage{Body: &pb.ClientMessage_Login{Login: &pb.Login{Username: user, Password: pass}}}
+type discardMail struct{}
+
+func (discardMail) Send(context.Context, string, string, string) error { return nil }
+
+func botLogin(user string) *pb.ClientMessage {
+	return &pb.ClientMessage{Body: &pb.ClientMessage_BotLogin{BotLogin: &pb.BotLogin{Username: user, Key: testBotKey}}}
 }
 
 func TestAuthRateLimits(t *testing.T) {
-	lim := AuthLimits{
+	addr := startRemote(t, "203.0.113.5", AuthLimits{
 		AttemptsPerIP: 100, AttemptEvery: time.Hour,
 		RegistersPerIP: 2, RegisterEvery: time.Hour,
-		FailuresPerUser: 3, FailureEvery: time.Hour,
-	}
-	addr := startRemote(t, "203.0.113.5", lim)
-	c := connect(t, addr)
-	c.startReading()
-	try := func(register bool, user, pass string) *pb.ServerMessage {
-		t.Helper()
-		return c.next(t, replyTo(c.send(t, authMsg(register, user, pass))))
-	}
-
+		CodesPerIP: 2, CodeEvery: time.Hour,
+	})
+	c := anon(t, addr)
 	// Registrations: two, then refused.
 	for _, u := range []string{"reg1", "reg2"} {
-		if m := try(true, u, "password123"); m.GetAuthOk() == nil {
+		if m := c.call(t, msg(&pb.Register{Username: u, Email: u + "@example.com"})); m.GetSignInStarted() == nil {
 			t.Fatalf("register %s: %v", u, m)
 		}
-		c = connect(t, addr) // a fresh, unauthenticated connection
-		c.startReading()
 	}
-	wantError(t, try(true, "reg3", "password123"), pb.ErrorCode_ERROR_CODE_RATE_LIMITED)
-
-	// Failed logins: three wrong passwords lock the username, even with
-	// the right password, but not other usernames.
-	for i := 0; i < 3; i++ {
-		wantError(t, try(false, "REG1", "wrongpassword"), pb.ErrorCode_ERROR_CODE_INVALID_CREDENTIALS)
+	wantError(t, c.call(t, msg(&pb.Register{Username: "reg3", Email: "reg3@example.com"})), pb.ErrorCode_ERROR_CODE_RATE_LIMITED)
+	// Sign-in codes: two, then refused.
+	for i := 0; i < 2; i++ {
+		if m := c.call(t, msg(&pb.RequestSignIn{Name: "someone"})); m.GetSignInStarted() == nil {
+			t.Fatalf("sign in %d: %v", i, m)
+		}
 	}
-	wantError(t, try(false, "reg1", "password123"), pb.ErrorCode_ERROR_CODE_RATE_LIMITED)
-	if m := try(false, "reg2", "password123"); m.GetAuthOk() == nil {
-		t.Fatalf("other user locked out: %v", m)
-	}
+	wantError(t, c.call(t, msg(&pb.RequestSignIn{Name: "someone"})), pb.ErrorCode_ERROR_CODE_RATE_LIMITED)
 
 	// Attempts per address.
 	addr = startRemote(t, "203.0.113.6", AuthLimits{
 		AttemptsPerIP: 2, AttemptEvery: time.Hour,
 		RegistersPerIP: 10, RegisterEvery: time.Hour,
-		FailuresPerUser: 10, FailureEvery: time.Hour,
+		CodesPerIP: 10, CodeEvery: time.Hour,
 	})
-	c = connect(t, addr)
-	c.startReading()
-	wantError(t, try(false, "nobody", "password123"), pb.ErrorCode_ERROR_CODE_INVALID_CREDENTIALS)
-	wantError(t, try(false, "nobody2", "password123"), pb.ErrorCode_ERROR_CODE_INVALID_CREDENTIALS)
-	wantError(t, try(false, "nobody3", "password123"), pb.ErrorCode_ERROR_CODE_RATE_LIMITED)
+	c = anon(t, addr)
+	wantError(t, c.call(t, msg(&pb.EnterCode{Challenge: "x", Code: "1"})), pb.ErrorCode_ERROR_CODE_NOT_FOUND)
+	wantError(t, c.call(t, msg(&pb.UseSignInLink{Token: "x"})), pb.ErrorCode_ERROR_CODE_NOT_FOUND)
+	wantError(t, c.call(t, msg(&pb.EnterCode{Challenge: "x", Code: "1"})), pb.ErrorCode_ERROR_CODE_RATE_LIMITED)
 }
 
 // Loopback clients (local bots, tests) are not limited.
@@ -126,13 +112,11 @@ func TestAuthLimitsSkipLoopback(t *testing.T) {
 	addr := startRemote(t, "127.0.0.1", AuthLimits{
 		AttemptsPerIP: 1, AttemptEvery: time.Hour,
 		RegistersPerIP: 1, RegisterEvery: time.Hour,
-		FailuresPerUser: 1, FailureEvery: time.Hour,
+		CodesPerIP: 1, CodeEvery: time.Hour,
 	})
-	c := connect(t, addr)
-	c.startReading()
+	c := anon(t, addr)
 	for i := 0; i < 5; i++ {
-		wantError(t, c.next(t, replyTo(c.send(t, authMsg(false, "nobody", "password123")))),
-			pb.ErrorCode_ERROR_CODE_INVALID_CREDENTIALS)
+		wantError(t, c.call(t, msg(&pb.EnterCode{Challenge: "x", Code: "1"})), pb.ErrorCode_ERROR_CODE_NOT_FOUND)
 	}
 }
 
@@ -152,42 +136,33 @@ func TestAddrKey(t *testing.T) {
 	}
 }
 
-// Failed logins count per username and address: a wrong guess from one
-// place does not lock the player out elsewhere. IPv6 counts by /64.
-func TestFailuresPerAddress(t *testing.T) {
-	var ip atomic.Value
-	ip.Store("2001:db8::1")
-	addr := startRemoteFrom(t, &ip, AuthLimits{
+// A connection that has started signing in (it is waiting for an emailed
+// code, say) gets longer than one that has done nothing.
+func TestSignInWaitsLonger(t *testing.T) {
+	addr := startRemote(t, "203.0.113.8", AuthLimits{
 		AttemptsPerIP: 100, AttemptEvery: time.Hour,
 		RegistersPerIP: 10, RegisterEvery: time.Hour,
-		FailuresPerUser: 2, FailureEvery: time.Hour,
+		CodesPerIP: 10, CodeEvery: time.Hour,
+		ConnsPerAddr: 10, Conns: 100, LoginWithin: 200 * time.Millisecond, SignInWithin: time.Second,
 	})
-	try := func(user, pass string) *pb.ServerMessage {
-		c := connect(t, addr)
-		c.startReading()
-		return c.next(t, replyTo(c.send(t, authMsg(false, user, pass))))
+	idle, waiting := anon(t, addr), anon(t, addr)
+	waiting.call(t, msg(&pb.RequestSignIn{Name: "alice"}))
+	start := time.Now()
+	closed(t, idle)
+	if d := time.Since(start); d > 500*time.Millisecond {
+		t.Fatalf("idle connection lasted %v", d)
 	}
-	reg := connect(t, addr)
-	reg.startReading()
-	reg.next(t, replyTo(reg.send(t, authMsg(true, "victim", "password123"))))
-
-	wantError(t, try("victim", "wrongpassword"), pb.ErrorCode_ERROR_CODE_INVALID_CREDENTIALS)
-	ip.Store("2001:db8::2") // same /64
-	wantError(t, try("victim", "wrongpassword"), pb.ErrorCode_ERROR_CODE_INVALID_CREDENTIALS)
-	wantError(t, try("victim", "password123"), pb.ErrorCode_ERROR_CODE_RATE_LIMITED)
-	ip.Store("198.51.100.7") // the real player, elsewhere
-	if m := try("victim", "password123"); m.GetAuthOk() == nil {
-		t.Fatalf("player locked out by someone else's guesses: %v", m)
+	time.Sleep(300 * time.Millisecond) // well past LoginWithin
+	if m := waiting.call(t, &pb.ClientMessage{Body: &pb.ClientMessage_Ping{Ping: &pb.Ping{}}}); m.GetPong() == nil {
+		t.Fatalf("waiting connection: %v", m)
 	}
-	// Names that cannot exist are refused at once.
-	wantError(t, try(strings.Repeat("x", 5000), "password123"), pb.ErrorCode_ERROR_CODE_INVALID_CREDENTIALS)
+	closed(t, waiting) // at SignInWithin
 }
 
 func TestConnectionLimits(t *testing.T) {
 	addr := startRemote(t, "203.0.113.9", AuthLimits{
 		AttemptsPerIP: 100, AttemptEvery: time.Hour,
 		RegistersPerIP: 10, RegisterEvery: time.Hour,
-		FailuresPerUser: 10, FailureEvery: time.Hour,
 		ConnsPerAddr: 2, Conns: 100, LoginWithin: 200 * time.Millisecond,
 	})
 	closed := func(c *tclient) bool {
@@ -208,7 +183,7 @@ func TestConnectionLimits(t *testing.T) {
 		t.Fatal("third connection from one address was accepted")
 	}
 	// a logs in; b never does and is cut off.
-	if a.next(t, replyTo(a.send(t, authMsg(true, "prompt", "password123")))).GetAuthOk() == nil {
+	if a.next(t, replyTo(a.send(t, botLogin("prompt")))).GetAuthOk() == nil {
 		t.Fatal("login failed")
 	}
 	if !closed(b) {
@@ -228,7 +203,6 @@ func TestActionRateLimit(t *testing.T) {
 	addr := startRemote(t, "203.0.113.20", AuthLimits{
 		AttemptsPerIP: 100, AttemptEvery: time.Hour,
 		RegistersPerIP: 10, RegisterEvery: time.Hour,
-		FailuresPerUser: 10, FailureEvery: time.Hour,
 		ActionsPerUser: 3, ActionEvery: time.Hour,
 	})
 	list := &pb.ClientMessage{Body: &pb.ClientMessage_ListGames{ListGames: &pb.ListGames{}}}

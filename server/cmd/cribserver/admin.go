@@ -26,14 +26,14 @@ const defaultAdminSocket = "/run/cribbage/admin.sock"
 type adminRequest struct {
 	Cmd      string `json:"cmd"`
 	Username string `json:"username,omitempty"`
+	Email    string `json:"email,omitempty"`
 }
 
 type adminResponse struct {
-	OK       bool   `json:"ok"`
-	Error    string `json:"error,omitempty"`
-	Password string `json:"password,omitempty"`
-	// RemovedEmail is the address reset-password took off the account.
-	RemovedEmail string `json:"removed_email,omitempty"`
+	OK    bool   `json:"ok"`
+	Error string `json:"error,omitempty"`
+	// OldEmail is the address set-email replaced.
+	OldEmail string `json:"old_email,omitempty"`
 }
 
 // serveAdmin listens on a Unix socket at path for admin commands.
@@ -74,9 +74,9 @@ func handleAdmin(log *slog.Logger, c net.Conn, srv *server.Server) {
 		resp.Error = "bad request: " + err.Error()
 	} else {
 		switch req.Cmd {
-		case "reset-password":
+		case "set-email":
 			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-			resp.Password, resp.RemovedEmail, err = srv.AdminResetPassword(ctx, req.Username)
+			resp.OldEmail, err = srv.AdminSetEmail(ctx, req.Username, req.Email)
 			cancel()
 			if err != nil {
 				resp.Error = err.Error()
@@ -112,10 +112,12 @@ func adminMain(args []string) {
 		fmt.Fprintf(fl.Output(), `Usage: cribserver admin [-socket path] <command>
 
 Commands:
-  reset-password <username>
-        Give a player a temporary password and log them out everywhere.
-        They must choose a new password when they next log in. Their
-        email address is removed, in case whoever took the account set it.
+  set-email <username> <address>
+        Recover an account whose owner cannot sign in (they lost their
+        email, or someone else changed it): sign-in codes go to the new
+        address, every device is signed out, and the account's passkeys
+        are removed. The old address is told. Check that the person
+        asking is the account's owner first.
   delete-account [-yes] <username>
         Delete a player's account: their unfinished games end (active ones
         are resigned), their invites and account are removed, and their
@@ -132,12 +134,12 @@ Flags:
 	fl.Parse(args)
 	var req adminRequest
 	switch fl.Arg(0) {
-	case "reset-password":
-		if fl.NArg() != 2 {
+	case "set-email":
+		if fl.NArg() != 3 {
 			fl.Usage()
 			os.Exit(2)
 		}
-		req = adminRequest{Cmd: "reset-password", Username: fl.Arg(1)}
+		req = adminRequest{Cmd: "set-email", Username: fl.Arg(1), Email: fl.Arg(2)}
 	case "delete-account":
 		if fl.NArg() != 2 {
 			fl.Usage()
@@ -180,9 +182,9 @@ Flags:
 		fmt.Printf("Deleted the account %s.\n", req.Username)
 		return
 	}
-	fmt.Printf("Temporary password for %s: %s\n", req.Username, resp.Password)
-	fmt.Println("They are logged out everywhere, and must choose a new password when they log in with it.")
-	if resp.RemovedEmail != "" {
-		fmt.Printf("Their email address (%s) was removed, in case someone else set it; they can add it again.\n", resp.RemovedEmail)
+	fmt.Printf("Sign-in codes for %s now go to %s.\n", req.Username, req.Email)
+	fmt.Println("They are signed out everywhere, and their passkeys were removed; they can sign in with a code and add passkeys again.")
+	if resp.OldEmail != "" && !strings.EqualFold(resp.OldEmail, req.Email) {
+		fmt.Printf("The old address (%s) was told of the change.\n", resp.OldEmail)
 	}
 }

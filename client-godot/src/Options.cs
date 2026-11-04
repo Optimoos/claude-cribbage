@@ -11,21 +11,24 @@ namespace Cribbage;
 //	--profile NAME                keep the session in a separate file, so
 //	                              several clients can run on one machine
 //	--autoplay                    play by itself, for testing (see Autoplay)
-//	--user NAME --password PW     the account autoplay uses
+//	--user NAME --bot-key KEY     the bot account autoplay signs in to
+//	                              with the server's bot key (BotLogin)
 //	--vs BOT | --open | --join    what game autoplay starts
 //	--invite USER | --accept      or invite USER, or accept the first invite
 //	--quit-after N                stop abruptly after N moves
 //	--pace S                      wait S seconds between moves
 //	--animate                     animate while autoplaying (rapid otherwise)
 //	--screenshot FILE --after S   save the window after S seconds and quit
-//	--show history|account|forgot|settings
-//	                              open that window once possible, for screenshots
+//	--show history|account|settings|register|code|device
+//	                              open that window or sign-in screen once
+//	                              possible, for screenshots (code asks for
+//	                              a code for --user)
 public sealed class Options
 {
     public string? Server, Theme;
     public string Profile = "default";
     public bool Autoplay;
-    public string User = "", Password = "";
+    public string User = "", BotKey = "";
     public string Vs = "", Mode = "", Invite = "";
     public int QuitAfter;
     public double Pace = 0.02;
@@ -47,7 +50,7 @@ public sealed class Options
                 case "--profile": o.Profile = Next(); break;
                 case "--autoplay": o.Autoplay = true; break;
                 case "--user": o.User = Next(); break;
-                case "--password": o.Password = Next(); break;
+                case "--bot-key": o.BotKey = Next(); break;
                 case "--vs": o.Vs = Next(); o.Mode = "vs"; break;
                 case "--open": o.Mode = "open"; break;
                 case "--join": o.Mode = "join"; break;

@@ -15,25 +15,35 @@ var (
 	ErrUsernameTaken = errors.New("username taken")
 )
 
-// User is a registered account.
+// User is a registered account. There are no passwords: people sign in
+// with codes sent to their email address, or with passkeys.
 type User struct {
-	ID           int64
-	Username     string // as registered; lookups are case-insensitive
-	Nickname     string
-	PasswordHash []byte
-	Created      time.Time
-	Email        string // verified address for password reset links; "" if none
-	// MustChange is set when the admin resets the password: the user must
-	// choose a new one before doing anything else.
-	MustChange bool
+	ID       int64
+	Username string // as registered; lookups are case-insensitive
+	Nickname string
+	Created  time.Time
+	Email    string // verified address for sign-in codes; "" only for bots
+	// Bot accounts sign in with the server's bot key (for headless
+	// clients), never by email.
+	Bot bool
 }
 
 // Kinds of AccountToken.
 const (
-	TokenReset  = 1 // a password reset link
-	TokenVerify = 2 // a link confirming an email address
+	TokenVerify = 2 // a link to a new email address, confirming it
 	TokenDelete = 3 // a link confirming that an account should be deleted
+	TokenChange = 4 // a link to the current address, confirming a change of address
 )
+
+// Passkey is a WebAuthn credential that signs a user in.
+type Passkey struct {
+	ID       []byte // the credential ID
+	UserID   int64
+	Name     string // chosen by the user, e.g. "iPhone"
+	Data     []byte // the credential, as the auth package encodes it
+	Created  time.Time
+	LastUsed time.Time // zero if never
+}
 
 // AccountToken is a single-use secret sent in a link by email. Only a hash
 // of the token is stored.
@@ -48,30 +58,31 @@ type AccountToken struct {
 // Store persists users and sessions. Implementations must be safe for
 // concurrent use.
 type Store interface {
-	// CreateUser inserts u and sets u.ID. Returns ErrUsernameTaken if the
-	// username exists (case-insensitively).
+	// CreateUser inserts u, with its email address, and sets u.ID.
+	// Returns ErrUsernameTaken if the username exists (case-insensitively).
 	CreateUser(ctx context.Context, u *User) error
 	UserByUsername(ctx context.Context, username string) (*User, error)
 	UserByID(ctx context.Context, id int64) (*User, error)
-	// CreateSession starts a session for a user whose password hash is
-	// still hash, returning ErrNotFound if it is not: a password checked
-	// before a reset cannot start a session after it.
-	CreateSession(ctx context.Context, token string, userID int64, hash []byte, expires time.Time) error
-	// SessionUser returns the user ID for a valid, unexpired token.
-	SessionUser(ctx context.Context, token string) (int64, error)
+	// CreateSession starts a session, returning ErrNotFound if the user
+	// does not exist (it was deleted while signing in).
+	CreateSession(ctx context.Context, token string, userID int64, expires time.Time) error
+	// SessionUser returns the user ID and expiry of a valid, unexpired
+	// token.
+	SessionUser(ctx context.Context, token string) (int64, time.Time, error)
+	// ExtendSession moves a session's expiry; an unknown token is not an
+	// error.
+	ExtendSession(ctx context.Context, token string, expires time.Time) error
 	// DeleteSession ends a session; deleting an unknown token is not an
 	// error.
 	DeleteSession(ctx context.Context, token string) error
+	// DeleteSessions ends every session of a user but keep ("" for none).
+	DeleteSessions(ctx context.Context, userID int64, keep string) error
 	// DeleteExpiredSessions removes sessions and account tokens that
 	// expired before t and reports how many sessions.
 	DeleteExpiredSessions(ctx context.Context, t time.Time) (int64, error)
 
-	// SetPassword replaces a user's password hash and MustChange flag, and
-	// deletes their reset and verification tokens and every session but
-	// keep ("" for none), in one transaction.
-	SetPassword(ctx context.Context, userID int64, hash []byte, mustChange bool, keep string) error
-	// SetEmail sets a user's verified address ("" to remove it), and
-	// deletes their verification and reset tokens.
+	// SetEmail sets a user's verified address and deletes their account
+	// tokens. An account given an address is no longer a bot.
 	SetEmail(ctx context.Context, userID int64, email string) error
 	// UsersByEmail returns the users with this verified address
 	// (case-insensitively).
@@ -82,12 +93,24 @@ type Store interface {
 	// TakeAccountToken deletes an unexpired token of the given kind and
 	// returns it, or ErrNotFound.
 	TakeAccountToken(ctx context.Context, token string, kind int) (*AccountToken, error)
-	// PendingEmail is the address of a user's unexpired verification
-	// token, or "".
-	PendingEmail(ctx context.Context, userID int64) (string, error)
-	// DeleteUser removes a user with their sessions and account tokens.
-	// User IDs are never reused.
+	// PendingEmail is the address of a user's unexpired token of this
+	// kind (TokenVerify or TokenChange), or "".
+	PendingEmail(ctx context.Context, userID int64, kind int) (string, error)
+	// DeleteUser removes a user with their sessions, account tokens and
+	// passkeys. User IDs are never reused.
 	DeleteUser(ctx context.Context, userID int64) error
+
+	// AddPasskey stores a new passkey.
+	AddPasskey(ctx context.Context, p *Passkey) error
+	// Passkeys returns a user's passkeys, oldest first.
+	Passkeys(ctx context.Context, userID int64) ([]Passkey, error)
+	// UpdatePasskey saves a used passkey's Data and LastUsed.
+	UpdatePasskey(ctx context.Context, p *Passkey) error
+	// DeletePasskey removes one of a user's passkeys, or returns
+	// ErrNotFound.
+	DeletePasskey(ctx context.Context, userID int64, id []byte) error
+	// DeletePasskeys removes all of a user's passkeys.
+	DeletePasskeys(ctx context.Context, userID int64) error
 }
 
 // DeletedNickname replaces a deleted user's nickname in the games they
