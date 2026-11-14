@@ -50,7 +50,7 @@ func (s *SQLite) BackupTo(ctx context.Context, dir string, keep int) (string, er
 		os.Remove(tmp)
 		return "", fmt.Errorf("backup: %w", err)
 	}
-	// It holds password hashes and session tokens.
+	// It holds account data and hashed session tokens.
 	if err := os.Chmod(tmp, 0o600); err != nil {
 		return "", err
 	}

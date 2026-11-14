@@ -1,0 +1,15 @@
+# Runs cribbage-s3-backup.service hourly. The server writes a backup once
+# a day, at a time that depends on when it started, so checking hourly
+# copies each one off the machine within the hour. Install as
+# /etc/systemd/system/cribbage-s3-backup.timer, then:
+#   systemctl enable --now cribbage-s3-backup.timer
+[Unit]
+Description=Copy cribbage database backups to S3 hourly
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=1h
+RandomizedDelaySec=5min
+
+[Install]
+WantedBy=timers.target

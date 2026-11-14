@@ -1,0 +1,45 @@
+#!/bin/sh
+# Copies the server's database backups to S3, each file once. Install as
+# /opt/cribbage/cribbage-s3-backup; cribbage-s3-backup.timer runs it hourly
+# (see README.md, "AWS: a Spot instance").
+#
+# It only ever uploads (s3:PutObject), so the server's IAM role needs no
+# permission to list, read or delete what is already in the bucket. The S3
+# lifecycle rule, not this script, removes old copies.
+#
+#   CRIBBAGE_S3_URL      where to put them, e.g. s3://my-bucket/backups/
+#   CRIBBAGE_BACKUP_DIR  the server's backup-dir (default /var/lib/cribbage/backups)
+#   STATE_DIRECTORY      set by systemd: remembers what was uploaded
+set -eu
+
+: "${CRIBBAGE_S3_URL:?set CRIBBAGE_S3_URL, e.g. s3://my-bucket/backups/}"
+dir=${CRIBBAGE_BACKUP_DIR:-/var/lib/cribbage/backups}
+state=${STATE_DIRECTORY:-/var/lib/cribbage-s3-backup}
+done_list=$state/uploaded
+url=${CRIBBAGE_S3_URL%/}/
+
+touch "$done_list"
+kept=$(mktemp "$state/uploaded.XXXXXX")
+trap 'rm -f "$kept"' EXIT
+
+uploaded=0
+# The server writes cribbage-<UTC time>.db.tmp and renames it when done, so
+# only finished backups match. The names sort by time.
+for f in "$dir"/cribbage-*.db; do
+	[ -e "$f" ] || continue
+	name=${f##*/}
+	if ! grep -qxF "$name" "$done_list"; then
+		aws s3 cp --only-show-errors --no-progress "$f" "$url$name"
+		echo "$name" >>"$done_list" # in case a later upload fails
+		echo "uploaded $name to $url"
+		uploaded=$((uploaded + 1))
+	fi
+	# Remember only names still on disk, so the list stays short.
+	echo "$name" >>"$kept"
+done
+mv "$kept" "$done_list"
+trap - EXIT
+
+if [ "$uploaded" -eq 0 ]; then
+	echo "nothing new in $dir"
+fi

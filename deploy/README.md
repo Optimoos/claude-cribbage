@@ -16,9 +16,12 @@ Why this shape:
   route HTTP will not work.
 - **Persistent disk** for the database in `/var/lib/cribbage`.
 
-A 2 vCPU / 2–4 GB machine with a public IPv4 address (Hetzner Cloud,
-DigitalOcean, Linode, Vultr) is plenty; the expert bot's search is the
-main CPU cost.
+Any small machine with a public IPv4 address will do (Hetzner Cloud,
+DigitalOcean, Linode, Vultr, AWS). The server uses about 50 MB idle, so
+1 GB of memory is enough for family and friends; 2 vCPU / 2–4 GB is room
+for many games at once. The expert bot's search is the main CPU cost, in
+short bursts that burstable instances handle well. For AWS, see "AWS: a
+Spot instance" below.
 
 ## Files
 
@@ -27,6 +30,8 @@ main CPU cost.
 | `cribserver.conf` | `/etc/cribbage/cribserver.conf` (the server's settings) |
 | `cribbage.service` | `/etc/systemd/system/cribbage.service` |
 | `Caddyfile` | `/etc/caddy/Caddyfile` (edit the domain) |
+| `cribbage-s3-backup` | `/opt/cribbage/cribbage-s3-backup` (optional: copies backups to S3) |
+| `cribbage-s3-backup.service`, `.timer` | `/etc/systemd/system/` (with the above) |
 
 ## First install
 
@@ -219,7 +224,8 @@ it, for example with a nightly cron job on another machine:
 rsync -a root@SERVER:/var/lib/cribbage/backups/ ~/cribbage-backups/
 ```
 
-or with your provider's volume snapshots. Keep them private, although
+with your provider's volume snapshots, or on AWS with the S3 job in "AWS:
+a Spot instance" below. Keep them private, although
 there is little in them to use: there are no passwords, addresses are
 encrypted, and session tokens are stored hashed, so a backup cannot be
 used to sign in as anyone.
@@ -237,6 +243,179 @@ cp backups/cribbage-YYYYMMDD-HHMMSS.db cribbage.db
 chown cribbage:cribbage cribbage.db
 systemctl start cribbage
 ```
+
+## AWS: a Spot instance
+
+A `t4g.micro` (2 vCPU, 1 GB, ARM) costs a fraction of its on-demand price
+as a Spot instance. AWS can take Spot capacity back with two minutes'
+warning. Set up as below, it then shuts down cleanly and starts again when
+capacity returns, so the cost is a gap in service, usually minutes and
+rarely hours, not lost data.
+
+The server is built for that. It saves every move before anyone sees it,
+and on shutdown it finishes what it is doing and closes the database;
+`Restart=always` brings it back after a crash. A `kill -9` in the middle of
+20 live games lost none: all came back, and clients reconnected by
+themselves. An interruption loses only what is held in memory: sign-in
+codes and device approvals not yet used (players ask for another) and
+connections (clients reconnect, or players reload the page). Accounts,
+sessions, passkeys, invites and games are on disk.
+
+What decides whether data survives is the disk, so all of the settings
+below matter.
+
+### 1. Build for ARM
+
+Graviton (`t4g`) instances are ARM, so build with `GOARCH=arm64` instead
+of `amd64` in "First install".
+
+### 2. Bucket and role (for the S3 backup job)
+
+The server's backups are on its own disk; copy them to S3 so that losing
+the disk loses nothing. Run this once from your machine with the AWS CLI
+(replace the bucket name, which must be unique across all of S3, and the
+region):
+
+```sh
+B=cribbage-backups-SOMETHING-UNIQUE R=us-east-1
+aws s3api create-bucket --bucket $B --region $R \
+  --create-bucket-configuration LocationConstraint=$R   # omit this line for us-east-1
+aws s3api put-bucket-versioning --bucket $B --versioning-configuration Status=Enabled
+aws s3api put-bucket-lifecycle-configuration --bucket $B --lifecycle-configuration '{"Rules":[{
+  "ID":"expire","Status":"Enabled","Filter":{"Prefix":"backups/"},
+  "Expiration":{"Days":7},"NoncurrentVersionExpiration":{"NoncurrentDays":1},
+  "AbortIncompleteMultipartUpload":{"DaysAfterInitiation":1}}]}'
+
+# A role the instance runs as, which may only add files under backups/.
+aws iam create-role --role-name cribbage-server --assume-role-policy-document \
+  '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"ec2.amazonaws.com"},"Action":"sts:AssumeRole"}]}'
+aws iam put-role-policy --role-name cribbage-server --policy-name s3-backup --policy-document \
+  "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Action\":[\"s3:PutObject\",\"s3:AbortMultipartUpload\"],\"Resource\":\"arn:aws:s3:::$B/backups/*\"}]}"
+aws iam create-instance-profile --instance-profile-name cribbage-server
+aws iam add-role-to-instance-profile --instance-profile-name cribbage-server --role-name cribbage-server
+```
+
+The server can add backups but cannot list, read or delete them. If it is
+broken into, the copies in S3 stay out of reach, and versioning keeps the
+original if someone overwrites one. New buckets block public access and
+encrypt at rest by default.
+
+S3 keeps each backup for 7 days, matching what the privacy page promises
+about deleted accounts. If you keep them longer, change the sentence about
+backups in `server/web/static/privacy.html` too. A week of backups of a
+small database costs well under a cent a month.
+
+### 3. Launch the instance
+
+In the EC2 console, under **Advanced details**:
+
+- **Purchasing option:** Spot instances, then Customize. Set **Request
+  type** to *Persistent* and **Interruption behavior** to *Stop*.
+  *Terminate* (the default) deletes the instance and its disk, database
+  included. *Stop* keeps the disk, and with a persistent request AWS starts
+  the instance again when capacity returns.
+- **IAM instance profile:** `cribbage-server`.
+- **Metadata version:** V2 only.
+
+Under **Storage**, set the root volume to 8 GB gp3 and **Delete on
+termination** to *No*. The disk then survives even if the instance is
+terminated by mistake.
+
+Use a Debian 13 or Ubuntu 24.04 arm64 image. The security group should
+allow TCP 22 (from your IP only), TCP 80 and 443, and UDP 7778.
+
+The same with the CLI (find the image ID and root device name for your
+region in the console; Debian's is `/dev/xvda`, Ubuntu's `/dev/sda1`):
+
+```sh
+aws ec2 run-instances --instance-type t4g.micro --image-id ami-... \
+  --key-name YOUR-KEY --security-group-ids sg-... \
+  --iam-instance-profile Name=cribbage-server \
+  --metadata-options HttpTokens=required \
+  --instance-market-options 'MarketType=spot,SpotOptions={SpotInstanceType=persistent,InstanceInterruptionBehavior=stop}' \
+  --block-device-mappings 'DeviceName=/dev/xvda,Ebs={VolumeSize=8,VolumeType=gp3,DeleteOnTermination=false}'
+```
+
+### 4. A fixed address
+
+The public IP changes every time an instance stops and starts, which would
+break DNS and WebRTC. Allocate an **Elastic IP** and associate it with the
+instance; it stays through stops. Point your domain at it and set
+`public-ip = <the Elastic IP>` in `cribserver.conf`. (Every public IPv4
+address on AWS is billed hourly, about $3.60 a month, and an Elastic IP is
+billed while the instance is stopped too.)
+
+### 5. Install
+
+Follow "First install" and "Signing in and email". AWS images do not
+allow root to log in: SSH as `admin` (Debian) or `ubuntu` (Ubuntu), copy
+files to its home instead of `root@SERVER:/tmp/`, and run the commands
+with `sudo`. Amazon SES works as the mail account. Then:
+
+**Fit the server to 1 GB.** `cribbage.service` is sized for 2 GB. Override
+it with `systemctl edit cribbage` and these lines:
+
+```ini
+[Service]
+Environment=GOMEMLIMIT=550MiB
+MemoryHigh=600M
+MemoryMax=700M
+```
+
+Then add swap as a cushion; cloud images come without it:
+
+```sh
+fallocate -l 1G /swapfile && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile
+echo '/swapfile none swap sw 0 0' >> /etc/fstab
+```
+
+**Turn on the S3 job:**
+
+```sh
+apt install awscli    # Debian 13; on Ubuntu, AWS's installer:
+                      # https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html
+install -m 0755 cribbage-s3-backup /opt/cribbage/
+cp cribbage-s3-backup.service cribbage-s3-backup.timer /etc/systemd/system/
+# Edit CRIBBAGE_S3_URL and AWS_REGION in the .service file, then:
+systemctl daemon-reload
+systemctl enable --now cribbage-s3-backup.timer
+systemctl start cribbage-s3-backup      # once now, to check it
+journalctl -u cribbage-s3-backup        # "uploaded cribbage-....db to s3://..."
+```
+
+The job checks hourly and uploads each new backup once. It remembers what
+it uploaded in `/var/lib/cribbage-s3-backup`. Credentials come from the
+instance's role, so there are no keys on the machine.
+
+**Keep the email key out of S3.** Store `/etc/cribbage/email-key` in a
+password manager. A backup without its key cannot be read, so the two
+should not be lost together, or stolen together.
+
+### Restoring onto a new instance
+
+Launch and install as above, with the same email key. Then copy a backup
+down from your machine (the instance's role cannot read the bucket):
+
+```sh
+aws s3 ls s3://$B/backups/
+aws s3 cp s3://$B/backups/cribbage-YYYYMMDD-HHMMSS.db .
+scp cribbage-YYYYMMDD-HHMMSS.db admin@SERVER:   # then sudo mv it into /var/lib/cribbage/backups/
+```
+
+and follow "To restore" under Backups. Move the Elastic IP to the new
+instance, and DNS needs no change.
+
+### Housekeeping
+
+- **To shut it down for good**, cancel the Spot request first (EC2 →
+  Spot Requests → Cancel), then terminate the instance. Otherwise the
+  persistent request launches a fresh, empty instance to replace it.
+  Then delete the kept volume, and release the Elastic IP, which costs
+  money while it is not in use.
+- **You can stop and start it yourself** like any instance, for example to
+  change its type.
+- **Set a budget alert** (Billing → Budgets, for example $10 a month) to
+  catch anything left running.
 
 ## Limits
 

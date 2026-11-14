@@ -1,0 +1,42 @@
+# Copies new database backups to S3 (see README.md, "AWS: a Spot
+# instance"). Install as /etc/systemd/system/cribbage-s3-backup.service,
+# with cribbage-s3-backup.timer, which starts it.
+[Unit]
+Description=Copy cribbage database backups to S3
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# The backups belong to the server's user, mode 0600.
+User=cribbage
+Group=cribbage
+# Edit these two: your bucket and its region.
+Environment=CRIBBAGE_S3_URL=s3://YOUR-BUCKET/backups/
+Environment=AWS_REGION=us-east-1
+Environment=CRIBBAGE_BACKUP_DIR=/var/lib/cribbage/backups
+ExecStart=/opt/cribbage/cribbage-s3-backup
+# /var/lib/cribbage-s3-backup remembers which backups were uploaded. The
+# AWS CLI takes its credentials from the instance's IAM role; give it a
+# home it may write to for its caches.
+StateDirectory=cribbage-s3-backup
+StateDirectoryMode=0700
+Environment=HOME=/var/lib/cribbage-s3-backup
+
+# Hardening: it reads the backups and talks to S3, nothing else.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ReadOnlyPaths=/var/lib/cribbage
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+LockPersonality=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+CapabilityBoundingSet=
+UMask=0077
