@@ -142,6 +142,12 @@ step:
   `/api/config`.
 - **Development:** `-web-dir web/static` serves the client from disk, so edits
   show up on reload without rebuilding.
+- **Hosted apart from the server:** `web/pages-build.sh` copies the client
+  to `web/dist` for Cloudflare Pages, pointed at the server named in
+  `CRIBBAGE_SERVER` (see deploy/README.md). The server's `/api` answers any
+  origin, and the page says when it cannot reach the server.
+- **HTTPS:** `-tls-domain api.example.com -http :443` serves HTTPS with a
+  Let's Encrypt certificate (kept in `-tls-cache`), with no proxy in front.
 
 ## Godot desktop client (`client-godot/`)
 
@@ -205,7 +211,8 @@ Set `GODOT` to the editor binary if it is not in the repo root.
 ## Deployment
 
 See [deploy/README.md](deploy/README.md): one VPS running `cribserver` under
-systemd behind Caddy for HTTPS, with UDP 7778 open for WebRTC, daily
+systemd, serving HTTPS itself (`-tls-domain`), with UDP 7778 open for
+WebRTC and the web page on Cloudflare Pages (`web/pages-build.sh`), daily
 database backups (`-backup-dir`, `-backup-every`, `-backup-keep`), rate
 limits and `-rtc-public-only`. The server stops cleanly on SIGINT or SIGTERM.
 

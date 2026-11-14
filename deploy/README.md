@@ -1,11 +1,14 @@
 # Deploying the cribbage server
 
-One small Linux VPS runs everything: the `cribserver` binary (game server,
-web client, WebRTC) behind [Caddy](https://caddyserver.com) for HTTPS.
+One small Linux VPS runs the `cribserver` binary (game server, WebRTC),
+which serves HTTPS itself with a Let's Encrypt certificate. The web page is
+static files on [Cloudflare Pages](https://pages.cloudflare.com), so it
+loads even while the server is down, and says so.
 
 ```
-browser / Godot ──HTTPS, WSS (443)──► Caddy ──► 127.0.0.1:8080 cribserver
-                ──WebRTC (UDP 7778)───────────►                cribserver
+browser ──HTTPS──────────────────────► Cloudflare Pages  cribbage.example.com
+browser / Godot ──HTTPS, WSS (443)───► cribserver        api.cribbage.example.com
+                ──WebRTC (UDP 7778)──► cribserver
 ```
 
 Why this shape:
@@ -29,14 +32,13 @@ Spot instance" below.
 |---|---|
 | `cribserver.conf` | `/etc/cribbage/cribserver.conf` (the server's settings) |
 | `cribbage.service` | `/etc/systemd/system/cribbage.service` |
-| `Caddyfile` | `/etc/caddy/Caddyfile` (edit the domain) |
 | `cribbage-s3-backup` | `/opt/cribbage/cribbage-s3-backup` (optional: copies backups to S3) |
 | `cribbage-s3-backup.service`, `.timer` | `/etc/systemd/system/` (with the above) |
 
 ## First install
 
-On your machine, build a static Linux binary (pure Go, no cgo; the web
-client is embedded):
+On your machine, build a static Linux binary (pure Go, no cgo; it embeds
+a copy of the web client too, for testing on a LAN):
 
 ```sh
 cd server
@@ -64,33 +66,72 @@ systemctl daemon-reload
 systemctl enable --now cribbage
 journalctl -u cribbage -f          # "email enabled", "web client" and "database backed up" lines
 
-# Caddy (https://caddyserver.com/docs/install), then:
-cp Caddyfile /etc/caddy/Caddyfile  # with your domain
-systemctl reload caddy
-
-# Firewall: SSH, HTTP (certificate challenges and redirect), HTTPS, WebRTC.
+# Firewall: SSH, HTTPS, WebRTC.
 ufw allow OpenSSH
-ufw allow 80/tcp
 ufw allow 443/tcp
 ufw allow 7778/udp
 ufw enable
 ```
 
-Point the domain's DNS at the server before reloading Caddy, so it can get
-a certificate. Then browse to `https://cribbage.example.com`.
+Point `api.cribbage.example.com` (`tls-domain` in `cribserver.conf`) at
+the server with an A record before starting it. On Cloudflare DNS, make it
+**DNS only** (grey cloud), not proxied: the server gets its own
+certificate on port 443, which a proxy would intercept. The first request
+to `https://api.cribbage.example.com/api/config` fetches the certificate,
+taking a few seconds; it is kept in `/var/lib/cribbage/certs` and renewed
+by itself. Then set up the web page: see "The web page on Cloudflare
+Pages" below.
 
 On AWS, GCP or Azure the public IP is NATed rather than on the interface:
 set `public-ip = <elastic/static IP>` in `cribserver.conf`, and open the same
 ports in the cloud's security group.
 
-Leave ports 8080 and 7777 closed: they listen on localhost only (the
-default). Port 7777 is for headless bots (`cmd/botclient`), which run on
+Leave port 7777 closed: it listens on localhost only (the default). Port 7777 is for headless bots (`cmd/botclient`), which run on
 the server itself; its protocol is not encrypted.
 
 `rtc-public-only` makes the server ignore WebRTC addresses a client
 offers on private, loopback or link-local networks, so nobody can make it
 send packets into its own network. Leave it off to play on one machine or
 a LAN.
+
+## The web page on Cloudflare Pages
+
+The web client is static files in `server/web/static`. Pages builds it
+straight from this repository with `server/web/pages-build.sh`, which
+points the page at the server (`CRIBBAGE_SERVER`) and writes its
+Content-Security-Policy and other headers to `_headers`.
+
+In the Cloudflare dashboard, Workers & Pages → Create → Pages → connect
+to Git, choose the repository, and set:
+
+| Setting | Value |
+|---|---|
+| Production branch | `pages` (see "Updating") |
+| Build command | `sh pages-build.sh` |
+| Build output directory | `dist` |
+| Root directory | `server/web` |
+| Environment variable | `CRIBBAGE_SERVER` = `https://api.cribbage.example.com` |
+
+Create the `pages` branch first (`git push origin main:pages`). After
+the first deploy, under the project's Settings → Builds, set preview
+branches to **None**, so pushes to other branches do not publish clients
+that may not match the server. Then add `cribbage.example.com` under
+Custom domains. That is the address players use, and `public-url` in
+`cribserver.conf`: emailed links open there, and passkeys belong to it.
+
+The server still serves its embedded copy of the page at
+`https://api.cribbage.example.com`, but players should not use it:
+passkeys do not work there, and it goes down with the server.
+
+To check a build on your machine:
+
+```sh
+cd server/web && CRIBBAGE_SERVER=https://api.cribbage.example.com sh pages-build.sh
+```
+
+When the page cannot reach the server for about six seconds, it shows
+"Can't reach the server" over whatever was on screen, and keeps trying;
+it carries on when the server is back.
 
 ## Signing in and email
 
@@ -187,16 +228,18 @@ default), with its address encrypted.
 
 The web client links to a privacy page (`/privacy.html`, also linked from
 the Godot client) saying what the server keeps. It is written for this
-server as configured here; if you change what is kept (access logs in
-Caddy, a third-party STUN or TURN server, longer backups), update
+server as configured here, the page on Cloudflare Pages included; if you
+change what is kept (access logs, a third-party STUN or TURN server,
+longer backups), update
 `server/web/static/privacy.html`. Both clients have a "Report a bug" link,
 which goes to `report-url` in `cribserver.conf`.
 
 ## Updating
 
 Clients carry a protocol version, and the server refuses clients built for
-another one with a message to update. The web client is served by the
-server, so it reloads itself; Godot builds must be replaced. Bump
+another one with a message to update. The web client reloads itself once
+when that happens, so update the server first and the page right after;
+Godot builds must be replaced. Bump
 `PROTOCOL_VERSION_CURRENT` in `proto/cribbage/v1/cribbage.proto` (and
 `PROTOCOL_VERSION` in `app.js`) when a change would break older clients.
 
@@ -206,7 +249,11 @@ clients reconnect and resume by themselves within a few seconds.
 ```sh
 scp cribserver root@SERVER:/tmp/
 ssh root@SERVER 'install -m 0755 /tmp/cribserver /opt/cribbage/ && systemctl restart cribbage'
+git push origin main:pages      # then the web page (Pages builds it in a minute or so)
 ```
+
+Pages deploys only what is pushed to `pages`, so commits on `main` reach
+players when you deploy, not before.
 
 ## Backups
 
@@ -322,7 +369,7 @@ termination** to *No*. The disk then survives even if the instance is
 terminated by mistake.
 
 Use a Debian 13 or Ubuntu 24.04 arm64 image. The security group should
-allow TCP 22 (from your IP only), TCP 80 and 443, and UDP 7778.
+allow TCP 22 (from your IP only), TCP 443, and UDP 7778.
 
 The same with the CLI (find the image ID and root device name for your
 region in the console; Debian's is `/dev/xvda`, Ubuntu's `/dev/sda1`):
@@ -340,7 +387,7 @@ aws ec2 run-instances --instance-type t4g.micro --image-id ami-... \
 
 The public IP changes every time an instance stops and starts, which would
 break DNS and WebRTC. Allocate an **Elastic IP** and associate it with the
-instance; it stays through stops. Point your domain at it and set
+instance; it stays through stops. Point `api.cribbage.example.com` at it and set
 `public-ip = <the Elastic IP>` in `cribserver.conf`. (Every public IPv4
 address on AWS is billed hourly, about $3.60 a month, and an Elastic IP is
 billed while the instance is stopped too.)
@@ -427,8 +474,8 @@ passkeys), then 10 a minute; 10 emailed codes per address, then 1 a
 minute; and 5 registrations, then 5 an hour. Wrong codes and emails are
 also limited per account and per email address (see "Signing in and
 email"). IPv6 addresses count by their /64. The address is the one
-WebRTC packets come from, so it is the player's real address even though
-signaling passes through Caddy. Connections from localhost (bots on the
+WebRTC packets come from, so it is the player's real address even if
+signaling passes through a proxy. Connections from localhost (bots on the
 server) are not limited.
 
 **Connections.** At most 20 per address and 5,000 in all; one that has
@@ -460,22 +507,23 @@ leaves memory and is rebuilt from the database the moment anyone opens it
 or moves. Slow games, such as a move every few days, cost only their
 database rows, so memory follows how many people are playing right now.
 
-**Web page.** The server sends a Content-Security-Policy allowing only the
-page's own script, stylesheet and server, so injected markup could not run
-script.
+**Web page.** The page has a Content-Security-Policy allowing only its
+own script and stylesheet and its server, so injected markup could not
+run script. Cloudflare Pages sends it from `_headers`; the server sends
+the same for its embedded copy.
 
 ## TURN (optional)
 
 A server with a public IP is reachable from nearly every home network, so
 start without TURN. If players on networks that block UDP (some offices
 and schools) cannot connect, run [coturn](https://github.com/coturn/coturn)
-on this machine on port 3478 (and 5349 for TLS; 443 belongs to Caddy), open
-those ports, and pass `-ice-servers turn:cribbage.example.com:3478` (with
+on this machine on port 3478 (and 5349 for TLS; 443 belongs to cribserver), open
+those ports, and pass `-ice-servers turn:api.cribbage.example.com:3478` (with
 credentials as coturn is configured); browsers get the list from
 `/api/config`.
 
 ## Desktop clients
 
 `client-godot/export.sh` builds Linux and Windows clients. Players enter
-`wss://cribbage.example.com/rtc` as the server on the login screen (it is
+`wss://api.cribbage.example.com/rtc` as the server on the login screen (it is
 remembered); the default points at a local server.

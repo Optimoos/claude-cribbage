@@ -23,6 +23,12 @@ const narrow = () => matchMedia('(max-width: 860px)').matches;
 // cribbage.proto). The server refuses others with UPGRADE_REQUIRED.
 const PROTOCOL_VERSION = 2;
 
+// The game server: the one this page came from, unless the page is hosted
+// apart from it (on Cloudflare Pages: see deploy/README.md), when a meta
+// tag names it.
+const SERVER = new URL(document.querySelector('meta[name=cribbage-server]')?.content || '.', location.href);
+const serverURL = path => new URL(path, SERVER).href;
+
 class Connection {
   constructor(onMessage, onOpen, onClose) {
     this.onMessage = onMessage;
@@ -35,13 +41,15 @@ class Connection {
 
   async connect() {
     let cfg = { iceServers: [] };
-    try { cfg = await (await fetch('api/config')).json(); } catch (e) { /* use defaults */ }
+    // A stopped server does not refuse connections, it ignores them, so
+    // do not wait for the browser to give up.
+    try { cfg = await (await fetch(serverURL('api/config'), { signal: AbortSignal.timeout(5000) })).json(); } catch (e) { /* use defaults */ }
     setReportLinks(cfg.reportUrl);
     state.passkeysOffered = cfg.passkeys === true;
     $('passkey-signin').hidden = !passkeysUsable();
     const pc = new RTCPeerConnection({ iceServers: cfg.iceServers });
     const dc = pc.createDataChannel('cribbage', { ordered: true });
-    const ws = new WebSocket(location.href.replace(/^http/, 'ws').replace(/[^/]*$/, 'rtc'));
+    const ws = new WebSocket(serverURL('rtc').replace(/^http/, 'ws'));
     let described = false;
     const localPending = [];
     let remoteSet = false;
@@ -574,6 +582,10 @@ addEventListener('hashchange', () => {
 
 function onOpen() {
   setStatus('online');
+  clearTimeout(offlineTimer);
+  offlineTimer = null;
+  $('offline').hidden = true;
+  loadBots();
   state.me = null; // each connection authenticates afresh
   if (emailLink && (emailLink.kind === 'verify' || emailLink.kind === 'change')) {
     const { kind, token } = emailLink;
@@ -598,7 +610,23 @@ function showLogin() {
 }
 
 function onClose() {
-  setStatus('reconnecting…');
+  setStatus($('offline').hidden ? 'reconnecting…' : 'offline');
+  watchOffline();
+}
+
+// Say so if the server stays out of reach. After a restart it is back in
+// seconds, but a stopped machine can take minutes or hours. The page
+// keeps trying meanwhile, and the overlay leaves whatever was showing
+// underneath, so play picks up where it was.
+// Every failed retry calls this; the time counts from the first.
+let offlineTimer = null;
+function watchOffline() {
+  if (offlineTimer) return;
+  offlineTimer = setTimeout(() => {
+    if (conn.dc || conn.stopped) return;
+    setStatus('offline');
+    $('offline').hidden = false;
+  }, 6000);
 }
 
 function setStatus(text) {
@@ -1916,9 +1944,11 @@ for (const b of document.querySelectorAll('[data-create]')) {
   b.onclick = () => conn.send({ createGame: { bot: b.dataset.create } });
 }
 // Show buttons only for bots this server offers (nn needs a model).
-fetch('api/bots').then(r => r.json()).then(names => {
-  for (const b of document.querySelectorAll('[data-create]')) b.hidden = !names.includes(b.dataset.create);
-}).catch(() => { /* keep the defaults */ });
+function loadBots() {
+  fetch(serverURL('api/bots')).then(r => r.json()).then(names => {
+    for (const b of document.querySelectorAll('[data-create]')) b.hidden = !names.includes(b.dataset.create);
+  }).catch(() => { /* keep the defaults */ });
+}
 $('create-open').onclick = () => conn.send({ createGame: { bot: '' } });
 $('invite-form').onsubmit = ev => {
   ev.preventDefault();
@@ -1996,3 +2026,4 @@ applyPrefs();
 buildBoard();
 sideBoard.addEventListener('change', buildBoard);
 conn.connect();
+watchOffline();

@@ -6,3 +6,4 @@ models*/
 Godot_*/
 server/*.db
 server/*.db-*
+server/web/dist/

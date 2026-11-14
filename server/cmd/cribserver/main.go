@@ -4,6 +4,7 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -30,6 +31,9 @@ import (
 	"cribbage/internal/store"
 	"cribbage/internal/transport/rtc"
 	"cribbage/web"
+
+	"golang.org/x/crypto/acme"
+	"golang.org/x/crypto/acme/autocert"
 )
 
 func main() {
@@ -39,6 +43,8 @@ func main() {
 	}
 	tcpAddr := flag.String("tcp", "127.0.0.1:7777", "TCP listen address for headless clients (unencrypted and not rate limited from localhost; keep it private)")
 	httpAddr := flag.String("http", "127.0.0.1:8080", "HTTP address for the web client and WebRTC signaling (empty disables; :8080 for other machines on the network)")
+	tlsDomain := flag.String("tls-domain", "", "serve HTTPS on the -http address (which must then be :443) with a Let's Encrypt certificate for this host name, e.g. api.cribbage.example.com; empty serves plain HTTP")
+	tlsCache := flag.String("tls-cache", "certs", "directory that keeps the -tls-domain certificate between restarts")
 	webDir := flag.String("web-dir", "", "serve the web client from this directory instead of the embedded copy")
 	rtcPort := flag.Int("rtc-port", 7778, "UDP port for all WebRTC traffic (0 picks a port per connection)")
 	publicIPs := flag.String("public-ip", "", "comma-separated public IPs to advertise for WebRTC (servers behind 1:1 NAT)")
@@ -132,7 +138,9 @@ func main() {
 	}
 
 	authSvc := &auth.Service{Store: users, BaseURL: *publicURL}
-	if authSvc.BaseURL == "" {
+	if authSvc.BaseURL == "" && *tlsDomain != "" {
+		authSvc.BaseURL = "https://" + *tlsDomain + "/"
+	} else if authSvc.BaseURL == "" {
 		authSvc.BaseURL = localURL(*httpAddr)
 	}
 	if *smtpAddr != "" {
@@ -240,10 +248,29 @@ func main() {
 		if err != nil {
 			fail("webrtc", err)
 		}
+		var tlsConfig *tls.Config
+		if *tlsDomain != "" {
+			if *tlsCache == "" {
+				fail("tls", errors.New("-tls-domain needs -tls-cache"))
+			}
+			m := &autocert.Manager{
+				Prompt:     autocert.AcceptTOS,
+				HostPolicy: autocert.HostWhitelist(*tlsDomain),
+				Cache:      autocert.DirCache(*tlsCache),
+			}
+			// The certificate comes by TLS-ALPN-01, on this listener, so
+			// no port 80. HTTP/1.1 only: the signaling WebSocket needs a
+			// connection it can take over, which HTTP/2 does not give.
+			tlsConfig = m.TLSConfig()
+			tlsConfig.NextProtos = []string{"http/1.1", acme.ALPNProto}
+		}
 		mux := http.NewServeMux()
 		mux.Handle("/rtc", rtcAPI.Handler(func(c *rtc.Conn) { srv.ServeConn(c) }))
+		// The web client may be hosted elsewhere (deploy/README.md), so
+		// any page may read these: they are public and need no sign-in.
 		mux.HandleFunc("/api/config", func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("Access-Control-Allow-Origin", "*")
 			cfg := rtcAPI.ClientConfig()
 			cfg["reportUrl"] = *reportURL
 			cfg["passkeys"] = authSvc.WebAuthn != nil
@@ -251,13 +278,14 @@ func main() {
 		})
 		mux.HandleFunc("/api/bots", func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("Access-Control-Allow-Origin", "*")
 			json.NewEncoder(w).Encode(bots.Names())
 		})
 		mux.Handle("/", web.Handler(*webDir))
 		// Requests are small, and /rtc's WebSocket is hijacked, which clears
 		// these deadlines.
 		httpSrv = &http.Server{
-			Addr: *httpAddr, Handler: mux,
+			Addr: *httpAddr, Handler: securityHeaders(mux, tlsConfig != nil),
 			ReadHeaderTimeout: 10 * time.Second,
 			ReadTimeout:       30 * time.Second,
 			WriteTimeout:      60 * time.Second,
@@ -268,7 +296,12 @@ func main() {
 		if err != nil {
 			fail("listen http", err)
 		}
-		log.Info("web client", "url", "http://"+displayAddr(hl.Addr()), "webrtc_udp", *rtcPort)
+		scheme, host := "http://", displayAddr(hl.Addr())
+		if tlsConfig != nil {
+			scheme, host = "https://", *tlsDomain
+			hl = tls.NewListener(hl, tlsConfig)
+		}
+		log.Info("web client", "url", scheme+host, "webrtc_udp", *rtcPort)
 		go func() {
 			if err := httpSrv.Serve(hl); err != nil && err != http.ErrServerClosed {
 				fail("serve http", err)
@@ -385,6 +418,19 @@ func logStats(log *slog.Logger, srv *server.Server, sq *store.SQLite, every time
 		log.Info("stats", attrs...)
 		prev = s
 	}
+}
+
+// securityHeaders adds the headers a proxy in front would otherwise add.
+// The web client's Content-Security-Policy is set in package web.
+func securityHeaders(h http.Handler, https bool) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if https {
+			w.Header().Set("Strict-Transport-Security", "max-age=31536000")
+		}
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("Referrer-Policy", "no-referrer")
+		h.ServeHTTP(w, r)
+	})
 }
 
 func splitList(s string) []string {
