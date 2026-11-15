@@ -73,7 +73,6 @@ public sealed class Options
 // runs.
 public sealed class Settings
 {
-    const string DefaultServer = "ws://127.0.0.1:8080/rtc";
     readonly ConfigFile file = new();
     readonly string path;
 
@@ -85,7 +84,7 @@ public sealed class Settings
 
     public string Server
     {
-        get => (string)file.GetValue("connection", "server", DefaultServer);
+        get => (string)file.GetValue("connection", "server", BuildInfo.Server);
         set { file.SetValue("connection", "server", value); Save(); }
     }
 

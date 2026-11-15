@@ -34,6 +34,8 @@ Spot instance" below.
 | `cribbage.service` | `/etc/systemd/system/cribbage.service` |
 | `cribbage-s3-backup` | `/opt/cribbage/cribbage-s3-backup` (optional: copies backups to S3) |
 | `cribbage-s3-backup.service`, `.timer` | `/etc/systemd/system/` (with the above) |
+| `cribbage-dns` | `/opt/cribbage/cribbage-dns` (optional: keeps the DNS record on the address, with Cloudflare) |
+| `cribbage-dns.service`, `.timer` | `/etc/systemd/system/` (with the above) |
 
 ## First install
 
@@ -435,6 +437,36 @@ instance; it stays through stops. Point `api.cribbage.example.com` at it and set
 address on AWS is billed hourly, about $3.60 a month, and an Elastic IP is
 billed while the instance is stopped too.)
 
+**Checking it (Cloudflare DNS).** `cribbage-dns` checks, at boot (before
+the game server starts) and hourly, that the A record for
+`api.cribbage.example.com` points at the instance's public address (from
+the EC2 metadata service) and is DNS only, and that `public-ip` in
+`cribserver.conf` matches; it fixes whichever is wrong, restarting the
+game server if `public-ip` changed. With an Elastic IP it should only ever
+confirm; it catches a record edited by mistake, or an address that
+changed because the Elastic IP was released or moved.
+
+It needs a Cloudflare API token that can edit DNS in that zone and
+nothing else: in the Cloudflare dashboard, My Profile → API Tokens →
+Create Token → the "Edit zone DNS" template, with Zone Resources set to
+Include → Specific zone → your domain. Copy the token, and the zone's ID
+(the domain's Overview page, "Zone ID", lower right). On the server:
+
+```sh
+install -m 0600 /dev/stdin /etc/cribbage/cloudflare-token <<< 'the-token'
+install -m 0755 cribbage-dns /opt/cribbage/
+cp cribbage-dns.service cribbage-dns.timer /etc/systemd/system/
+# Edit CLOUDFLARE_ZONE_ID and CRIBBAGE_DNS_NAME in the .service file, then:
+systemctl daemon-reload
+systemctl enable cribbage-dns.service cribbage-dns.timer
+systemctl start cribbage-dns.timer
+systemctl start cribbage-dns      # once now, to check it
+journalctl -u cribbage-dns        # "api... already points at 203.0.113.10"
+```
+
+If it cannot reach Cloudflare at boot, the game server starts anyway, and
+the next hourly run tries again.
+
 ### 5. Install
 
 Follow "First install" and "Signing in and email". AWS images do not
@@ -568,6 +600,32 @@ credentials as coturn is configured); browsers get the list from
 
 ## Desktop clients
 
-`client-godot/export.sh` builds Linux and Windows clients. Players enter
-`wss://api.cribbage.example.com/rtc` as the server on the login screen (it is
-remembered); the default points at a local server.
+GitHub Actions builds the Linux and Windows clients and publishes them
+on the repository's Releases page (`.github/workflows/desktop-clients.yml`).
+Once, set the repository variable `CRIBBAGE_SERVER` (Settings → Secrets
+and variables → Actions → Variables) to the server's address as the web
+page uses it, `https://api.cribbage.example.com`; release builds then
+connect to `wss://api.cribbage.example.com/rtc` without players typing it.
+
+To release, tag the commit and push the tag:
+
+```sh
+git tag client-v1.0.0 && git push origin client-v1.0.0
+```
+
+The workflow downloads Godot and its export templates (checked against
+their published hashes, and cached between runs), builds both clients and
+creates the release `client-v1.0.0` with
+`Cribbage-1.0.0-linux-x86_64.zip` and `Cribbage-1.0.0-windows-x86_64.zip`.
+To try a build without releasing, run the workflow by hand (Actions →
+Desktop clients → Run workflow); its zips are kept with the run for a
+week. When a protocol change makes the server refuse old clients, deploy
+the server, then release: the client tells players to choose "Updates",
+which opens the latest release.
+
+The Windows build is not signed, so Windows warns before the first run
+("More info", then "Run anyway"); the README in each zip says so. There
+is no macOS build.
+
+`client-godot/export.sh` builds the same zips on your machine, with the
+editor and templates that `client-godot/ci/install-godot.sh` installs.

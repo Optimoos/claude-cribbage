@@ -206,8 +206,18 @@ the `data_*` folder, so players need nothing installed). It needs the Godot
 4.7.2 .NET export templates in
 `~/.local/share/godot/export_templates/4.7.2.stable.mono/` (from the
 `Godot_v4.7.2-stable_mono_export_templates.tpz` release asset; only
-`linux_*.x86_64`, `windows_*_x86_64*.exe` and `version.txt` are used).
-Set `GODOT` to the editor binary if it is not in the repo root.
+`linux_*.x86_64`, `windows_*_x86_64*.exe` and `version.txt` are used;
+`ci/install-godot.sh` downloads, checks and installs them with the
+editor). Set `GODOT` to the editor binary if it is not in the repo root.
+It also zips each build with a README and licences
+(`build/Cribbage-<version>-<os>-x86_64.zip`). `CRIBBAGE_SERVER`
+(`https://<host>`) makes `wss://<host>/rtc` the builds' default server,
+and `CRIBBAGE_VERSION` names the version.
+
+**Releases** are built by GitHub Actions
+(`.github/workflows/desktop-clients.yml`) when a `client-v<version>` tag
+is pushed, and published on the repository's Releases page; see
+deploy/README.md.
 
 ## Deployment
 

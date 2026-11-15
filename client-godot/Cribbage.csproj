@@ -13,4 +13,10 @@
     <!-- C# classes for the shared schema, generated at build time. -->
     <Protobuf Include="../proto/cribbage/v1/cribbage.proto" ProtoRoot="../proto" GrpcServices="None" />
   </ItemGroup>
+  <!-- Release builds (export.sh) name their default server and version
+       through the environment; BuildInfo reads them back. -->
+  <ItemGroup>
+    <AssemblyMetadata Include="CribbageServer" Value="$(CRIBBAGE_DEFAULT_SERVER)" Condition="'$(CRIBBAGE_DEFAULT_SERVER)' != ''" />
+    <AssemblyMetadata Include="CribbageVersion" Value="$(CRIBBAGE_VERSION)" Condition="'$(CRIBBAGE_VERSION)' != ''" />
+  </ItemGroup>
 </Project>

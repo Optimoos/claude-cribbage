@@ -1,0 +1,75 @@
+# Builds the Godot desktop clients (Linux and Windows) and publishes them
+# as a GitHub release, so releases depend on nobody's machine.
+#
+#   Release: push a tag named client-v<version>, e.g.
+#     git tag client-v1.0.0 && git push origin client-v1.0.0
+#   Try a build without releasing: Actions > Desktop clients > Run workflow;
+#   the zips are kept as the run's artifacts for a week.
+#
+# The builds connect to the server in the repository variable
+# CRIBBAGE_SERVER (Settings > Secrets and variables > Actions > Variables),
+# the same https:// address the web page uses; without it, to a local one.
+name: Desktop clients
+
+on:
+  push:
+    tags: ["client-v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version to name the test build (no release is made)
+        default: test
+        required: true
+
+permissions:
+  contents: write # to create the release
+
+concurrency:
+  group: desktop-clients-${{ github.ref }}
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      # The editor and export templates are 1.3 GB; keep them between runs.
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/cribbage-godot
+          key: godot-4.7.2-mono-${{ hashFiles('client-godot/ci/install-godot.sh') }}
+
+      - name: Install Godot and its export templates
+        run: echo "GODOT=$(client-godot/ci/install-godot.sh)" >> "$GITHUB_ENV"
+
+      - name: Version
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = push ]; then v=${GITHUB_REF_NAME#client-v}; else v=$INPUT_VERSION; fi
+          echo "CRIBBAGE_VERSION=$v" >> "$GITHUB_ENV"
+
+      - name: Export
+        env:
+          CRIBBAGE_SERVER: ${{ vars.CRIBBAGE_SERVER }}
+        run: client-godot/export.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cribbage-${{ env.CRIBBAGE_VERSION }}
+          path: client-godot/build/*.zip
+          retention-days: 7
+
+      - name: Release
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" client-godot/build/*.zip \
+            --title "Desktop clients $CRIBBAGE_VERSION" --generate-notes \
+            --notes "Download the zip for your computer, unzip it, and run Cribbage (Windows: Cribbage.exe; Linux: Cribbage.x86_64). Each zip has a README."

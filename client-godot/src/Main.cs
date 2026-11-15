@@ -232,6 +232,8 @@ public partial class Main : Control
         Link("Report a bug", OpenReport);
         row.AddChild(Style.Label("·", 14, Style.P.Muted));
         Link("Privacy", OpenPrivacy);
+        row.AddChild(Style.Label("·", 14, Style.P.Muted));
+        Link("Updates", () => OS.ShellOpen(BuildInfo.ReleasesUrl)).TooltipText = $"This is version {BuildInfo.Version}. Open the downloads page.";
         return row;
     }
 
@@ -383,7 +385,8 @@ public partial class Main : Control
     // client's protocol version: only an update (or another server) helps.
     void OnUpgradeRequired(string message)
     {
-        upgradeMessage = message != "" ? message : "This version of Cribbage is out of date. Please update it to keep playing.";
+        upgradeMessage = (message != "" ? message : "This version of Cribbage is out of date. Please update it to keep playing.")
+            + " Choose Updates below to download the new version.";
         conn?.Close();
         me = null;
         CloseAccountWindows();
