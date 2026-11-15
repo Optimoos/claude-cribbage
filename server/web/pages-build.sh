@@ -1,8 +1,10 @@
 #!/bin/sh
 # Builds the web client for hosting apart from the game server, on
 # Cloudflare Pages (see deploy/README.md): copies static/ to dist/, points
-# the page at the server, and writes the headers the server would
-# otherwise send (_headers, which Pages reads).
+# the page at the server, stamps it with the commit it was built from
+# (version.json, which open pages check to offer reloading when it
+# changes), and writes the headers the server would otherwise send
+# (_headers, which Pages reads).
 #
 # CRIBBAGE_SERVER is the game server's address, e.g.
 # https://api.cribbage.example.com. Locally:
@@ -27,23 +29,35 @@ case $host in
 	;;
 esac
 
+# Pages sets CF_PAGES_COMMIT_SHA; elsewhere, the checkout's commit.
+version=${CF_PAGES_COMMIT_SHA:-$(git rev-parse HEAD 2>/dev/null || date +%s)}
+case $version in
+*[!A-Za-z0-9]*)
+	echo "pages-build.sh: odd version $version" >&2
+	exit 1
+	;;
+esac
+
 rm -rf dist
 cp -R static dist
-sed 's|<meta name="cribbage-server" content="">|<meta name="cribbage-server" content="'"$server"'/">|' static/index.html >dist/index.html
-grep -q "content=\"$server/\"" dist/index.html || {
-	echo "pages-build.sh: no cribbage-server meta tag in static/index.html" >&2
+sed -e 's|<meta name="cribbage-server" content="">|<meta name="cribbage-server" content="'"$server"'/">|' \
+	-e 's|<meta name="cribbage-version" content="">|<meta name="cribbage-version" content="'"$version"'">|' \
+	static/index.html >dist/index.html
+grep -q "content=\"$server/\"" dist/index.html && grep -q "content=\"$version\"" dist/index.html || {
+	echo "pages-build.sh: no cribbage-server or cribbage-version meta tag in static/index.html" >&2
 	exit 1
 }
+printf '{"version":"%s"}\n' "$version" >dist/version.json
 
 # The Content-Security-Policy is the server's (csp in web.go), except that
-# the page talks to the game server rather than to its own host.
+# the page talks to the game server as well as its own host (version.json).
 cat >dist/_headers <<EOF
 /*
-  Content-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src $server wss://$host; base-uri 'none'; form-action 'none'; frame-ancestors 'none'
+  Content-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self' $server wss://$host; base-uri 'none'; form-action 'none'; frame-ancestors 'none'
   Cache-Control: no-cache
   Strict-Transport-Security: max-age=31536000
   X-Content-Type-Options: nosniff
   Referrer-Policy: no-referrer
 EOF
 
-echo "built dist/ for $server"
+echo "built dist/ ($version) for $server"

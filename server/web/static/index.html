@@ -5,8 +5,10 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#123826">
 <!-- The game server's address when this page is hosted apart from it
-     (server/web/pages-build.sh fills it in); empty means this page's own. -->
+     (server/web/pages-build.sh fills it in); empty means this page's own.
+     The version is the build's commit, for noticing a newer page. -->
 <meta name="cribbage-server" content="">
+<meta name="cribbage-version" content="">
 <title>Cribbage</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%23123826'/><text x='16' y='23' font-size='20' text-anchor='middle' fill='%23e8c547'>♣</text></svg>">
 <link rel="stylesheet" href="style.css">
@@ -300,6 +302,10 @@
   </div>
   <p id="device-dialog-msg" class="error"></p>
 </dialog>
+<div id="update" class="update-bar" role="status" hidden>
+  <span>A new version of Cribbage is ready. Your games are saved.</span>
+  <span class="row"><button id="update-reload" class="btn btn-primary">Reload</button><button id="update-later" class="btn btn-ghost">Later</button></span>
+</div>
 <div id="offline" class="offline" role="alert" hidden>
   <div class="offline-card">
     <h2>Can't reach the server</h2>

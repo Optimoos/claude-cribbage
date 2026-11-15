@@ -291,6 +291,13 @@ git push origin main:pages      # then the web page (Pages builds it in a minute
 Pages deploys only what is pushed to `pages`, so commits on `main` reach
 players when you deploy, not before.
 
+Pages left open notice a new page (each build writes its commit to
+`version.json`; open pages check it every 10 minutes, when shown again,
+and after reconnecting) and offer "Reload", reloading by themselves only
+in a tab nobody is looking at and with no sign-in under way. Games are on
+the server, so reloading loses nothing. A page the server refuses as too
+old says it is updating, then reloads.
+
 ## Backups
 
 The server writes a compacted copy of the database to

@@ -29,6 +29,11 @@ const PROTOCOL_VERSION = 2;
 const SERVER = new URL(document.querySelector('meta[name=cribbage-server]')?.content || '.', location.href);
 const serverURL = path => new URL(path, SERVER).href;
 
+// Requests that do the same thing however often they are sent (asking
+// for a code sends the same code again), so they can be sent again after
+// a connection died without answering them.
+const RETRYABLE = ['requestSignIn', 'listGames', 'getHistory', 'syncGame', 'ping'];
+
 class Connection {
   constructor(onMessage, onOpen, onClose) {
     this.onMessage = onMessage;
@@ -37,6 +42,15 @@ class Connection {
     this.nextId = 0;
     this.dc = null;
     this.retry = 500;
+    // Requests made while the connection is down (or not yet signed back
+    // in) wait here and go once it is ready, so a click during a quick
+    // reconnect just works. One that waits too long fails like a reply.
+    this.ready = false;
+    this.queue = [];
+    // Requests waiting for their reply (sent with track), by id: if the
+    // connection dies first, safe ones go again and the rest fail with a
+    // reply.
+    this.inflight = new Map();
   }
 
   async connect() {
@@ -62,6 +76,8 @@ class Connection {
       try { ws.close(); } catch (e) { /* ignore */ }
       try { pc.close(); } catch (e) { /* ignore */ }
       this.dc = null;
+      this.ready = false;
+      this.orphans();
       if (this.stopped) return; // out of date: stay down, and say so
       this.onClose();
       setTimeout(() => this.connect(), this.retry);
@@ -112,15 +128,76 @@ class Connection {
       ws.close();
       this.onOpen();
     };
-    dc.onmessage = e => this.onMessage(JSON.parse(e.data));
+    dc.onmessage = e => {
+      const m = JSON.parse(e.data);
+      if (m.requestId) this.inflight.delete(m.requestId);
+      this.onMessage(m);
+    };
     dc.onclose = fail;
   }
 
-  send(body) {
-    if (!this.dc || this.dc.readyState !== 'open') return 0;
-    const id = ++this.nextId;
-    this.dc.send(JSON.stringify(Object.assign({ requestId: id, protocolVersion: PROTOCOL_VERSION }, body)));
-    return id;
+  // send sends a request now if the connection is ready, or once it is,
+  // and returns its id (0 only if this page is out of date). track: the
+  // caller waits for the reply (request does).
+  send(body, track = false) {
+    if (this.stopped) return 0;
+    const m = this.message(body);
+    if (this.ready && this.open()) {
+      this.transmit(m, track);
+      return m.requestId;
+    }
+    this.enqueue(m, track);
+    return m.requestId;
+  }
+
+  enqueue(m, track) {
+    const item = { m, track };
+    item.timer = setTimeout(() => {
+      this.queue = this.queue.filter(i => i !== item);
+      this.onMessage({ requestId: m.requestId, error: { code: 'ERROR_CODE_UNAVAILABLE', message: 'Could not reach the server. Try again in a moment.' } });
+    }, 15000);
+    this.queue.push(item);
+  }
+
+  transmit(m, track) {
+    this.dc.send(JSON.stringify(m));
+    if (track) this.inflight.set(m.requestId, m);
+  }
+
+  // orphans deals with requests the dead connection never answered: ones
+  // that are safe to repeat wait for the next connection, and the others
+  // fail, since they may or may not have happened.
+  orphans() {
+    for (const m of this.inflight.values()) {
+      if (RETRYABLE.some(k => k in m)) this.enqueue(m, true);
+      else this.onMessage({ requestId: m.requestId, error: { code: 'ERROR_CODE_UNAVAILABLE', message: 'The connection dropped before the server answered. Check, and try again if it did not happen.' } });
+    }
+    this.inflight.clear();
+  }
+
+  // sendNow sends on an open connection that is not ready yet (resuming
+  // the session that readies it), or returns 0.
+  sendNow(body) {
+    if (!this.open()) return 0;
+    const m = this.message(body);
+    this.transmit(m, false);
+    return m.requestId;
+  }
+
+  // markReady sends the requests that waited for the connection.
+  markReady() {
+    if (!this.open()) return;
+    this.ready = true;
+    for (const item of this.queue.splice(0)) {
+      clearTimeout(item.timer);
+      this.transmit(item.m, item.track);
+    }
+  }
+
+  open() { return this.dc && this.dc.readyState === 'open'; }
+
+  message(body) {
+    return Object.assign({ requestId: ++this.nextId, protocolVersion: PROTOCOL_VERSION }, body);
   }
 }
 
@@ -551,7 +628,7 @@ const conn = new Connection(onMessage, onOpen, onClose);
 // returns true if it dealt with the reply completely.
 const replies = new Map();
 function request(body, onReply) {
-  const id = conn.send(body);
+  const id = conn.send(body, true);
   if (id) replies.set(id, onReply);
   return id;
 }
@@ -588,7 +665,10 @@ function onOpen() {
   setStatus('online');
   clearTimeout(offlineTimer);
   offlineTimer = null;
+  clearTimeout(reconnectTimer);
+  reconnectTimer = null;
   $('offline').hidden = true;
+  checkVersion();
   loadBots();
   state.me = null; // each connection authenticates afresh
   if (stopToken) { show('stop-panel'); return; }
@@ -604,8 +684,19 @@ function onOpen() {
   if (emailLink && emailLink.kind === 'signin') { setMsg('link-msg', ''); show('link-panel'); return; }
   if (emailLink && emailLink.kind === 'delete') { setMsg('delete-panel-msg', ''); show('delete-panel'); return; }
   const token = localStorage.getItem('token');
-  if (token) conn.send({ resume: { token } });
-  else if ($('code-panel').hidden && $('username-panel').hidden) showLogin();
+  if (token) {
+    resumeSession(token);
+    return;
+  }
+  conn.markReady();
+  if ($('code-panel').hidden && $('username-panel').hidden) showLogin();
+}
+
+// resumeSession signs this connection back in; requests made meanwhile go
+// once it has (or has failed: they then get the server's own answer).
+function resumeSession(token) {
+  const id = conn.sendNow({ resume: { token } });
+  if (id) replies.set(id, () => { queueMicrotask(() => conn.markReady()); return false; });
 }
 
 // showLogin shows the sign-in page, saying why if a device is waiting.
@@ -614,10 +705,48 @@ function showLogin() {
   show('login');
 }
 
+// A connection that drops comes back within a second or two (the server
+// also closes one left on the sign-in page after 30 seconds), so say
+// "reconnecting" only if it takes longer; requests made meanwhile wait.
+let reconnectTimer = null;
 function onClose() {
-  setStatus($('offline').hidden ? 'reconnecting…' : 'offline');
+  if (!$('offline').hidden) setStatus('offline');
+  else if (!reconnectTimer) reconnectTimer = setTimeout(() => { if (!conn.dc) setStatus('reconnecting…'); }, 3000);
   watchOffline();
 }
+
+// A new version of this page. The Pages build names its commit in a meta
+// tag and in version.json; when they differ, the page offers to reload,
+// and reloads by itself only while nobody is looking at it and no sign-in
+// is under way. (The server's copy has no version and does not check.)
+const PAGE_VERSION = document.querySelector('meta[name=cribbage-version]')?.content || '';
+let newVersion = '', versionChecked = 0;
+async function checkVersion() {
+  if (!PAGE_VERSION || Date.now() - versionChecked < 60000) return;
+  versionChecked = Date.now();
+  try {
+    const r = await fetch('version.json', { cache: 'no-store' });
+    const v = r.ok ? String((await r.json()).version || '') : '';
+    if (!v || v === PAGE_VERSION) return;
+    newVersion = v;
+  } catch (e) {
+    return;
+  }
+  if (conn.stopped || (document.hidden && reloadIsSafe())) location.reload();
+  else $('update').hidden = false;
+}
+// reloadIsSafe: nothing typed or opened would be lost. Games are on the
+// server, so a reload during one only replays it.
+function reloadIsSafe() {
+  return !state.signin && !state.newAccount && !emailLink && !stopToken && !pendingDevice;
+}
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden && newVersion && reloadIsSafe()) location.reload();
+  else if (!document.hidden) checkVersion();
+});
+setInterval(checkVersion, 10 * 60 * 1000);
+$('update-reload').onclick = () => location.reload();
+$('update-later').onclick = () => { $('update').hidden = true; };
 
 // Say so if the server stays out of reach. After a restart it is back in
 // seconds, but a stopped machine can take minutes or hours. The page
@@ -710,7 +839,11 @@ function onError(e) {
     conn.stopped = true;
     let reloaded = false;
     try { reloaded = sessionStorage.getItem('upgrade-reload') === '1'; sessionStorage.setItem('upgrade-reload', '1'); } catch (err) { /* ignore */ }
-    if (!reloaded) { location.reload(); return; }
+    if (!reloaded) {
+      toast('Cribbage was updated. Reloading… (your games are saved)');
+      setTimeout(() => location.reload(), 1500);
+      return;
+    }
     setStatus('out of date');
     setMsg('login-error', e.message);
     show('login');
@@ -1339,7 +1472,7 @@ for (const b of document.querySelectorAll('[data-to-login]')) {
     setMsg('login-error', '');
     showLogin();
     const token = localStorage.getItem('token');
-    if (token && !state.me) conn.send({ resume: { token } });
+    if (token && !state.me) resumeSession(token);
   };
 }
 
@@ -1631,7 +1764,7 @@ $('delete-confirm').onclick = () => {
     setMsg('login-error', `The account ${m.accountDeleted.username} was deleted.`, true);
     toast(`The account ${m.accountDeleted.username} was deleted.`);
     show('login');
-    if (!state.me && token) conn.send({ resume: { token } });
+    if (!state.me && token) resumeSession(token);
     return true;
   });
   if (!sent) setMsg('delete-panel-msg', 'Not connected yet…');

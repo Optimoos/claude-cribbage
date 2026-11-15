@@ -436,6 +436,13 @@ button.card:disabled { cursor: default; }
 .deal-in-opp { animation: deal-in-top .38s cubic-bezier(.2, .9, .3, 1.2) both; }
 .flip-in { animation: flip-in .55s ease-out both; }
 
+.update-bar {
+  position: fixed; left: 0; right: 0; margin: 0 auto; bottom: max(1rem, env(safe-area-inset-bottom)); z-index: 45;
+  width: min(calc(100% - 2rem), 30rem); display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: .6rem;
+  padding: .7rem .9rem; border-radius: var(--radius); background: var(--surface); color: var(--ink); border: 1px solid var(--line);
+  box-shadow: var(--shadow); animation: pop .2s ease-out;
+}
+.update-bar .row { gap: .4rem; }
 .offline {
   position: fixed; inset: 0; z-index: 30; display: grid; place-items: center; padding: 1rem;
   background: #0008; backdrop-filter: blur(2px); animation: fade-in .3s ease-out;
