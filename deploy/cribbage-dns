@@ -1,0 +1,158 @@
+#!/usr/bin/python3 -I
+"""Keeps the server's DNS record and its public-ip setting on its address.
+
+Run by cribbage-dns.service at boot (before the game server) and hourly
+by cribbage-dns.timer (see README.md, "AWS: a Spot instance"). It reads
+the instance's public IPv4 address from EC2's metadata service, then:
+
+  * makes sure the Cloudflare A record CRIBBAGE_DNS_NAME points at it,
+    DNS only (not proxied: the server gets its own certificate on port 443,
+    and players' WebRTC goes straight to it), creating the record if there
+    is none;
+  * makes sure public-ip in CRIBBAGE_CONF says the same, restarting the
+    game server if it changed and the server is running.
+
+Settings (environment): CLOUDFLARE_ZONE_ID, CRIBBAGE_DNS_NAME, CRIBBAGE_CONF
+(optional), and the API token in $CREDENTIALS_DIRECTORY/cloudflare-token
+(or CLOUDFLARE_API_TOKEN). CRIBBAGE_PUBLIC_IP overrides the address, off
+EC2 or for testing; CLOUDFLARE_API overrides the API's address, for
+testing.
+"""
+
+import ipaddress
+import json
+import os
+import re
+import subprocess
+import sys
+import urllib.error
+import urllib.request
+
+IMDS = "http://169.254.169.254/latest"
+API = os.environ.get("CLOUDFLARE_API", "https://api.cloudflare.com/client/v4")
+
+
+def log(msg):
+    print(msg, flush=True)
+
+
+def http(method, url, headers=None, body=None, timeout=10):
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(url, data=data, method=method, headers=headers or {})
+    if data is not None:
+        req.add_header("Content-Type", "application/json")
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return r.read().decode()
+
+
+def public_ip():
+    ip = os.environ.get("CRIBBAGE_PUBLIC_IP", "").strip()
+    if not ip:
+        # IMDSv2: a session token first (instances are launched requiring it).
+        token = http("PUT", IMDS + "/api/token", {"X-aws-ec2-metadata-token-ttl-seconds": "60"})
+        ip = http("GET", IMDS + "/meta-data/public-ipv4", {"X-aws-ec2-metadata-token": token}).strip()
+    addr = ipaddress.ip_address(ip)  # raises on anything else
+    if addr.version != 4 or not addr.is_global:
+        raise ValueError(f"{ip} is not a public IPv4 address")
+    return ip
+
+
+def api_token():
+    creds = os.environ.get("CREDENTIALS_DIRECTORY")
+    if creds and os.path.exists(os.path.join(creds, "cloudflare-token")):
+        with open(os.path.join(creds, "cloudflare-token")) as f:
+            return f.read().strip()
+    token = os.environ.get("CLOUDFLARE_API_TOKEN", "").strip()
+    if not token:
+        raise SystemExit("no Cloudflare API token (cloudflare-token credential or CLOUDFLARE_API_TOKEN)")
+    return token
+
+
+def cloudflare(method, path, token, body=None):
+    try:
+        out = json.loads(http(method, API + path, {"Authorization": "Bearer " + token}, body))
+    except urllib.error.HTTPError as e:
+        try:
+            out = json.loads(e.read().decode())
+        except ValueError:
+            raise SystemExit(f"Cloudflare {method} {path}: HTTP {e.code}")
+    if not out.get("success"):
+        errors = "; ".join(f"{x.get('code')}: {x.get('message')}" for x in out.get("errors", []))
+        raise SystemExit(f"Cloudflare {method} {path} failed: {errors or out}")
+    return out["result"]
+
+
+def check_dns(ip):
+    zone = os.environ["CLOUDFLARE_ZONE_ID"].strip()
+    name = os.environ["CRIBBAGE_DNS_NAME"].strip().lower().rstrip(".")
+    if not re.fullmatch(r"[0-9a-f]{32}", zone):
+        raise SystemExit(f"CLOUDFLARE_ZONE_ID {zone!r} is not a zone ID (32 hex digits)")
+    token = api_token()
+    base = f"/zones/{zone}/dns_records"
+    records = cloudflare("GET", f"{base}?type=A&name={name}", token)
+    if not records:
+        cloudflare("POST", base, token, {"type": "A", "name": name, "content": ip, "ttl": 60, "proxied": False})
+        log(f"created {name} A {ip}")
+        return
+    for extra in records[1:]:
+        log(f"warning: {name} has more than one A record ({extra['content']} too); fix it in Cloudflare")
+    r = records[0]
+    if r["content"] == ip and not r.get("proxied"):
+        log(f"{name} already points at {ip}")
+        return
+    cloudflare("PATCH", f"{base}/{r['id']}", token, {"content": ip, "proxied": False})
+    was = r["content"] + (" (proxied)" if r.get("proxied") else "")
+    log(f"updated {name} A from {was} to {ip}")
+
+
+def check_conf(ip):
+    path = os.environ.get("CRIBBAGE_CONF", "").strip()
+    if not path:
+        return
+    with open(path) as f:
+        lines = f.read().splitlines(keepends=True)
+    setting = re.compile(r"^\s*public-ip\s*=\s*(.*?)\s*$")
+    current = None
+    for i, line in enumerate(lines):
+        m = setting.match(line)
+        if m:
+            current = m.group(1)
+            lines[i] = f"public-ip = {ip}\n"
+            break
+    else:
+        lines.append(f"\n# Kept up to date by cribbage-dns.\npublic-ip = {ip}\n")
+    if current == ip:
+        return
+    tmp = path + ".new"
+    with open(tmp, "w") as f:
+        f.writelines(lines)
+    os.chmod(tmp, os.stat(path).st_mode & 0o777)
+    os.replace(tmp, path)
+    log(f"set public-ip in {path} from {current or '(none)'} to {ip}")
+    if subprocess.run(["systemctl", "is-active", "--quiet", "cribbage"]).returncode == 0:
+        subprocess.run(["systemctl", "restart", "--no-block", "cribbage"], check=True)
+        log("restarting the game server for the new address")
+
+
+def main():
+    try:
+        ip = public_ip()
+    except (OSError, ValueError) as e:
+        raise SystemExit(f"cannot find this machine's public address: {e}")
+    log(f"public address {ip}")
+    failed = None
+    try:
+        check_conf(ip)
+    except OSError as e:
+        failed = f"cannot update {os.environ.get('CRIBBAGE_CONF')}: {e}"
+        log(failed)
+    try:
+        check_dns(ip)
+    except OSError as e:
+        raise SystemExit(f"cannot reach Cloudflare: {e}")
+    if failed:
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

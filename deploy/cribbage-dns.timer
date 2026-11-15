@@ -1,0 +1,12 @@
+# Runs cribbage-dns.service hourly (it also runs at boot by itself).
+# Install as /etc/systemd/system/cribbage-dns.timer.
+[Unit]
+Description=Check the cribbage server's DNS record hourly
+
+[Timer]
+OnBootSec=1h
+OnUnitActiveSec=1h
+RandomizedDelaySec=2min
+
+[Install]
+WantedBy=timers.target

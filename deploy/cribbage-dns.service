@@ -1,0 +1,47 @@
+# Keeps api.<domain> in Cloudflare, and public-ip in cribserver.conf, on
+# this instance's public address (see README.md, "AWS: a Spot instance").
+# Install as /etc/systemd/system/cribbage-dns.service, with
+# cribbage-dns.timer. Enabled, it runs at boot before the game server;
+# the timer runs it hourly after that.
+[Unit]
+Description=Check the cribbage server's DNS record and public address
+Wants=network-online.target
+After=network-online.target
+Before=cribbage.service
+
+[Service]
+Type=oneshot
+# Edit these: the zone's ID (Cloudflare dashboard, the domain's Overview
+# page, "Zone ID") and the server's name.
+Environment=CLOUDFLARE_ZONE_ID=0123456789abcdef0123456789abcdef
+Environment=CRIBBAGE_DNS_NAME=api.cribbage.example.com
+Environment=CRIBBAGE_CONF=/etc/cribbage/cribserver.conf
+# A Cloudflare API token that may edit DNS in that zone only, mode 0600,
+# owned by root (README.md).
+LoadCredential=cloudflare-token:/etc/cribbage/cloudflare-token
+ExecStart=/opt/cribbage/cribbage-dns
+TimeoutStartSec=60
+
+# Hardening: it reads the instance's metadata, talks to Cloudflare, and
+# may rewrite cribserver.conf and restart the game server (as root, which
+# systemctl needs).
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/etc/cribbage
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+SystemCallArchitectures=native
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
