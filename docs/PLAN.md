@@ -207,6 +207,8 @@ already answers binary data channels in binary.
 - Matchmaking and ratings.
 - TURN deployment.
 - Manual counting with muggins.
+- Three-player games (two people and a bot, or one person and two bots):
+  see "Roadmap: three-player games" at the end.
 
 ---
 
@@ -1245,3 +1247,73 @@ the key cannot open a person's account. Protocol version 2.
 - Tests: a software passkey authenticator (`internal/auth/passkeytest`)
   drives the real WebAuthn checks; the web client's passkey code was run
   end to end in headless Firefox against an in-page software authenticator.
+
+---
+
+# Roadmap: three-player games (not started)
+
+Noted 2026-11-15, to look at soon. The goal is three-handed cribbage,
+mainly so that **two people can play against a bot** and see how they
+measure up, and so that **one person can play two different bots**.
+Three people would come for free.
+
+## Rules to implement (standard three-handed)
+
+- Five cards each, plus one dealt straight to the crib; each player
+  discards one, so hands and the crib are four cards as now.
+- The deal passes to the left. The player to the dealer's left leads, and
+  play goes round to the left.
+- Pegging: a player who cannot play says go and the next player carries
+  on. When nobody can play, whoever played last pegs 1 (2 at 31), and the
+  count restarts with the player after them. Pairs and runs count across
+  all three players' cards, as now.
+- The show goes left of the dealer first, then the next player, then the
+  dealer, then the crib. Counting order matters more with three: the
+  first to 121 wins at once, wherever the show is.
+- **To decide:** skunks (often not played three-handed, or only for the
+  last player); what "winning" records for second and third place.
+
+## What it touches
+
+The two-player assumption is everywhere, so this is a large change, about
+the size of a phase. In order of work:
+
+1. **Engine** (`internal/engine`, the biggest and most careful part):
+   about 25 `[2]`-sized arrays (scores, hands, discards, go flags) and
+   `1 - player` turn arithmetic in `game.go`. Generalize to two or three
+   seats: deal sizes, a one-card discard (`Action.Cards` holds two), turn
+   order, go handling with three players, show order, and `Scores` in
+   events and observations, which need a list of opponents rather than
+   one. **Two-player play must stay exactly the same**: stored games
+   replay from their seed and action log, and the bots' tables assume it.
+   Rule-case tests for three-handed pegging and the show.
+2. **Protocol:** seats and scores as lists rather than "me" and "the
+   opponent"; how a three-seat game is created and listed. A protocol
+   version bump, so Godot builds must be updated.
+3. **Store:** `games` has `seat0_*`/`seat1_*` columns: add `seat2_*` (a
+   migration) or a seats table. History and the record against each
+   opponent need a meaning for three-player games (placings).
+4. **Server:** creating a game with chosen seats (a bot in one or two of
+   them), invites for a second person into a game with a bot, open games
+   and Find a match filling three seats, limits counting three-player
+   games, and the game actor's seat handling.
+5. **Bots:** every bot is two-player. A first version adapts the heuristic
+   bot: discarding one of five is a small enumeration, with the crib
+   belonging to the dealer, who may be either opponent; pegging stays
+   one-ply against two opponents. The expert bot needs new search
+   assumptions and retrained tables, a project of its own; the `nn` bot
+   would not play three-handed. Offer random and heuristic first.
+6. **Web client:** a three-track board (the current one draws two lanes
+   side by side), a table with two opponents' hands, whose crib it is,
+   three scores, events and animation for a third player, and a lobby
+   control for choosing seats (invite someone, add a bot).
+7. **Godot client:** the same board, table and lobby changes; it could
+   follow the web client.
+
+## Suggested order
+
+Engine with tests (and a check that two-player replays are unchanged),
+then protocol and store, then one person against two bots (no invites
+needed), then the web client, then two people and a bot by invite, then
+Godot, then stronger three-player bots.
+
