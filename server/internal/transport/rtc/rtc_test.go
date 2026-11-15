@@ -2,6 +2,7 @@ package rtc
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -316,5 +317,62 @@ func TestCloseDeliversLastMessage(t *testing.T) {
 			t.Fatalf("try %d: last message lost: %v, %v", i, &m, err)
 		}
 		c.Close()
+	}
+}
+
+// TestPublicIPOnSharedPort checks that a server behind a 1:1 NAT offers
+// its public address on the shared UDP port, which is the only one its
+// firewall lets through, and no other port.
+func TestPublicIPOnSharedPort(t *testing.T) {
+	l, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := l.LocalAddr().(*net.UDPAddr).Port
+	l.Close()
+	a, err := NewAPI(Options{
+		UDPPort: port, PublicIPs: []string{"203.0.113.10"}, PublicOnly: true,
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	pc, err := a.api.NewPeerConnection(a.config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pc.Close()
+	if _, err := pc.CreateDataChannel(Label, nil); err != nil {
+		t.Fatal(err)
+	}
+	offer, err := pc.CreateOffer(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := webrtc.GatheringCompletePromise(pc)
+	if err := pc.SetLocalDescription(offer); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("gathering did not complete")
+	}
+	public := false
+	for _, line := range strings.Split(pc.LocalDescription().SDP, "\n") {
+		f := strings.Fields(strings.TrimPrefix(strings.TrimSpace(line), "a="))
+		if len(f) < 8 || !strings.HasPrefix(f[0], "candidate:") || f[2] != "udp" {
+			continue
+		}
+		if f[5] != fmt.Sprint(port) {
+			t.Errorf("candidate on port %s, not the shared port %d: %s", f[5], port, line)
+		}
+		if f[4] == "203.0.113.10" {
+			public = true
+		}
+	}
+	if !public {
+		t.Errorf("no candidate for the public IP in:\n%s", pc.LocalDescription().SDP)
 	}
 }

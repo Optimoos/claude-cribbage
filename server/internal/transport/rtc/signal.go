@@ -254,8 +254,13 @@ func NewAPI(o Options) (*API, error) {
 		a.mux = mux
 	}
 	if len(o.PublicIPs) > 0 {
+		// Host candidates, added beside the local ones: they use the
+		// shared UDP port. Pion gathers server-reflexive (srflx) ones on
+		// a socket of their own, so clients would be sent a random port
+		// that a firewall open only for UDPPort drops.
 		if err := se.SetICEAddressRewriteRules(webrtc.ICEAddressRewriteRule{
-			External: o.PublicIPs, AsCandidateType: webrtc.ICECandidateTypeSrflx,
+			External: o.PublicIPs, AsCandidateType: webrtc.ICECandidateTypeHost,
+			Mode: webrtc.ICEAddressRewriteAppend,
 		}); err != nil {
 			return nil, err
 		}
