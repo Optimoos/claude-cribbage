@@ -111,6 +111,21 @@ type Store interface {
 	DeletePasskey(ctx context.Context, userID int64, id []byte) error
 	// DeletePasskeys removes all of a user's passkeys.
 	DeletePasskeys(ctx context.Context, userID int64) error
+
+	// Addresses whose owners asked, by the link in an email, for no more
+	// email. Each is kept as a keyed hash of its mailbox (mail.Mailbox),
+	// so a stop covers the address's +tag variants and reveals no address.
+	//
+	// StopToken is the token for the stop link in email to an address.
+	StopToken(email string) (string, error)
+	// StopEmail stops email to a stop token's address. A token the store
+	// did not make is ErrNotFound.
+	StopEmail(ctx context.Context, token string) error
+	// EmailStopped reports whether email to an address was stopped.
+	EmailStopped(ctx context.Context, email string) (bool, error)
+	// AllowEmail undoes StopEmail for an address and reports whether it
+	// was stopped.
+	AllowEmail(ctx context.Context, email string) (bool, error)
 }
 
 // DeletedNickname replaces a deleted user's nickname in the games they

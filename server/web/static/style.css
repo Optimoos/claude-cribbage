@@ -499,6 +499,7 @@ button.card:disabled { cursor: default; }
   background: none; border: 0; padding: 0; margin-top: .4rem; font: inherit; font-size: .9rem; color: var(--accent);
   text-decoration: underline; text-underline-offset: 2px; cursor: pointer;
 }
+.hint .link-btn { margin: 0; font-size: inherit; }
 .login h2 { margin: 0 0 .4rem; }
 .login > .muted { margin: 0 0 1rem; }
 .error.ok { color: var(--accent); }

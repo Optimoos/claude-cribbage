@@ -2,6 +2,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/tls"
@@ -10,6 +11,8 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
+	stdlog "log"
 	"log/slog"
 	"net"
 	"net/http"
@@ -27,6 +30,8 @@ import (
 	"cribbage/internal/bots"
 	"cribbage/internal/expert"
 	"cribbage/internal/mail"
+	"cribbage/internal/netkey"
+	"cribbage/internal/ratelimit"
 	"cribbage/internal/server"
 	"cribbage/internal/store"
 	"cribbage/internal/transport/rtc"
@@ -66,7 +71,7 @@ func main() {
 	mailFrom := flag.String("mail-from", "", "sender address for emails, e.g. cribbage@example.com")
 	mailFromName := flag.String("mail-from-name", "Cribbage", "sender name for emails")
 	emailKeyFile := flag.String("email-key-file", "", "file holding the key (64 hex digits, from openssl rand -hex 32) that encrypts email addresses in the database (or set CRIBBAGE_EMAIL_KEY); without one, a key is kept beside the database in <db>.email-key")
-	reportURL := flag.String("report-url", "https://github.com/Optimoos", "where the clients' \"Report a bug\" links go (https)")
+	reportURL := flag.String("report-url", "https://github.com/Optimoos/claude-cribbage/issues", "where the clients' \"Report a bug\" links go (https)")
 	botKeyFile := flag.String("bot-key-file", "", "file holding a secret that headless bots (cmd/botclient) sign in with (or set CRIBBAGE_BOT_KEY); empty disables bot accounts")
 	configPath := flag.String("config", "", "read settings from this file (name = value per line, e.g. /etc/cribbage/cribserver.conf); flags on the command line override it")
 	printConfig := flag.Bool("print-config", false, "print a config file with every setting, using these flags' values, and exit")
@@ -137,7 +142,10 @@ func main() {
 		users, games = sq, sq
 	}
 
-	authSvc := &auth.Service{Store: users, BaseURL: *publicURL}
+	authSvc := &auth.Service{Store: users, BaseURL: *publicURL, Log: log}
+	if *tlsDomain != "" {
+		authSvc.StopURL = "https://" + *tlsDomain + "/api/stop"
+	}
 	if authSvc.BaseURL == "" && *tlsDomain != "" {
 		authSvc.BaseURL = "https://" + *tlsDomain + "/"
 	} else if authSvc.BaseURL == "" {
@@ -281,6 +289,33 @@ func main() {
 			w.Header().Set("Access-Control-Allow-Origin", "*")
 			json.NewEncoder(w).Encode(bots.Names())
 		})
+		// The stop link in every email: the web client POSTs its token here,
+		// and so do mail apps' one-click "Unsubscribe" (RFC 8058), which add
+		// a form body this ignores. Tokens cannot be guessed; the limit
+		// keeps anyone from making the server check them by the million.
+		stopLimit := ratelimit.New(10, 6*time.Second)
+		mux.HandleFunc("/api/stop", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Access-Control-Allow-Origin", "*")
+			if r.Method != http.MethodPost {
+				http.Error(w, "POST a stop token", http.StatusMethodNotAllowed)
+				return
+			}
+			host, _, _ := net.SplitHostPort(r.RemoteAddr)
+			if !stopLimit.Take(netkey.Of(host), time.Now()) {
+				http.Error(w, "too many requests; try again later", http.StatusTooManyRequests)
+				return
+			}
+			switch err := authSvc.StopEmail(r.Context(), r.URL.Query().Get("t")); {
+			case errors.Is(err, auth.ErrBadToken):
+				http.Error(w, "that link is not one this server sent", http.StatusNotFound)
+			case err != nil:
+				log.Error("stop email", "err", err)
+				http.Error(w, "internal error", http.StatusInternalServerError)
+			default:
+				w.Header().Set("Content-Type", "application/json")
+				w.Write([]byte(`{"ok":true}` + "\n"))
+			}
+		})
 		mux.Handle("/", web.Handler(*webDir))
 		// Requests are small, and /rtc's WebSocket is hijacked, which clears
 		// these deadlines.
@@ -291,6 +326,8 @@ func main() {
 			WriteTimeout:      60 * time.Second,
 			IdleTimeout:       2 * time.Minute,
 			MaxHeaderBytes:    16 << 10,
+			// On the internet, scanners fail TLS handshakes all day.
+			ErrorLog: stdlog.New(dropLines{os.Stderr, "TLS handshake error"}, "", stdlog.LstdFlags),
 		}
 		hl, err := net.Listen("tcp", *httpAddr)
 		if err != nil {
@@ -418,6 +455,19 @@ func logStats(log *slog.Logger, srv *server.Server, sq *store.SQLite, every time
 		log.Info("stats", attrs...)
 		prev = s
 	}
+}
+
+// dropLines writes what log lines do not contain skip.
+type dropLines struct {
+	w    io.Writer
+	skip string
+}
+
+func (d dropLines) Write(p []byte) (int, error) {
+	if bytes.Contains(p, []byte(d.skip)) {
+		return len(p), nil
+	}
+	return d.w.Write(p)
 }
 
 // securityHeaders adds the headers a proxy in front would otherwise add.

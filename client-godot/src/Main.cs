@@ -28,7 +28,7 @@ public partial class Main : Control
     // The server's message when it refused this client's protocol version;
     // the connection stays closed until the server changes.
     string upgradeMessage = "";
-    const string DefaultReportUrl = "https://github.com/Optimoos";
+    const string DefaultReportUrl = "https://github.com/Optimoos/claude-cribbage/issues";
     string reportUrl = DefaultReportUrl;
 
     // Everything below is rebuilt when the theme changes.
@@ -596,8 +596,9 @@ public partial class Main : Control
             shownOnce = true;
             switch (opts.Show)
             {
-                case "register":
-                    SetLoginStage(LoginStage.Register);
+                case "username":
+                    newEmail = opts.User != "" ? opts.User : "you@example.com";
+                    SetLoginStage(LoginStage.Username);
                     break;
                 case "code":
                     userEdit.Text = opts.User != "" ? opts.User : userEdit.Text;

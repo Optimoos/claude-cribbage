@@ -34,6 +34,8 @@ type adminResponse struct {
 	Error string `json:"error,omitempty"`
 	// OldEmail is the address set-email replaced.
 	OldEmail string `json:"old_email,omitempty"`
+	// WasStopped says allow-email undid a stop.
+	WasStopped bool `json:"was_stopped,omitempty"`
 }
 
 // serveAdmin listens on a Unix socket at path for admin commands.
@@ -83,6 +85,15 @@ func handleAdmin(log *slog.Logger, c net.Conn, srv *server.Server) {
 			} else {
 				resp.OK = true
 			}
+		case "allow-email":
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			resp.WasStopped, err = srv.AdminAllowEmail(ctx, req.Email)
+			cancel()
+			if err != nil {
+				resp.Error = err.Error()
+			} else {
+				resp.OK = true
+			}
 		case "delete-account":
 			ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
 			err = srv.AdminDeleteAccount(ctx, req.Username)
@@ -118,6 +129,10 @@ Commands:
         address, every device is signed out, and the account's passkeys
         are removed. The old address is told. Check that the person
         asking is the account's owner first.
+  allow-email <address>
+        Send email to an address again after someone used the link in one
+        of its emails to stop email to it (it covers the address's
+        +tag variants). Check that the person asking owns the address.
   delete-account [-yes] <username>
         Delete a player's account: their unfinished games end (active ones
         are resigned), their invites and account are removed, and their
@@ -140,6 +155,12 @@ Flags:
 			os.Exit(2)
 		}
 		req = adminRequest{Cmd: "set-email", Username: fl.Arg(1), Email: fl.Arg(2)}
+	case "allow-email":
+		if fl.NArg() != 2 {
+			fl.Usage()
+			os.Exit(2)
+		}
+		req = adminRequest{Cmd: "allow-email", Email: fl.Arg(1)}
 	case "delete-account":
 		if fl.NArg() != 2 {
 			fl.Usage()
@@ -177,6 +198,14 @@ Flags:
 	if !resp.OK {
 		fmt.Fprintln(os.Stderr, "error:", resp.Error)
 		os.Exit(1)
+	}
+	if req.Cmd == "allow-email" {
+		if resp.WasStopped {
+			fmt.Printf("Email to %s is allowed again.\n", req.Email)
+		} else {
+			fmt.Printf("Email to %s was not stopped.\n", req.Email)
+		}
+		return
 	}
 	if req.Cmd == "delete-account" {
 		fmt.Printf("Deleted the account %s.\n", req.Username)

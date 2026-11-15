@@ -88,6 +88,10 @@ CREATE TABLE IF NOT EXISTS passkeys (
 	last_used INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS passkeys_user ON passkeys(user_id);
+CREATE TABLE IF NOT EXISTS email_stops (
+	mailbox TEXT PRIMARY KEY, -- keyed hash of a mailbox that asked for no email (emailkey.go)
+	created INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS action_log (
 	id      INTEGER PRIMARY KEY,
 	game_id TEXT NOT NULL,
@@ -646,6 +650,52 @@ func (s *SQLite) UsersByEmail(ctx context.Context, email string) ([]*User, error
 		out = append(out, u)
 	}
 	return out, rows.Err()
+}
+
+func (s *SQLite) StopToken(email string) (string, error) {
+	if s.emails == nil {
+		return "", ErrNoEmailKey
+	}
+	return s.emails.stopToken(email), nil
+}
+
+func (s *SQLite) StopEmail(ctx context.Context, token string) error {
+	if s.emails == nil {
+		return ErrNoEmailKey
+	}
+	idx, ok := s.emails.checkStopToken(token)
+	if !ok {
+		return ErrNotFound
+	}
+	return s.write(ctx, func(tx *writeTx) error {
+		_, err := tx.Exec(`INSERT OR IGNORE INTO email_stops (mailbox, created) VALUES (?, ?)`, idx, time.Now().UnixMilli())
+		return err
+	}, nil)
+}
+
+func (s *SQLite) EmailStopped(ctx context.Context, email string) (bool, error) {
+	if s.emails == nil {
+		return false, nil
+	}
+	var n int
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM email_stops WHERE mailbox = ?`, s.emails.stopIndex(email)).Scan(&n)
+	return n > 0, err
+}
+
+func (s *SQLite) AllowEmail(ctx context.Context, email string) (bool, error) {
+	if s.emails == nil {
+		return false, ErrNoEmailKey
+	}
+	idx := s.emails.stopIndex(email)
+	var n int64
+	err := s.write(ctx, func(tx *writeTx) error {
+		res, err := tx.Exec(`DELETE FROM email_stops WHERE mailbox = ?`, idx)
+		if err == nil {
+			n, err = res.RowsAffected()
+		}
+		return err
+	}, nil)
+	return n > 0, err
 }
 
 func (s *SQLite) CreateAccountToken(ctx context.Context, t *AccountToken) error {

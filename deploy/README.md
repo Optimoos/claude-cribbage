@@ -139,15 +139,51 @@ There are no passwords. Players sign in with an 8-digit code the server
 emails them (the same email has a link that signs in the browser it is
 opened in), with a passkey in the web client, or, in the desktop app, by
 approving the code it shows from a device that is already signed in
-("Sign in with browser"). An account needs an email address; family
+("Sign in with browser"). There is no separate sign-up: someone who
+enters an address with no account gets a code that creates one, and
+chooses a username once it is entered. An account needs an email address; family
 members can share one, and then the email has a code for each account.
 Sessions last 90 days from the last time the device was used.
 
 Codes work for 15 minutes. Five wrong codes end a sign-in, and ten wrong
 codes for an account, from anywhere, stop its codes working for a while
 (one more an hour); the link still works. Each account gets 10 emails,
-then 1 every 5 minutes, and each address 20, then 1 every 5 minutes. The
-reply to "email me a code" is the same whether or not the account exists.
+then 1 every 5 minutes, and each address 20, then 1 every 5 minutes;
+addresses that differ only by a `+tag` (and, at Gmail, by dots) count as
+one, so they cannot be used to flood an inbox. A new-account code goes
+to an address nobody has yet shown is theirs, so the server sends at
+most 20 emails with only a new-account code, then 1 every 15 minutes,
+however many places the requests come from (an address with accounts
+gets a new-account code in its sign-in email, which costs nothing
+extra). The reply to "email me a code" is the same whether or not the
+account exists, so the page cannot be used to find out who plays.
+
+**Stopping email.** Every email ends with a link (and a one-click
+`List-Unsubscribe` header, which mail apps show as "Unsubscribe") that
+stops all email to its address and its `+tag` variants: for someone who
+got codes they did not ask for. It deletes nothing and signs nobody out;
+an account whose address is stopped can still sign in with a passkey or a
+signed-in device. The server keeps a keyed hash of the address, not the
+address. Only you can undo it, once you know the address is theirs:
+
+```sh
+sudo cribserver admin -socket /run/cribbage/admin.sock allow-email <address>
+```
+
+**Bounces and complaints.** With Amazon SES, turn on the account-level
+suppression list, so SES itself stops sending to addresses that bounce or
+mark an email as spam (from CloudShell, in the SES region):
+
+```sh
+aws sesv2 put-account-suppression-attributes --suppressed-reasons BOUNCE COMPLAINT
+aws sesv2 get-account --query SuppressionAttributes   # check
+```
+
+**The log** says `sign-in code asked for` with how many accounts the name
+matched (never the name), `email sent` with the kind of email, and why an
+email was not sent (`email not sent: ...`); a failed send logs the mail
+server's error. `journalctl -u cribbage | grep -E "sign-in|email"`
+shows them.
 
 So email must work before anyone can play. You need an SMTP account that
 may send from your domain, for example Postmark, Resend, Amazon SES, or
@@ -470,10 +506,11 @@ All built in; the numbers are in `internal/server` (`DefaultAuthLimits`,
 `DefaultGameLimits`).
 
 **Signing in.** Remote clients get 20 sign-in attempts (codes, links,
-passkeys), then 10 a minute; 10 emailed codes per address, then 1 a
-minute; and 5 registrations, then 5 an hour. Wrong codes and emails are
-also limited per account and per email address (see "Signing in and
-email"). IPv6 addresses count by their /64. The address is the one
+passkeys), then 10 a minute; 5 emailed codes per address, then 1 every 5
+minutes, so one address cannot try many accounts; and 3 registrations,
+then 3 an hour. Wrong codes and emails are also limited per account and
+per email address, and new-account emails from everyone together (see
+"Signing in and email"). Stop links are limited to 10, then 10 a minute. IPv6 addresses count by their /64. The address is the one
 WebRTC packets come from, so it is the player's real address even if
 signaling passes through a proxy. Connections from localhost (bots on the
 server) are not limited.

@@ -66,14 +66,17 @@ message ClientMessage {
   reserved 50, 52, 53; // password messages, removed
 }
 
-// There are no passwords. People sign in with a code mailed to them
-// (RequestSignIn, EnterCode), the link in the same email (UseSignInLink),
+// There are no passwords. People sign in, or create an account, with a
+// code mailed to them (RequestSignIn, EnterCode), the link in the same
+// email (UseSignInLink),
 // a passkey (PasskeySignIn...), or by approving a new device from one that
 // is signed in (StartDeviceSignIn, ApproveDevice). Each ends in AuthOk,
 // whose token signs the device in again later (Resume).
 
-// Register starts creating an account: it mails a code (and link) to email,
-// and the reply is SignInStarted. The account is created, signed in, when
+// Register starts creating an account with a username chosen up front: it
+// mails a code (and link) to email, and the reply is SignInStarted. Newer
+// clients use RequestSignIn with the address instead, and choose the
+// username once the code is in (NeedsUsername). The account is created, signed in, when
 // the code is entered (EnterCode) or the link opened (UseSignInLink).
 // USERNAME_TAKEN if the username is in use, BAD_REQUEST if a field is
 // invalid. Several accounts may share an address.
@@ -85,10 +88,13 @@ message Register {
 }
 
 // RequestSignIn mails a sign-in code and link to the account with this
-// username, or to every account with this email address. The reply is
-// SignInStarted whether or not any account matched, so it does not reveal
-// who has one. A code asked for again within its lifetime is sent again,
-// unchanged.
+// username, or to every account with this email address. Given an
+// address, the email also has a code that creates a new account with it
+// (the only code, if it has no account yet): entering that code is
+// answered with NeedsUsername. The reply is SignInStarted whether or not
+// any account matched, so it does not reveal who has one; a username with
+// no account gets no email. A code asked for again within its lifetime is
+// sent again, unchanged.
 message RequestSignIn {
   string name = 1; // a username or an email address
 }
@@ -106,17 +112,26 @@ message SignInStarted {
 // RATE_LIMITED after too many wrong codes for the account. If an address
 // shared by several accounts was given, each account's code signs in that
 // account.
+//
+// A code that creates an account is answered with NeedsUsername, and stays
+// good: send it again with the username (and nickname) to create the
+// account and sign in. USERNAME_TAKEN or BAD_REQUEST leave it good too.
 message EnterCode {
   string challenge = 1;
   string code = 2;
+  string username = 3; // for a code that creates an account
+  string nickname = 4; // optional; the username if empty
 }
 
 // UseSignInLink signs in with the token from an emailed link (the web
 // client's #signin=...). It signs in the device that opens the link, not
 // the one that asked for it. The reply is AuthOk, or NOT_FOUND if the link
-// has expired or was used.
+// has expired or was used. A link that creates an account is answered,
+// like its code, with NeedsUsername: send it again with the username.
 message UseSignInLink {
   string token = 1;
+  string username = 2; // for a link that creates an account
+  string nickname = 3;
 }
 
 // StartDeviceSignIn begins signing in by approval from another device: the
@@ -339,6 +354,7 @@ message ServerMessage {
     DeviceCode device_code = 28;
     PasskeyOptions passkey_options = 29;
     DeviceApproved device_approved = 30;
+    NeedsUsername needs_username = 31;
     Account account = 12; // the user's account settings, whenever they change
     Pong pong = 40;
   }
@@ -362,6 +378,12 @@ enum ErrorCode {
   // The client was built for another ProtocolVersion; the server closes
   // the connection after sending this.
   ERROR_CODE_UPGRADE_REQUIRED = 14;
+}
+
+// NeedsUsername answers a code or link that creates an account: send it
+// again with a username to create the account.
+message NeedsUsername {
+  string email = 1; // the address the account gets
 }
 
 message Error {

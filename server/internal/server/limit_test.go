@@ -14,6 +14,7 @@ import (
 	"cribbage/internal/auth"
 	"cribbage/internal/bots"
 	"cribbage/internal/engine"
+	"cribbage/internal/mail"
 	"cribbage/internal/protocol/pb"
 	"cribbage/internal/store"
 	"cribbage/internal/transport/tcp"
@@ -67,7 +68,7 @@ func startRemoteFrom(t *testing.T, ip *atomic.Value, lim AuthLimits) string {
 
 type discardMail struct{}
 
-func (discardMail) Send(context.Context, string, string, string) error { return nil }
+func (discardMail) Send(context.Context, mail.Message) error { return nil }
 
 func botLogin(user string) *pb.ClientMessage {
 	return &pb.ClientMessage{Body: &pb.ClientMessage_BotLogin{BotLogin: &pb.BotLogin{Username: user, Key: testBotKey}}}

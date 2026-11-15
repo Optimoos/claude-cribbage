@@ -20,6 +20,7 @@
   <li><b>Passkeys, if you add any:</b> each one's public key, the name you gave it, and when it was added and last used. The private key never leaves your device or password manager.</li>
   <li><b>Your games:</b> the players, the moves and the result of each game, for your history and your record against each opponent.</li>
   <li><b>Invites</b> you send or receive, until they are answered or expire.</li>
+  <li><b>Addresses that asked for no email.</b> Every email ends with a link that stops all email to its address. If it is used, the server keeps a keyed hash of the address (not the address itself) so that it sends nothing more there, to that address or its +tag variants. No account is deleted.</li>
   <li><b>Sessions:</b> while you are signed in, a random token (stored only as a hash) lets your device reconnect. It lasts 90 days from the last time you used that device, or until you sign out, sign out your other devices, or the server's admin recovers your account.</li>
 </ul>
 
@@ -41,6 +42,7 @@
   <li>Your account, email address and games: until you delete your account.</li>
   <li>Sign-in codes and links: 15 minutes, and only once. They are kept only in the server's memory, never in the database.</li>
   <li>Other links in emails: an hour (deleting) or 48 hours (changing your address), and only once.</li>
+  <li>A stop on email to an address: until you ask whoever runs the server to lift it.</li>
   <li>Backups of the database are kept for up to a week, so for a week after you delete your account it may remain in a backup, with your email address encrypted.</li>
 </ul>
 

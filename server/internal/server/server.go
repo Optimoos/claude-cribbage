@@ -114,15 +114,16 @@ type AuthLimits struct {
 }
 
 // DefaultAuthLimits allows 20 quick attempts per address then 10 a minute,
-// 5 registrations then 5 an hour, and 10 sign-in codes then 1 a minute.
+// 3 registrations then 3 an hour, and 5 sign-in codes then 1 every 5
+// minutes, so one address cannot try many accounts' addresses.
 // (Each account and address also gets few emails, and few wrong codes: see
 // the auth package.) IPv6 addresses count by their /64. A player may make
 // 60 requests at once, then 10 a second: far more than anyone clicking,
 // but it bounds a script.
 var DefaultAuthLimits = AuthLimits{
 	AttemptsPerIP: 20, AttemptEvery: 6 * time.Second,
-	RegistersPerIP: 5, RegisterEvery: 12 * time.Minute,
-	CodesPerIP: 10, CodeEvery: time.Minute,
+	RegistersPerIP: 3, RegisterEvery: 20 * time.Minute,
+	CodesPerIP: 5, CodeEvery: 5 * time.Minute,
 	ConnsPerAddr: 20, Conns: 5000, LoginWithin: 30 * time.Second, SignInWithin: 20 * time.Minute,
 	ActionsPerUser: 60, ActionEvery: 100 * time.Millisecond,
 }
@@ -378,14 +379,16 @@ func (s *Server) handle(c *Conn, m *pb.ClientMessage) {
 	case *pb.ClientMessage_EnterCode:
 		if s.allowSignIn(c, id) {
 			s.authenticate(c, id, func(ctx context.Context) (*auth.Result, error) {
-				return s.auth.EnterCode(ctx, b.EnterCode.Challenge, b.EnterCode.Code)
+				e := b.EnterCode
+				return s.auth.EnterCode(ctx, e.Challenge, e.Code, e.Username, e.Nickname)
 			})
 		}
 		return
 	case *pb.ClientMessage_UseSignInLink:
 		if s.allowSignIn(c, id) {
 			s.authenticate(c, id, func(ctx context.Context) (*auth.Result, error) {
-				return s.auth.UseSignInLink(ctx, b.UseSignInLink.Token)
+				l := b.UseSignInLink
+				return s.auth.UseSignInLink(ctx, l.Token, l.Username, l.Nickname)
 			})
 		}
 		return

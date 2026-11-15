@@ -20,9 +20,43 @@ import (
 	"time"
 )
 
+// Message is one plain-text email.
+type Message struct {
+	To, Subject, Body string
+	// Unsubscribe, if set, is an https URL that stops email to this
+	// address when POSTed to, for mail apps' one-click "Unsubscribe"
+	// (RFC 8058).
+	Unsubscribe string
+}
+
 // Sender sends one message.
 type Sender interface {
-	Send(ctx context.Context, to, subject, body string) error
+	Send(ctx context.Context, m Message) error
+}
+
+// Mailbox is the inbox an address delivers to, for counting emails and
+// remembering addresses that asked for none: lower case, without a
+// "+tag" (foo+bar@example.com reaches foo@example.com at most providers),
+// and, at Gmail, without dots, which Gmail ignores. Two addresses with the
+// same Mailbox may still be different inboxes at a provider that treats
+// "+" as part of the name; erring that way only shares their limits.
+func Mailbox(addr string) string {
+	addr = strings.ToLower(strings.TrimSpace(addr))
+	at := strings.LastIndexByte(addr, '@')
+	if at < 1 {
+		return addr
+	}
+	local, domain := addr[:at], addr[at+1:]
+	if i := strings.IndexByte(local, '+'); i > 0 {
+		local = local[:i]
+	}
+	if domain == "gmail.com" || domain == "googlemail.com" {
+		domain = "gmail.com"
+		if l := strings.ReplaceAll(local, ".", ""); l != "" {
+			local = l
+		}
+	}
+	return local + "@" + domain
 }
 
 // ValidAddress reports whether s is a bare email address ("a@b.example",
@@ -61,11 +95,12 @@ func (m *SMTP) Check() error {
 	return nil
 }
 
-func (m *SMTP) Send(ctx context.Context, to, subject, body string) error {
+func (m *SMTP) Send(ctx context.Context, msg Message) error {
+	to := msg.To
 	if !ValidAddress(to) {
 		return fmt.Errorf("bad recipient %q", to)
 	}
-	msg, err := m.message(to, subject, body)
+	data, err := m.message(msg)
 	if err != nil {
 		return err
 	}
@@ -122,7 +157,7 @@ func (m *SMTP) Send(ctx context.Context, to, subject, body string) error {
 	if err != nil {
 		return err
 	}
-	if _, err := w.Write(msg); err != nil {
+	if _, err := w.Write(data); err != nil {
 		return err
 	}
 	if err := w.Close(); err != nil {
@@ -140,9 +175,13 @@ func isLoopback(host string) bool {
 }
 
 // message builds the message with headers, quoted-printable encoded.
-func (m *SMTP) message(to, subject, body string) ([]byte, error) {
+func (m *SMTP) message(msg Message) ([]byte, error) {
+	to, subject, body := msg.To, msg.Subject, msg.Body
 	if strings.ContainsAny(subject, "\r\n") {
 		return nil, errors.New("subject contains a line break")
+	}
+	if strings.ContainsAny(msg.Unsubscribe, "\r\n<>") || (msg.Unsubscribe != "" && !strings.HasPrefix(msg.Unsubscribe, "https://")) {
+		return nil, fmt.Errorf("bad unsubscribe URL %q", msg.Unsubscribe)
 	}
 	from := (&mail.Address{Name: m.FromName, Address: m.From}).String()
 	id := make([]byte, 16)
@@ -161,6 +200,9 @@ func (m *SMTP) message(to, subject, body string) ([]byte, error) {
 	} {
 		fmt.Fprintf(&b, "%s: %s\r\n", h[0], h[1])
 	}
+	if msg.Unsubscribe != "" {
+		fmt.Fprintf(&b, "List-Unsubscribe: <%s>\r\nList-Unsubscribe-Post: List-Unsubscribe=One-Click\r\n", msg.Unsubscribe)
+	}
 	b.WriteString("\r\n")
 	qp := quotedprintable.NewWriter(&b)
 	qp.Write([]byte(strings.ReplaceAll(strings.ReplaceAll(body, "\r\n", "\n"), "\n", "\r\n")))
@@ -175,7 +217,7 @@ type Log struct {
 	Logger *slog.Logger
 }
 
-func (l Log) Send(_ context.Context, to, subject, body string) error {
-	l.Logger.Info("mail (not sent: no -smtp)", "to", to, "subject", subject, "body", body)
+func (l Log) Send(_ context.Context, m Message) error {
+	l.Logger.Info("mail (not sent: no -smtp)", "to", m.To, "subject", m.Subject, "body", m.Body)
 	return nil
 }

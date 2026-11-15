@@ -14,6 +14,7 @@ import (
 	"cribbage/internal/auth"
 	"cribbage/internal/auth/passkeytest"
 	"cribbage/internal/client"
+	"cribbage/internal/mail"
 	"cribbage/internal/protocol/pb"
 	"cribbage/internal/store"
 )
@@ -23,8 +24,8 @@ type sentMail struct{ to, subject, body string }
 // fakeMailer delivers messages to a channel.
 type fakeMailer chan sentMail
 
-func (f fakeMailer) Send(_ context.Context, to, subject, body string) error {
-	f <- sentMail{to, subject, body}
+func (f fakeMailer) Send(_ context.Context, m mail.Message) error {
+	f <- sentMail{m.To, m.Subject, m.Body}
 	return nil
 }
 
@@ -243,14 +244,37 @@ func TestRegisterAndSignIn(t *testing.T) {
 	wantError(t, a.call(t, msg(&pb.RequestSignIn{Name: "alice"})), pb.ErrorCode_ERROR_CODE_ALREADY_AUTHENTICATED)
 }
 
-// An unknown name gets the same answer, and no email.
+// An unknown username gets the same answer, and no email.
 func TestSignInUnknownName(t *testing.T) {
 	_, addr, mails := startAccountServer(t, false)
 	c := anon(t, addr)
-	if st := c.call(t, msg(&pb.RequestSignIn{Name: "nobody@example.com"})).GetSignInStarted(); st == nil || st.Challenge == "" {
-		t.Fatal("no challenge for an unknown address")
+	if st := c.call(t, msg(&pb.RequestSignIn{Name: "nobody"})).GetSignInStarted(); st == nil || st.Challenge == "" {
+		t.Fatal("no challenge for an unknown username")
 	}
 	mails.none(t)
+}
+
+// An unknown address gets the same answer, and a code that creates an
+// account once a username is chosen.
+func TestNewAccountBySignIn(t *testing.T) {
+	_, addr, mails := startAccountServer(t, false)
+	signUp(t, addr, mails, "taken", "taken@example.com")
+	c := anon(t, addr)
+	st := c.call(t, msg(&pb.RequestSignIn{Name: "new@example.com"})).GetSignInStarted()
+	if st == nil {
+		t.Fatal("no challenge")
+	}
+	code, _ := mails.code(t, "new@example.com")
+	m := c.call(t, msg(&pb.EnterCode{Challenge: st.Challenge, Code: code}))
+	if m.GetNeedsUsername().GetEmail() != "new@example.com" {
+		t.Fatalf("code: %v", m)
+	}
+	wantError(t, c.call(t, msg(&pb.EnterCode{Challenge: st.Challenge, Code: code, Username: "taken"})), pb.ErrorCode_ERROR_CODE_USERNAME_TAKEN)
+	wantError(t, c.call(t, msg(&pb.EnterCode{Challenge: st.Challenge, Code: code, Username: "x"})), pb.ErrorCode_ERROR_CODE_BAD_REQUEST)
+	ok := c.call(t, msg(&pb.EnterCode{Challenge: st.Challenge, Code: code, Username: "newbie", Nickname: "Newbie"})).GetAuthOk()
+	if ok.GetUsername() != "newbie" || ok.GetNickname() != "Newbie" || ok.GetToken() == "" || ok.GetAccount().GetEmail() != "new@example.com" {
+		t.Fatalf("created: %v", ok)
+	}
 }
 
 func TestNoMail(t *testing.T) {

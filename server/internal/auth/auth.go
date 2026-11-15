@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
 	"regexp"
 	"strconv"
 	"strings"
@@ -33,6 +34,8 @@ var (
 	ErrMailLimit          = errors.New("too many emails for this account or address; try again later")
 	ErrTooManyCodes       = errors.New("too many wrong codes for this account; try again later, or use the link in the email")
 	ErrPasskeysDisabled   = errors.New("this server does not offer passkeys")
+	ErrEmailStopped       = errors.New("this address asked not to get email from this server; ask whoever runs it")
+	ErrTooManyAccounts    = errors.New("too many new accounts lately; try again later")
 )
 
 // credError is an ErrInvalidCredentials with its own message.
@@ -60,8 +63,12 @@ type Service struct {
 
 	// Mailer sends sign-in codes and links; nil means nobody can sign in
 	// by email. BaseURL is the web client's address, for the links.
-	Mailer    mail.Sender
-	BaseURL   string
+	Mailer  mail.Sender
+	BaseURL string
+	// StopURL, if set, is the server's https address that stops email when
+	// a mail app POSTs a stop token to it (StopEmail), for one-click
+	// unsubscribe; the links in emails go to the web client either way.
+	StopURL   string
 	VerifyTTL time.Duration // how long an address confirmation link works; 48 hours if zero
 	DeleteTTL time.Duration // how long an account deletion link works; an hour if zero
 
@@ -72,14 +79,20 @@ type Service struct {
 	// WebAuthn offers passkeys; nil disables them (see NewWebAuthn).
 	WebAuthn *webauthn.WebAuthn
 
+	// Log records emails sent and not sent (never their addresses); nil
+	// discards.
+	Log *slog.Logger
+
 	initOnce  sync.Once
 	mailLimit *ratelimit.Limiter // emails per user
-	rcptLimit *ratelimit.Limiter // emails per address
+	rcptLimit *ratelimit.Limiter // emails per mailbox (mail.Mailbox)
+	regLimit  *ratelimit.Limiter // registration emails, from everyone
 	badCodes  *ratelimit.Limiter // wrong codes per account
 
 	mu         sync.Mutex
 	challenges map[string]*challenge
 	tickets    map[int64]*ticket  // each user's current sign-in code
+	fresh      map[string]*ticket // each address's current new-account code, by lower-cased address
 	links      map[string]*ticket // by link token
 	swept      time.Time
 }
@@ -92,11 +105,16 @@ func (s *Service) init() {
 		// address, but nobody can use the server to flood an inbox.
 		s.mailLimit = ratelimit.New(10, 5*time.Minute)
 		s.rcptLimit = ratelimit.New(20, 5*time.Minute)
+		// Registering mails an address nobody has shown is theirs, so it is
+		// how a stranger could use the server to send email. However many
+		// addresses they come from, it sends 20, then one every 15 minutes.
+		s.regLimit = ratelimit.New(20, 15*time.Minute)
 		// Ten wrong codes per account, then one an hour: with 8-digit codes,
 		// guessing one would take about 10^8 / 2 / 24 / 365 = 5000 years.
 		s.badCodes = ratelimit.New(10, time.Hour)
 		s.challenges = map[string]*challenge{}
 		s.tickets = map[int64]*ticket{}
+		s.fresh = map[string]*ticket{}
 		s.links = map[string]*ticket{}
 	})
 }
@@ -151,7 +169,79 @@ func (s *Service) mailAllowed(userID int64, to string) bool {
 	if userID != 0 && !s.mailLimit.Take(strconv.FormatInt(userID, 10), now) {
 		return false
 	}
-	return s.rcptLimit.Take(strings.ToLower(to), now)
+	return s.rcptLimit.Take(mail.Mailbox(to), now)
+}
+
+func (s *Service) log() *slog.Logger {
+	if s.Log == nil {
+		return slog.New(slog.DiscardHandler)
+	}
+	return s.Log
+}
+
+// stopped reports ErrEmailStopped for an address that asked for no email,
+// logging the kind of email it would have been.
+func (s *Service) stopped(ctx context.Context, kind, to string) error {
+	stopped, err := s.Store.EmailStopped(ctx, to)
+	if err != nil {
+		return err
+	}
+	if stopped {
+		s.log().Info("email not sent: the address asked for none", "kind", kind)
+		return ErrEmailStopped
+	}
+	return nil
+}
+
+// send mails one message, of a kind named for the log, with the link that
+// stops email to its address, unless the address asked for none
+// (ErrEmailStopped).
+func (s *Service) send(ctx context.Context, kind, to, subject, body string) error {
+	if err := s.stopped(ctx, kind, to); err != nil {
+		return err
+	}
+	token, err := s.Store.StopToken(to)
+	if err != nil {
+		return err
+	}
+	m := mail.Message{To: to, Subject: subject, Body: body + `
+--
+Didn't ask for this email? To stop all email from Cribbage to this address, open:
+` + s.link("stop", token) + "\n"}
+	if s.StopURL != "" {
+		m.Unsubscribe = s.StopURL + "?t=" + token
+	}
+	start := time.Now()
+	if err := s.Mailer.Send(ctx, m); err != nil {
+		return err
+	}
+	s.log().Info("email sent", "kind", kind, "took", time.Since(start).Round(time.Millisecond))
+	return nil
+}
+
+// StopEmail takes a token from the stop link in an email and sends no
+// more email to its address. It deletes nothing: the address's accounts
+// stay, signed in where they are and with their passkeys, and whoever
+// runs the server can undo it (AllowEmail).
+func (s *Service) StopEmail(ctx context.Context, token string) error {
+	if err := s.Store.StopEmail(ctx, strings.TrimSpace(token)); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return ErrBadToken
+		}
+		return err
+	}
+	s.log().Info("email stopped for an address, by its link")
+	return nil
+}
+
+// AllowEmail undoes StopEmail for an address, for whoever runs the server,
+// and reports whether it was stopped.
+func (s *Service) AllowEmail(ctx context.Context, email string) (bool, error) {
+	email = strings.TrimSpace(email)
+	if !mail.ValidAddress(email) {
+		return false, fmt.Errorf("%w: %q is not an email address", ErrInvalidInput, email)
+	}
+	return s.Store.AllowEmail(ctx, email)
 }
 
 func (s *Service) sessionTTL() time.Duration {

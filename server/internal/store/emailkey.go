@@ -12,6 +12,8 @@ import (
 	"errors"
 	"strconv"
 	"strings"
+
+	"cribbage/internal/mail"
 )
 
 // Email addresses are the only personal data the database holds, so the
@@ -32,8 +34,10 @@ var ErrWrongEmailKey = errors.New("store: the email key does not match the one t
 const MinEmailKey = 32
 
 type emailCrypt struct {
-	aead cipher.AEAD
-	mac  []byte
+	aead    cipher.AEAD
+	mac     []byte
+	stopMac []byte // stopped mailboxes' keyed hashes
+	stopTag []byte // tags in stop links, so only the server can make them
 }
 
 func newEmailCrypt(key []byte) (*emailCrypt, error) {
@@ -48,6 +52,14 @@ func newEmailCrypt(key []byte) (*emailCrypt, error) {
 	if err != nil {
 		return nil, err
 	}
+	stopMac, err := hkdf.Key(sha256.New, key, nil, "cribbage email stop index", 32)
+	if err != nil {
+		return nil, err
+	}
+	stopTag, err := hkdf.Key(sha256.New, key, nil, "cribbage email stop tag", 32)
+	if err != nil {
+		return nil, err
+	}
 	block, err := aes.NewCipher(enc)
 	if err != nil {
 		return nil, err
@@ -56,7 +68,7 @@ func newEmailCrypt(key []byte) (*emailCrypt, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &emailCrypt{aead: aead, mac: mac}, nil
+	return &emailCrypt{aead: aead, mac: mac, stopMac: stopMac, stopTag: stopTag}, nil
 }
 
 // context binds a sealed value to what it belongs to, so it cannot be
@@ -91,6 +103,49 @@ func (e *emailCrypt) index(email string) string {
 	h := hmac.New(sha256.New, e.mac)
 	h.Write([]byte(strings.ToLower(email)))
 	return hex.EncodeToString(h.Sum(nil))
+}
+
+// Stop links. The token in the link in every email is the keyed hash
+// under which its mailbox is kept if someone opens it (stopIndex), and a
+// tag over that hash, so the server can check a token without storing it
+// and nobody else can make one. It never expires: an unsubscribe link
+// keeps working.
+
+const (
+	stopIndexBytes = 32
+	stopTagBytes   = 16
+)
+
+// stopIndex is the stored key of an address's mailbox (mail.Mailbox), so
+// stopping one address stops its +tag variants too.
+func (e *emailCrypt) stopIndex(email string) string {
+	h := hmac.New(sha256.New, e.stopMac)
+	h.Write([]byte(mail.Mailbox(email)))
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+func (e *emailCrypt) tag(index string) string {
+	h := hmac.New(sha256.New, e.stopTag)
+	h.Write([]byte(index))
+	return hex.EncodeToString(h.Sum(nil)[:stopTagBytes])
+}
+
+// stopToken is the token for the stop link in email to an address.
+func (e *emailCrypt) stopToken(email string) string {
+	idx := e.stopIndex(email)
+	return idx + e.tag(idx)
+}
+
+// checkStopToken returns the stop index of a token the server made.
+func (e *emailCrypt) checkStopToken(token string) (string, bool) {
+	if len(token) != 2*(stopIndexBytes+stopTagBytes) {
+		return "", false
+	}
+	if _, err := hex.DecodeString(token); err != nil {
+		return "", false
+	}
+	idx, tag := token[:2*stopIndexBytes], token[2*stopIndexBytes:]
+	return idx, hmac.Equal([]byte(tag), []byte(e.tag(idx)))
 }
 
 // keyCheck is sealed and stored once, so a different key is noticed at

@@ -6,12 +6,13 @@ namespace Cribbage;
 
 // The sign-in screen. There are no passwords: people sign in with a code
 // mailed to them, or by approving this computer from a device where they
-// are signed in (the web client, which can use passkeys). Creating an
-// account mails a code too; the account exists once it is entered. The
-// links in those emails open in a web browser, so here the code is the way.
+// are signed in (the web client, which can use passkeys). An address with
+// no account gets a code that creates one: once it is entered, the server
+// asks for a username (NeedsUsername). The links in those emails open in
+// a web browser, so here the code is the way.
 public partial class Main
 {
-    enum LoginStage { Start, Register, Code, Device }
+    enum LoginStage { Start, Code, Username, Device }
 
     LoginStage loginStage = LoginStage.Start;
     // Bumped on every change of stage, so a reply to a request made on an
@@ -24,16 +25,17 @@ public partial class Main
     uint codeLength = 8;
     double codeExpires;
     string codeName = ""; // the username or email it was asked for
-    Register? codeRegister; // set when the code creates an account
+    // A code that creates an account, waiting for its username.
+    string newCode = "", newEmail = "";
 
     // Waiting for another device to approve this one.
     DeviceCode? device;
     double deviceExpires;
     bool deviceExpired;
 
-    Control startPane = null!, registerPane = null!, codePane = null!, devicePane = null!;
-    LineEdit regUser = null!, regNick = null!, regEmail = null!, signInCode = null!;
-    Label codeIntro = null!, codeTimer = null!, deviceCodeLabel = null!, deviceUrl = null!, deviceStatus = null!, deviceTimer = null!;
+    Control startPane = null!, usernamePane = null!, codePane = null!, devicePane = null!;
+    LineEdit regUser = null!, regNick = null!, signInCode = null!;
+    Label usernameIntro = null!, codeIntro = null!, codeTimer = null!, deviceCodeLabel = null!, deviceUrl = null!, deviceStatus = null!, deviceTimer = null!;
     Button codeSubmit = null!, deviceOpen = null!, deviceRestart = null!;
     int lastTick = -1;
 
@@ -51,12 +53,12 @@ public partial class Main
         box.AddChild(Style.Label("♠ Cribbage", 32, Style.P.Accent));
 
         startPane = Pane(box);
-        registerPane = Pane(box);
         codePane = Pane(box);
+        usernamePane = Pane(box);
         devicePane = Pane(box);
         BuildStart((VBoxContainer)startPane);
-        BuildRegister((VBoxContainer)registerPane);
         BuildCode((VBoxContainer)codePane);
+        BuildUsername((VBoxContainer)usernamePane);
         BuildDevice((VBoxContainer)devicePane);
 
         loginError = Wrapped("", 14, Style.P.Theirs);
@@ -96,32 +98,30 @@ public partial class Main
 
     void BuildStart(VBoxContainer box)
     {
-        box.AddChild(Style.Label("Sign in or create an account.", 15, Style.P.Muted));
+        box.AddChild(Wrapped("Enter your email and we'll send you a code. New players too.", 15, Style.P.Muted));
         serverEdit = LoginField(box, "Server", "wss://host/rtc");
         serverEdit.Text = settings.Server;
         serverEdit.TextSubmitted += _ => ChangeServer();
         serverEdit.FocusExited += ChangeServer;
-        userEdit = LoginField(box, "Username or email");
+        userEdit = LoginField(box, "Email (or username)");
         userEdit.Text = settings.LastUser;
         userEdit.TextSubmitted += _ => RequestCode();
         Row(box, Style.Primary("Email me a code", RequestCode));
         box.AddChild(Style.Label("or", 14, Style.P.Muted));
         Row(box, Style.Button("Sign in with browser", StartDevice));
         box.AddChild(Wrapped("Approve this computer from a phone or computer where you're signed in to Cribbage.", 13, Style.P.Muted));
-        var reg = Row(box, Style.Label("New here?", 14, Style.P.Muted), Style.Button("Create account", () => SetLoginStage(LoginStage.Register)));
-        reg.Alignment = BoxContainer.AlignmentMode.Begin;
     }
 
-    void BuildRegister(VBoxContainer box)
+    void BuildUsername(VBoxContainer box)
     {
-        box.AddChild(Style.Label("Create an account", 20));
+        box.AddChild(Style.Label("Create your account", 20));
+        usernameIntro = Wrapped("", 14);
+        box.AddChild(usernameIntro);
         regUser = LoginField(box, "Username", "used to sign in and to invite you");
         regNick = LoginField(box, "Nickname (optional)", "shown to other players");
-        regEmail = LoginField(box, "Email", "we'll send a code to it");
         regUser.TextSubmitted += _ => regNick.GrabFocus();
-        regNick.TextSubmitted += _ => regEmail.GrabFocus();
-        regEmail.TextSubmitted += _ => Register();
-        Row(box, Style.Primary("Create account", Register), Style.Button("Back", () => SetLoginStage(LoginStage.Start)));
+        regNick.TextSubmitted += _ => CreateAccount();
+        Row(box, Style.Primary("Create account", CreateAccount), Style.Button("Back", () => SetLoginStage(LoginStage.Start)));
     }
 
     void BuildCode(VBoxContainer box)
@@ -177,7 +177,7 @@ public partial class Main
     void ResetLogin()
     {
         codeChallenge = "";
-        codeRegister = null;
+        newCode = newEmail = "";
         device = null;
         loginSeq++;
         loginStage = LoginStage.Start;
@@ -187,17 +187,15 @@ public partial class Main
     void RenderLogin()
     {
         startPane.Visible = loginStage == LoginStage.Start;
-        registerPane.Visible = loginStage == LoginStage.Register;
+        usernamePane.Visible = loginStage == LoginStage.Username;
         codePane.Visible = loginStage == LoginStage.Code;
         devicePane.Visible = loginStage == LoginStage.Device;
         // "an 8-digit code", "a 6-digit code"
         var digits = (codeLength is 8 or 11 or 18 ? "an " : "a ") + $"{codeLength}-digit code";
-        codeIntro.Text = codeRegister != null
-            ? $"We've emailed {digits} to {codeRegister.Email}. Enter it to finish creating your account."
-            : codeName.Contains('@')
-                ? $"If {codeName} belongs to an account, we've emailed it {digits}. Enter it here."
-                : $"If “{codeName}” has an account, we've emailed it {digits}. Enter it here.";
-        codeSubmit.Text = codeRegister != null ? "Create account" : "Sign in";
+        codeIntro.Text = codeName.Contains('@')
+            ? $"We've emailed {digits} to {codeName}. Enter it here. New to Cribbage? The same code creates your account."
+            : $"If “{codeName}” has an account, we've emailed it {digits}. Enter it here. (New here? Go back and enter your email address instead.)";
+        usernameIntro.Text = $"Your account will use {newEmail}. Choose a username: other players see your nickname.";
         deviceCodeLabel.Text = device?.Code ?? "";
         deviceUrl.Text = device?.Url ?? "";
         deviceUrl.Visible = deviceOpen.Visible = device is { Url: not "" } && !deviceExpired;
@@ -221,7 +219,7 @@ public partial class Main
             case LoginStage.Start:
                 userEdit.GrabFocus();
                 break;
-            case LoginStage.Register:
+            case LoginStage.Username:
                 regUser.GrabFocus();
                 break;
             case LoginStage.Code:
@@ -312,37 +310,6 @@ public partial class Main
             }
             settings.LastUser = name;
             codeName = name;
-            codeRegister = null;
-            CodeStarted(m.SignInStarted);
-            return true;
-        });
-    }
-
-    void Register()
-    {
-        var r = new Register { Username = regUser.Text.Trim(), Nickname = regNick.Text.Trim(), Email = regEmail.Text.Trim() };
-        if (r.Username == "")
-        {
-            LoginMessage("Choose a username.");
-            regUser.GrabFocus();
-            return;
-        }
-        if (r.Email == "")
-        {
-            LoginMessage("Enter your email address: we'll send a code to it.");
-            regEmail.GrabFocus();
-            return;
-        }
-        LoginMessage("Sending…", ok: true);
-        LoginRequest(new ClientMessage { Register = r }, m =>
-        {
-            if (m.SignInStarted == null)
-            {
-                LoginMessage(m.Error?.Message ?? "Something went wrong; try again.");
-                return true;
-            }
-            settings.LastUser = r.Username;
-            codeRegister = r;
             CodeStarted(m.SignInStarted);
             return true;
         });
@@ -359,9 +326,7 @@ public partial class Main
 
     void SendCodeAgain()
     {
-        var msg = codeRegister != null
-            ? new ClientMessage { Register = codeRegister }
-            : new ClientMessage { RequestSignIn = new RequestSignIn { Name = codeName } };
+        var msg = new ClientMessage { RequestSignIn = new RequestSignIn { Name = codeName } };
         LoginMessage("Sending…", ok: true);
         LoginRequest(msg, m =>
         {
@@ -372,7 +337,7 @@ public partial class Main
             }
             codeChallenge = m.SignInStarted.Challenge;
             codeExpires = Now + m.SignInStarted.ExpiresIn;
-            LoginMessage(codeRegister != null ? "We've sent a new code." : "We've sent the code again.", ok: true);
+            LoginMessage("We've sent the code again.", ok: true);
             lastTick = -1;
             LoginTick();
             signInCode.GrabFocus();
@@ -380,7 +345,7 @@ public partial class Main
         });
     }
 
-    void CodeBack() => SetLoginStage(codeRegister != null ? LoginStage.Register : LoginStage.Start);
+    void CodeBack() => SetLoginStage(LoginStage.Start);
 
     void EnterCode()
     {
@@ -393,6 +358,15 @@ public partial class Main
         LoginMessage("Checking…", ok: true);
         LoginRequest(new ClientMessage { EnterCode = new EnterCode { Challenge = codeChallenge, Code = code } }, m =>
         {
+            if (m.NeedsUsername != null)
+            {
+                // The code creates an account: it stays good until named.
+                newCode = code;
+                newEmail = m.NeedsUsername.Email;
+                regUser.Text = regNick.Text = "";
+                SetLoginStage(LoginStage.Username);
+                return true;
+            }
             var e = m.Error;
             if (e == null)
             {
@@ -401,16 +375,46 @@ public partial class Main
             if (e.Code == ErrorCode.NotFound)
             {
                 // Expired, or too many wrong codes: only a new one helps.
-                var registering = codeRegister != null;
                 CodeBack();
-                LoginMessage(registering
-                    ? "That code has expired or had too many wrong tries. Create the account again for a new one."
-                    : "That code has expired or had too many wrong tries. Ask for a new one.");
+                LoginMessage("That code has expired or had too many wrong tries. Ask for a new one.");
                 return true;
             }
             LoginMessage(e.Code == ErrorCode.InvalidCredentials ? "That code is wrong. Check it and try again." : e.Message);
             signInCode.SelectAll();
             signInCode.GrabFocus();
+            return true;
+        });
+    }
+
+    // CreateAccount sends the new-account code again with the chosen
+    // username; AuthOk signs in as usual.
+    void CreateAccount()
+    {
+        var username = regUser.Text.Trim();
+        if (username == "")
+        {
+            LoginMessage("Choose a username.");
+            regUser.GrabFocus();
+            return;
+        }
+        LoginMessage("Creating your account…", ok: true);
+        var enter = new EnterCode { Challenge = codeChallenge, Code = newCode, Username = username, Nickname = regNick.Text.Trim() };
+        LoginRequest(new ClientMessage { EnterCode = enter }, m =>
+        {
+            var e = m.Error;
+            if (e == null)
+            {
+                return false;
+            }
+            if (e.Code == ErrorCode.NotFound)
+            {
+                SetLoginStage(LoginStage.Start);
+                LoginMessage("That code has expired. Enter your email again for a new one.");
+                return true;
+            }
+            LoginMessage(e.Code == ErrorCode.UsernameTaken ? "That username is taken. Try another." : e.Message);
+            regUser.SelectAll();
+            regUser.GrabFocus();
             return true;
         });
     }

@@ -43,7 +43,7 @@
           <button id="logout" class="btn btn-ghost">Sign out</button>
         </div>
       </div>
-      <p class="menu-links"><a data-report href="https://github.com/Optimoos" target="_blank" rel="noopener noreferrer">Report a bug</a><span aria-hidden="true">·</span><a href="privacy.html" target="_blank" rel="noopener">Privacy</a></p>
+      <p class="menu-links"><a data-report href="https://github.com/Optimoos/claude-cribbage/issues" target="_blank" rel="noopener noreferrer">Report a bug</a><span aria-hidden="true">·</span><a href="privacy.html" target="_blank" rel="noopener">Privacy</a></p>
     </div>
   </div>
 </header>
@@ -55,31 +55,29 @@
   <section id="login" class="panel login" hidden>
     <div class="login-hero"><span class="suits"><b>♠</b><b class="r">♥</b><b>♣</b><b class="r">♦</b></span>
       <h2>Fifteen two, fifteen four…</h2>
-      <p class="muted">No password to remember: we email you a code to sign in.</p>
+      <p class="muted">No password to remember: enter your email and we'll send you a code. New players too.</p>
     </div>
     <form id="signin-form">
-      <label class="field">Username or email <input name="name" autocomplete="username" required maxlength="254" spellcheck="false" autocapitalize="off"></label>
+      <label class="field">Email (or username) <input name="name" autocomplete="username" required maxlength="254" spellcheck="false" autocapitalize="off"></label>
       <div class="row">
         <button class="btn btn-primary">Email me a code</button>
         <button type="button" id="passkey-signin" class="btn" hidden>Use a passkey</button>
       </div>
       <p id="login-error" class="error"></p>
-      <button type="button" id="to-register" class="link-btn">New here? Create an account</button>
     </form>
-    <p class="menu-links login-links"><a data-report href="https://github.com/Optimoos" target="_blank" rel="noopener noreferrer">Report a bug</a><span aria-hidden="true">·</span><a href="privacy.html" target="_blank" rel="noopener">Privacy</a></p>
+    <p class="menu-links login-links"><a data-report href="https://github.com/Optimoos/claude-cribbage/issues" target="_blank" rel="noopener noreferrer">Report a bug</a><span aria-hidden="true">·</span><a href="privacy.html" target="_blank" rel="noopener">Privacy</a></p>
   </section>
-  <section id="register-panel" class="panel login" hidden>
-    <h2>Create an account</h2>
-    <p class="muted">We'll email you a code to finish. Your address is only for signing in; nobody else sees it. Family members can share one.</p>
-    <form id="register-form">
+  <section id="username-panel" class="panel login" hidden>
+    <h2>Create your account</h2>
+    <p id="username-hint" class="muted"></p>
+    <form id="username-form">
       <label class="field">Username <input name="username" autocomplete="username" required minlength="3" maxlength="32" pattern="[A-Za-z0-9_\-]+" spellcheck="false" autocapitalize="off" title="3-32 letters, digits, _ or -"></label>
       <label class="field">Nickname <input name="nickname" maxlength="24" placeholder="what other players see (optional)"></label>
-      <label class="field">Email address <input name="email" type="email" autocomplete="email" required maxlength="254"></label>
       <div class="row">
-        <button class="btn btn-primary">Email me a code</button>
-        <button type="button" class="btn btn-ghost" data-to-login>Back</button>
+        <button class="btn btn-primary">Create account</button>
+        <button type="button" class="btn btn-ghost" data-to-login>Cancel</button>
       </div>
-      <p id="register-msg" class="error"></p>
+      <p id="username-msg" class="error"></p>
     </form>
   </section>
   <section id="code-panel" class="panel login" hidden>
@@ -94,6 +92,7 @@
       </div>
       <p id="signin-code-msg" class="error"></p>
     </form>
+    <p id="code-new" class="hint"></p>
   </section>
   <section id="link-panel" class="panel login" hidden>
     <h2>Finish signing in</h2>
@@ -112,6 +111,15 @@
       <button type="button" class="btn btn-ghost" data-to-login>Keep my account</button>
     </div>
     <p id="delete-panel-msg" class="error"></p>
+  </section>
+  <section id="stop-panel" class="panel login" hidden>
+    <h2>Stop emails to this address?</h2>
+    <p class="muted">Cribbage will send nothing more to the address this link was sent to: no sign-in codes, and no links. No account is deleted. Only whoever runs this server can undo it.</p>
+    <div class="row">
+      <button id="stop-confirm" class="btn btn-danger">Stop emails</button>
+      <button type="button" id="stop-cancel" class="btn btn-ghost">Cancel</button>
+    </div>
+    <p id="stop-msg" class="error"></p>
   </section>
 
 

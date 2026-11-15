@@ -88,7 +88,8 @@ func TestSMTPSend(t *testing.T) {
 	}
 	link := "https://crib.example/#reset=" + strings.Repeat("ab", 32)
 	body := "Hello Zoë,\n\nOpen this link:\n\n" + link + "\n"
-	if err := m.Send(context.Background(), "to@example.com", "Reset your password", body); err != nil {
+	stop := "https://api.crib.example/api/stop?t=" + strings.Repeat("cd", 48)
+	if err := m.Send(context.Background(), Message{To: "to@example.com", Subject: "Reset your password", Body: body, Unsubscribe: stop}); err != nil {
 		t.Fatal(err)
 	}
 	s := <-got
@@ -96,6 +97,7 @@ func TestSMTPSend(t *testing.T) {
 		"MAIL FROM:<crib@example.com>", "RCPT TO:<to@example.com>",
 		"From: \"Cribbage\" <crib@example.com>\r\n", "To: to@example.com\r\n", "Subject: Reset your password\r\n",
 		"Content-Transfer-Encoding: quoted-printable\r\n", "Zo=C3=AB",
+		"List-Unsubscribe: <" + stop + ">\r\n", "List-Unsubscribe-Post: List-Unsubscribe=One-Click\r\n",
 	} {
 		if !strings.Contains(s, want) {
 			t.Errorf("message lacks %q:\n%s", want, s)
@@ -112,13 +114,35 @@ func TestSMTPSend(t *testing.T) {
 
 func TestSMTPRefusesBadInput(t *testing.T) {
 	m := &SMTP{Addr: "127.0.0.1:1", From: "crib@example.com"}
-	if err := m.Send(context.Background(), "x@example.com\r\nBcc: y@example.com", "s", "b"); err == nil {
+	if err := m.Send(context.Background(), Message{To: "x@example.com\r\nBcc: y@example.com", Subject: "s", Body: "b"}); err == nil {
 		t.Error("sent to a header injection")
 	}
-	if _, err := m.message("x@example.com", "line\r\nBcc: y@example.com", "b"); err == nil {
+	if _, err := m.message(Message{To: "x@example.com", Subject: "line\r\nBcc: y@example.com", Body: "b"}); err == nil {
 		t.Error("subject with a line break accepted")
+	}
+	for _, u := range []string{"http://crib.example/stop", "https://crib.example/>\r\nBcc: y@example.com"} {
+		if _, err := m.message(Message{To: "x@example.com", Subject: "s", Body: "b", Unsubscribe: u}); err == nil {
+			t.Errorf("unsubscribe URL %q accepted", u)
+		}
 	}
 	if err := (&SMTP{Addr: "nohost", From: "crib@example.com"}).Check(); err == nil {
 		t.Error("address without a port accepted")
+	}
+}
+
+func TestMailbox(t *testing.T) {
+	for _, c := range [][2]string{
+		{"Foo@Example.com", "foo@example.com"},
+		{"foo+cribbage@example.com", "foo@example.com"},
+		{"foo+a+b@example.com", "foo@example.com"},
+		{"+foo@example.com", "+foo@example.com"}, // no name before the tag: leave it
+		{"f.o.o+x@gmail.com", "foo@gmail.com"},
+		{"F.oo@GoogleMail.com", "foo@gmail.com"},
+		{"f.oo@example.com", "f.oo@example.com"}, // dots matter elsewhere
+		{" foo@example.com ", "foo@example.com"},
+	} {
+		if got := Mailbox(c[0]); got != c[1] {
+			t.Errorf("Mailbox(%q) = %q, want %q", c[0], got, c[1])
+		}
 	}
 }

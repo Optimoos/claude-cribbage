@@ -107,7 +107,8 @@ A model trained with a different encoding version is rejected when loaded.
 
 ## Web client and WebRTC
 
-Browse to `http://localhost:8080`, register, and play against a bot or another
+Browse to `http://localhost:8080`, sign in with your email (a new address
+creates an account), and play against a bot or another
 browser tab. The server listens on localhost only unless given `-http :8080`. The page uses WebRTC. A WebSocket at `/rtc` exchanges the SDP
 offer, answer and ICE candidates. After that, all traffic uses one reliable,
 ordered data channel labelled `cribbage`.
@@ -219,8 +220,10 @@ limits and `-rtc-public-only`. The server stops cleanly on SIGINT or SIGTERM.
 **Accounts.** There are no passwords. Players sign in with a code emailed
 to them (or the link in the same email), with a passkey in the web
 client, or, in the desktop app, by approving the code it shows from a
-signed-in device ("Sign in with browser"). Registering takes an email
-address, which family members can share; sessions last 90 days from last
+signed-in device ("Sign in with browser"). There is no separate sign-up:
+an address with no account gets a code that creates one, named once the
+code is entered. Accounts need an email address, which family members
+can share; sessions last 90 days from last
 use. Email needs `-smtp`, `-mail-from` and `-public-url` (which passkeys
 are tied to). Without `-smtp`, emails, codes included, are written to the
 log, which is fine for testing on your own machine. Addresses are stored
@@ -232,8 +235,10 @@ by an emailed link. The admin recovers an account with
 `cribserver admin set-email <user> <address>` (which also signs it out
 everywhere and removes its passkeys) and deletes accounts with
 `cribserver admin delete-account <user>`, which reach the running server
-through `-admin-socket`. Headless bots sign in to bot accounts with
-`-bot-key-file`.
+through `-admin-socket`. Every email has a link that stops all email to
+its address (kept as a keyed hash; `cribserver admin allow-email` undoes
+it), and limits count an address's `+tag` variants as one. Headless bots
+sign in to bot accounts with `-bot-key-file`.
 
 **Versions, bugs and privacy.** Every client message carries a protocol
 version; the server refuses others and tells the client to update. Both

@@ -990,8 +990,10 @@ func (*ClientMessage_PasskeyAddFinish) isClientMessage_Body() {}
 
 func (*ClientMessage_PasskeyRemove) isClientMessage_Body() {}
 
-// Register starts creating an account: it mails a code (and link) to email,
-// and the reply is SignInStarted. The account is created, signed in, when
+// Register starts creating an account with a username chosen up front: it
+// mails a code (and link) to email, and the reply is SignInStarted. Newer
+// clients use RequestSignIn with the address instead, and choose the
+// username once the code is in (NeedsUsername). The account is created, signed in, when
 // the code is entered (EnterCode) or the link opened (UseSignInLink).
 // USERNAME_TAKEN if the username is in use, BAD_REQUEST if a field is
 // invalid. Several accounts may share an address.
@@ -1056,10 +1058,13 @@ func (x *Register) GetEmail() string {
 }
 
 // RequestSignIn mails a sign-in code and link to the account with this
-// username, or to every account with this email address. The reply is
-// SignInStarted whether or not any account matched, so it does not reveal
-// who has one. A code asked for again within its lifetime is sent again,
-// unchanged.
+// username, or to every account with this email address. Given an
+// address, the email also has a code that creates a new account with it
+// (the only code, if it has no account yet): entering that code is
+// answered with NeedsUsername. The reply is SignInStarted whether or not
+// any account matched, so it does not reveal who has one; a username with
+// no account gets no email. A code asked for again within its lifetime is
+// sent again, unchanged.
 type RequestSignIn struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"` // a username or an email address
@@ -1171,10 +1176,16 @@ func (x *SignInStarted) GetExpiresIn() uint32 {
 // RATE_LIMITED after too many wrong codes for the account. If an address
 // shared by several accounts was given, each account's code signs in that
 // account.
+//
+// A code that creates an account is answered with NeedsUsername, and stays
+// good: send it again with the username (and nickname) to create the
+// account and sign in. USERNAME_TAKEN or BAD_REQUEST leave it good too.
 type EnterCode struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Challenge     string                 `protobuf:"bytes,1,opt,name=challenge,proto3" json:"challenge,omitempty"`
 	Code          string                 `protobuf:"bytes,2,opt,name=code,proto3" json:"code,omitempty"`
+	Username      string                 `protobuf:"bytes,3,opt,name=username,proto3" json:"username,omitempty"` // for a code that creates an account
+	Nickname      string                 `protobuf:"bytes,4,opt,name=nickname,proto3" json:"nickname,omitempty"` // optional; the username if empty
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1223,13 +1234,30 @@ func (x *EnterCode) GetCode() string {
 	return ""
 }
 
+func (x *EnterCode) GetUsername() string {
+	if x != nil {
+		return x.Username
+	}
+	return ""
+}
+
+func (x *EnterCode) GetNickname() string {
+	if x != nil {
+		return x.Nickname
+	}
+	return ""
+}
+
 // UseSignInLink signs in with the token from an emailed link (the web
 // client's #signin=...). It signs in the device that opens the link, not
 // the one that asked for it. The reply is AuthOk, or NOT_FOUND if the link
-// has expired or was used.
+// has expired or was used. A link that creates an account is answered,
+// like its code, with NeedsUsername: send it again with the username.
 type UseSignInLink struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Token         string                 `protobuf:"bytes,1,opt,name=token,proto3" json:"token,omitempty"`
+	Username      string                 `protobuf:"bytes,2,opt,name=username,proto3" json:"username,omitempty"` // for a link that creates an account
+	Nickname      string                 `protobuf:"bytes,3,opt,name=nickname,proto3" json:"nickname,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1267,6 +1295,20 @@ func (*UseSignInLink) Descriptor() ([]byte, []int) {
 func (x *UseSignInLink) GetToken() string {
 	if x != nil {
 		return x.Token
+	}
+	return ""
+}
+
+func (x *UseSignInLink) GetUsername() string {
+	if x != nil {
+		return x.Username
+	}
+	return ""
+}
+
+func (x *UseSignInLink) GetNickname() string {
+	if x != nil {
+		return x.Nickname
 	}
 	return ""
 }
@@ -2776,6 +2818,7 @@ type ServerMessage struct {
 	//	*ServerMessage_DeviceCode
 	//	*ServerMessage_PasskeyOptions
 	//	*ServerMessage_DeviceApproved
+	//	*ServerMessage_NeedsUsername
 	//	*ServerMessage_Account
 	//	*ServerMessage_Pong
 	Body          isServerMessage_Body `protobuf_oneof:"body"`
@@ -2944,6 +2987,15 @@ func (x *ServerMessage) GetDeviceApproved() *DeviceApproved {
 	return nil
 }
 
+func (x *ServerMessage) GetNeedsUsername() *NeedsUsername {
+	if x != nil {
+		if x, ok := x.Body.(*ServerMessage_NeedsUsername); ok {
+			return x.NeedsUsername
+		}
+	}
+	return nil
+}
+
 func (x *ServerMessage) GetAccount() *Account {
 	if x != nil {
 		if x, ok := x.Body.(*ServerMessage_Account); ok {
@@ -3018,6 +3070,10 @@ type ServerMessage_DeviceApproved struct {
 	DeviceApproved *DeviceApproved `protobuf:"bytes,30,opt,name=device_approved,json=deviceApproved,proto3,oneof"`
 }
 
+type ServerMessage_NeedsUsername struct {
+	NeedsUsername *NeedsUsername `protobuf:"bytes,31,opt,name=needs_username,json=needsUsername,proto3,oneof"`
+}
+
 type ServerMessage_Account struct {
 	Account *Account `protobuf:"bytes,12,opt,name=account,proto3,oneof"` // the user's account settings, whenever they change
 }
@@ -3052,9 +3108,57 @@ func (*ServerMessage_PasskeyOptions) isServerMessage_Body() {}
 
 func (*ServerMessage_DeviceApproved) isServerMessage_Body() {}
 
+func (*ServerMessage_NeedsUsername) isServerMessage_Body() {}
+
 func (*ServerMessage_Account) isServerMessage_Body() {}
 
 func (*ServerMessage_Pong) isServerMessage_Body() {}
+
+// NeedsUsername answers a code or link that creates an account: send it
+// again with a username to create the account.
+type NeedsUsername struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Email         string                 `protobuf:"bytes,1,opt,name=email,proto3" json:"email,omitempty"` // the address the account gets
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *NeedsUsername) Reset() {
+	*x = NeedsUsername{}
+	mi := &file_cribbage_v1_cribbage_proto_msgTypes[39]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *NeedsUsername) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*NeedsUsername) ProtoMessage() {}
+
+func (x *NeedsUsername) ProtoReflect() protoreflect.Message {
+	mi := &file_cribbage_v1_cribbage_proto_msgTypes[39]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use NeedsUsername.ProtoReflect.Descriptor instead.
+func (*NeedsUsername) Descriptor() ([]byte, []int) {
+	return file_cribbage_v1_cribbage_proto_rawDescGZIP(), []int{39}
+}
+
+func (x *NeedsUsername) GetEmail() string {
+	if x != nil {
+		return x.Email
+	}
+	return ""
+}
 
 type Error struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -3067,7 +3171,7 @@ type Error struct {
 
 func (x *Error) Reset() {
 	*x = Error{}
-	mi := &file_cribbage_v1_cribbage_proto_msgTypes[39]
+	mi := &file_cribbage_v1_cribbage_proto_msgTypes[40]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3079,7 +3183,7 @@ func (x *Error) String() string {
 func (*Error) ProtoMessage() {}
 
 func (x *Error) ProtoReflect() protoreflect.Message {
-	mi := &file_cribbage_v1_cribbage_proto_msgTypes[39]
+	mi := &file_cribbage_v1_cribbage_proto_msgTypes[40]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3092,7 +3196,7 @@ func (x *Error) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Error.ProtoReflect.Descriptor instead.
 func (*Error) Descriptor() ([]byte, []int) {
-	return file_cribbage_v1_cribbage_proto_rawDescGZIP(), []int{39}
+	return file_cribbage_v1_cribbage_proto_rawDescGZIP(), []int{40}
 }
 
 func (x *Error) GetCode() ErrorCode {
@@ -3130,7 +3234,7 @@ type AuthOk struct {
 
 func (x *AuthOk) Reset() {
 	*x = AuthOk{}
-	mi := &file_cribbage_v1_cribbage_proto_msgTypes[40]
+	mi := &file_cribbage_v1_cribbage_proto_msgTypes[41]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3142,7 +3246,7 @@ func (x *AuthOk) String() string {
 func (*AuthOk) ProtoMessage() {}
 
 func (x *AuthOk) ProtoReflect() protoreflect.Message {
-	mi := &file_cribbage_v1_cribbage_proto_msgTypes[40]
+	mi := &file_cribbage_v1_cribbage_proto_msgTypes[41]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3155,7 +3259,7 @@ func (x *AuthOk) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AuthOk.ProtoReflect.Descriptor instead.
 func (*AuthOk) Descriptor() ([]byte, []int) {
-	return file_cribbage_v1_cribbage_proto_rawDescGZIP(), []int{40}
+	return file_cribbage_v1_cribbage_proto_rawDescGZIP(), []int{41}
 }
 
 func (x *AuthOk) GetUserId() int64 {
@@ -3204,7 +3308,7 @@ type AccountDeleted struct {
 
 func (x *AccountDeleted) Reset() {
 	*x = AccountDeleted{}
-	mi := &file_cribbage_v1_cribbage_proto_msgTypes[41]
+	mi := &file_cribbage_v1_cribbage_proto_msgTypes[42]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3216,7 +3320,7 @@ func (x *AccountDeleted) String() string {
 func (*AccountDeleted) ProtoMessage() {}
 
 func (x *AccountDeleted) ProtoReflect() protoreflect.Message {
-	mi := &file_cribbage_v1_cribbage_proto_msgTypes[41]
+	mi := &file_cribbage_v1_cribbage_proto_msgTypes[42]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3229,7 +3333,7 @@ func (x *AccountDeleted) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AccountDeleted.ProtoReflect.Descriptor instead.
 func (*AccountDeleted) Descriptor() ([]byte, []int) {
-	return file_cribbage_v1_cribbage_proto_rawDescGZIP(), []int{41}
+	return file_cribbage_v1_cribbage_proto_rawDescGZIP(), []int{42}
 }
 
 func (x *AccountDeleted) GetUsername() string {
@@ -3255,7 +3359,7 @@ type Account struct {
 
 func (x *Account) Reset() {
 	*x = Account{}
-	mi := &file_cribbage_v1_cribbage_proto_msgTypes[42]
+	mi := &file_cribbage_v1_cribbage_proto_msgTypes[43]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3267,7 +3371,7 @@ func (x *Account) String() string {
 func (*Account) ProtoMessage() {}
 
 func (x *Account) ProtoReflect() protoreflect.Message {
-	mi := &file_cribbage_v1_cribbage_proto_msgTypes[42]
+	mi := &file_cribbage_v1_cribbage_proto_msgTypes[43]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3280,7 +3384,7 @@ func (x *Account) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Account.ProtoReflect.Descriptor instead.
 func (*Account) Descriptor() ([]byte, []int) {
-	return file_cribbage_v1_cribbage_proto_rawDescGZIP(), []int{42}
+	return file_cribbage_v1_cribbage_proto_rawDescGZIP(), []int{43}
 }
 
 func (x *Account) GetEmail() string {
@@ -3330,7 +3434,7 @@ type Passkey struct {
 
 func (x *Passkey) Reset() {
 	*x = Passkey{}
-	mi := &file_cribbage_v1_cribbage_proto_msgTypes[43]
+	mi := &file_cribbage_v1_cribbage_proto_msgTypes[44]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3342,7 +3446,7 @@ func (x *Passkey) String() string {
 func (*Passkey) ProtoMessage() {}
 
 func (x *Passkey) ProtoReflect() protoreflect.Message {
-	mi := &file_cribbage_v1_cribbage_proto_msgTypes[43]
+	mi := &file_cribbage_v1_cribbage_proto_msgTypes[44]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3355,7 +3459,7 @@ func (x *Passkey) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Passkey.ProtoReflect.Descriptor instead.
 func (*Passkey) Descriptor() ([]byte, []int) {
-	return file_cribbage_v1_cribbage_proto_rawDescGZIP(), []int{43}
+	return file_cribbage_v1_cribbage_proto_rawDescGZIP(), []int{44}
 }
 
 func (x *Passkey) GetId() string {
@@ -3394,7 +3498,7 @@ type MatchQueued struct {
 
 func (x *MatchQueued) Reset() {
 	*x = MatchQueued{}
-	mi := &file_cribbage_v1_cribbage_proto_msgTypes[44]
+	mi := &file_cribbage_v1_cribbage_proto_msgTypes[45]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3406,7 +3510,7 @@ func (x *MatchQueued) String() string {
 func (*MatchQueued) ProtoMessage() {}
 
 func (x *MatchQueued) ProtoReflect() protoreflect.Message {
-	mi := &file_cribbage_v1_cribbage_proto_msgTypes[44]
+	mi := &file_cribbage_v1_cribbage_proto_msgTypes[45]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3419,7 +3523,7 @@ func (x *MatchQueued) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MatchQueued.ProtoReflect.Descriptor instead.
 func (*MatchQueued) Descriptor() ([]byte, []int) {
-	return file_cribbage_v1_cribbage_proto_rawDescGZIP(), []int{44}
+	return file_cribbage_v1_cribbage_proto_rawDescGZIP(), []int{45}
 }
 
 // Ack confirms a request that has no more specific reply (CancelMatch).
@@ -3431,7 +3535,7 @@ type Ack struct {
 
 func (x *Ack) Reset() {
 	*x = Ack{}
-	mi := &file_cribbage_v1_cribbage_proto_msgTypes[45]
+	mi := &file_cribbage_v1_cribbage_proto_msgTypes[46]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3443,7 +3547,7 @@ func (x *Ack) String() string {
 func (*Ack) ProtoMessage() {}
 
 func (x *Ack) ProtoReflect() protoreflect.Message {
-	mi := &file_cribbage_v1_cribbage_proto_msgTypes[45]
+	mi := &file_cribbage_v1_cribbage_proto_msgTypes[46]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3456,7 +3560,7 @@ func (x *Ack) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Ack.ProtoReflect.Descriptor instead.
 func (*Ack) Descriptor() ([]byte, []int) {
-	return file_cribbage_v1_cribbage_proto_rawDescGZIP(), []int{45}
+	return file_cribbage_v1_cribbage_proto_rawDescGZIP(), []int{46}
 }
 
 type Pong struct {
@@ -3469,7 +3573,7 @@ type Pong struct {
 
 func (x *Pong) Reset() {
 	*x = Pong{}
-	mi := &file_cribbage_v1_cribbage_proto_msgTypes[46]
+	mi := &file_cribbage_v1_cribbage_proto_msgTypes[47]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3481,7 +3585,7 @@ func (x *Pong) String() string {
 func (*Pong) ProtoMessage() {}
 
 func (x *Pong) ProtoReflect() protoreflect.Message {
-	mi := &file_cribbage_v1_cribbage_proto_msgTypes[46]
+	mi := &file_cribbage_v1_cribbage_proto_msgTypes[47]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3494,7 +3598,7 @@ func (x *Pong) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Pong.ProtoReflect.Descriptor instead.
 func (*Pong) Descriptor() ([]byte, []int) {
-	return file_cribbage_v1_cribbage_proto_rawDescGZIP(), []int{46}
+	return file_cribbage_v1_cribbage_proto_rawDescGZIP(), []int{47}
 }
 
 func (x *Pong) GetClientTime() uint64 {
@@ -3523,7 +3627,7 @@ type PlayerInfo struct {
 
 func (x *PlayerInfo) Reset() {
 	*x = PlayerInfo{}
-	mi := &file_cribbage_v1_cribbage_proto_msgTypes[47]
+	mi := &file_cribbage_v1_cribbage_proto_msgTypes[48]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3535,7 +3639,7 @@ func (x *PlayerInfo) String() string {
 func (*PlayerInfo) ProtoMessage() {}
 
 func (x *PlayerInfo) ProtoReflect() protoreflect.Message {
-	mi := &file_cribbage_v1_cribbage_proto_msgTypes[47]
+	mi := &file_cribbage_v1_cribbage_proto_msgTypes[48]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3548,7 +3652,7 @@ func (x *PlayerInfo) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PlayerInfo.ProtoReflect.Descriptor instead.
 func (*PlayerInfo) Descriptor() ([]byte, []int) {
-	return file_cribbage_v1_cribbage_proto_rawDescGZIP(), []int{47}
+	return file_cribbage_v1_cribbage_proto_rawDescGZIP(), []int{48}
 }
 
 func (x *PlayerInfo) GetUserId() int64 {
@@ -3596,7 +3700,7 @@ type GameSummary struct {
 
 func (x *GameSummary) Reset() {
 	*x = GameSummary{}
-	mi := &file_cribbage_v1_cribbage_proto_msgTypes[48]
+	mi := &file_cribbage_v1_cribbage_proto_msgTypes[49]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3608,7 +3712,7 @@ func (x *GameSummary) String() string {
 func (*GameSummary) ProtoMessage() {}
 
 func (x *GameSummary) ProtoReflect() protoreflect.Message {
-	mi := &file_cribbage_v1_cribbage_proto_msgTypes[48]
+	mi := &file_cribbage_v1_cribbage_proto_msgTypes[49]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3621,7 +3725,7 @@ func (x *GameSummary) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GameSummary.ProtoReflect.Descriptor instead.
 func (*GameSummary) Descriptor() ([]byte, []int) {
-	return file_cribbage_v1_cribbage_proto_rawDescGZIP(), []int{48}
+	return file_cribbage_v1_cribbage_proto_rawDescGZIP(), []int{49}
 }
 
 func (x *GameSummary) GetGameId() string {
@@ -3702,7 +3806,7 @@ type Invite struct {
 
 func (x *Invite) Reset() {
 	*x = Invite{}
-	mi := &file_cribbage_v1_cribbage_proto_msgTypes[49]
+	mi := &file_cribbage_v1_cribbage_proto_msgTypes[50]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3714,7 +3818,7 @@ func (x *Invite) String() string {
 func (*Invite) ProtoMessage() {}
 
 func (x *Invite) ProtoReflect() protoreflect.Message {
-	mi := &file_cribbage_v1_cribbage_proto_msgTypes[49]
+	mi := &file_cribbage_v1_cribbage_proto_msgTypes[50]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3727,7 +3831,7 @@ func (x *Invite) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Invite.ProtoReflect.Descriptor instead.
 func (*Invite) Descriptor() ([]byte, []int) {
-	return file_cribbage_v1_cribbage_proto_rawDescGZIP(), []int{49}
+	return file_cribbage_v1_cribbage_proto_rawDescGZIP(), []int{50}
 }
 
 func (x *Invite) GetInviteId() string {
@@ -3781,7 +3885,7 @@ type Invites struct {
 
 func (x *Invites) Reset() {
 	*x = Invites{}
-	mi := &file_cribbage_v1_cribbage_proto_msgTypes[50]
+	mi := &file_cribbage_v1_cribbage_proto_msgTypes[51]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3793,7 +3897,7 @@ func (x *Invites) String() string {
 func (*Invites) ProtoMessage() {}
 
 func (x *Invites) ProtoReflect() protoreflect.Message {
-	mi := &file_cribbage_v1_cribbage_proto_msgTypes[50]
+	mi := &file_cribbage_v1_cribbage_proto_msgTypes[51]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3806,7 +3910,7 @@ func (x *Invites) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Invites.ProtoReflect.Descriptor instead.
 func (*Invites) Descriptor() ([]byte, []int) {
-	return file_cribbage_v1_cribbage_proto_rawDescGZIP(), []int{50}
+	return file_cribbage_v1_cribbage_proto_rawDescGZIP(), []int{51}
 }
 
 func (x *Invites) GetInvites() []*Invite {
@@ -3831,7 +3935,7 @@ type History struct {
 
 func (x *History) Reset() {
 	*x = History{}
-	mi := &file_cribbage_v1_cribbage_proto_msgTypes[51]
+	mi := &file_cribbage_v1_cribbage_proto_msgTypes[52]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3843,7 +3947,7 @@ func (x *History) String() string {
 func (*History) ProtoMessage() {}
 
 func (x *History) ProtoReflect() protoreflect.Message {
-	mi := &file_cribbage_v1_cribbage_proto_msgTypes[51]
+	mi := &file_cribbage_v1_cribbage_proto_msgTypes[52]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3856,7 +3960,7 @@ func (x *History) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use History.ProtoReflect.Descriptor instead.
 func (*History) Descriptor() ([]byte, []int) {
-	return file_cribbage_v1_cribbage_proto_rawDescGZIP(), []int{51}
+	return file_cribbage_v1_cribbage_proto_rawDescGZIP(), []int{52}
 }
 
 func (x *History) GetGames() []*GameSummary {
@@ -3902,7 +4006,7 @@ type Record struct {
 
 func (x *Record) Reset() {
 	*x = Record{}
-	mi := &file_cribbage_v1_cribbage_proto_msgTypes[52]
+	mi := &file_cribbage_v1_cribbage_proto_msgTypes[53]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3914,7 +4018,7 @@ func (x *Record) String() string {
 func (*Record) ProtoMessage() {}
 
 func (x *Record) ProtoReflect() protoreflect.Message {
-	mi := &file_cribbage_v1_cribbage_proto_msgTypes[52]
+	mi := &file_cribbage_v1_cribbage_proto_msgTypes[53]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3927,7 +4031,7 @@ func (x *Record) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Record.ProtoReflect.Descriptor instead.
 func (*Record) Descriptor() ([]byte, []int) {
-	return file_cribbage_v1_cribbage_proto_rawDescGZIP(), []int{52}
+	return file_cribbage_v1_cribbage_proto_rawDescGZIP(), []int{53}
 }
 
 func (x *Record) GetOpponent() *PlayerInfo {
@@ -3986,7 +4090,7 @@ type GameList struct {
 
 func (x *GameList) Reset() {
 	*x = GameList{}
-	mi := &file_cribbage_v1_cribbage_proto_msgTypes[53]
+	mi := &file_cribbage_v1_cribbage_proto_msgTypes[54]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3998,7 +4102,7 @@ func (x *GameList) String() string {
 func (*GameList) ProtoMessage() {}
 
 func (x *GameList) ProtoReflect() protoreflect.Message {
-	mi := &file_cribbage_v1_cribbage_proto_msgTypes[53]
+	mi := &file_cribbage_v1_cribbage_proto_msgTypes[54]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4011,7 +4115,7 @@ func (x *GameList) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GameList.ProtoReflect.Descriptor instead.
 func (*GameList) Descriptor() ([]byte, []int) {
-	return file_cribbage_v1_cribbage_proto_rawDescGZIP(), []int{53}
+	return file_cribbage_v1_cribbage_proto_rawDescGZIP(), []int{54}
 }
 
 func (x *GameList) GetMine() []*GameSummary {
@@ -4062,7 +4166,7 @@ type GameUpdate struct {
 
 func (x *GameUpdate) Reset() {
 	*x = GameUpdate{}
-	mi := &file_cribbage_v1_cribbage_proto_msgTypes[54]
+	mi := &file_cribbage_v1_cribbage_proto_msgTypes[55]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4074,7 +4178,7 @@ func (x *GameUpdate) String() string {
 func (*GameUpdate) ProtoMessage() {}
 
 func (x *GameUpdate) ProtoReflect() protoreflect.Message {
-	mi := &file_cribbage_v1_cribbage_proto_msgTypes[54]
+	mi := &file_cribbage_v1_cribbage_proto_msgTypes[55]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4087,7 +4191,7 @@ func (x *GameUpdate) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GameUpdate.ProtoReflect.Descriptor instead.
 func (*GameUpdate) Descriptor() ([]byte, []int) {
-	return file_cribbage_v1_cribbage_proto_rawDescGZIP(), []int{54}
+	return file_cribbage_v1_cribbage_proto_rawDescGZIP(), []int{55}
 }
 
 func (x *GameUpdate) GetGame() *GameSummary {
@@ -4142,7 +4246,7 @@ type PlayedCard struct {
 
 func (x *PlayedCard) Reset() {
 	*x = PlayedCard{}
-	mi := &file_cribbage_v1_cribbage_proto_msgTypes[55]
+	mi := &file_cribbage_v1_cribbage_proto_msgTypes[56]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4154,7 +4258,7 @@ func (x *PlayedCard) String() string {
 func (*PlayedCard) ProtoMessage() {}
 
 func (x *PlayedCard) ProtoReflect() protoreflect.Message {
-	mi := &file_cribbage_v1_cribbage_proto_msgTypes[55]
+	mi := &file_cribbage_v1_cribbage_proto_msgTypes[56]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4167,7 +4271,7 @@ func (x *PlayedCard) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PlayedCard.ProtoReflect.Descriptor instead.
 func (*PlayedCard) Descriptor() ([]byte, []int) {
-	return file_cribbage_v1_cribbage_proto_rawDescGZIP(), []int{55}
+	return file_cribbage_v1_cribbage_proto_rawDescGZIP(), []int{56}
 }
 
 func (x *PlayedCard) GetCard() uint32 {
@@ -4210,7 +4314,7 @@ type Observation struct {
 
 func (x *Observation) Reset() {
 	*x = Observation{}
-	mi := &file_cribbage_v1_cribbage_proto_msgTypes[56]
+	mi := &file_cribbage_v1_cribbage_proto_msgTypes[57]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4222,7 +4326,7 @@ func (x *Observation) String() string {
 func (*Observation) ProtoMessage() {}
 
 func (x *Observation) ProtoReflect() protoreflect.Message {
-	mi := &file_cribbage_v1_cribbage_proto_msgTypes[56]
+	mi := &file_cribbage_v1_cribbage_proto_msgTypes[57]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4235,7 +4339,7 @@ func (x *Observation) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Observation.ProtoReflect.Descriptor instead.
 func (*Observation) Descriptor() ([]byte, []int) {
-	return file_cribbage_v1_cribbage_proto_rawDescGZIP(), []int{56}
+	return file_cribbage_v1_cribbage_proto_rawDescGZIP(), []int{57}
 }
 
 func (x *Observation) GetSeat() int32 {
@@ -4374,7 +4478,7 @@ type Action struct {
 
 func (x *Action) Reset() {
 	*x = Action{}
-	mi := &file_cribbage_v1_cribbage_proto_msgTypes[57]
+	mi := &file_cribbage_v1_cribbage_proto_msgTypes[58]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4386,7 +4490,7 @@ func (x *Action) String() string {
 func (*Action) ProtoMessage() {}
 
 func (x *Action) ProtoReflect() protoreflect.Message {
-	mi := &file_cribbage_v1_cribbage_proto_msgTypes[57]
+	mi := &file_cribbage_v1_cribbage_proto_msgTypes[58]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4399,7 +4503,7 @@ func (x *Action) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Action.ProtoReflect.Descriptor instead.
 func (*Action) Descriptor() ([]byte, []int) {
-	return file_cribbage_v1_cribbage_proto_rawDescGZIP(), []int{57}
+	return file_cribbage_v1_cribbage_proto_rawDescGZIP(), []int{58}
 }
 
 func (x *Action) GetKind() ActionKind {
@@ -4428,7 +4532,7 @@ type PegScore struct {
 
 func (x *PegScore) Reset() {
 	*x = PegScore{}
-	mi := &file_cribbage_v1_cribbage_proto_msgTypes[58]
+	mi := &file_cribbage_v1_cribbage_proto_msgTypes[59]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4440,7 +4544,7 @@ func (x *PegScore) String() string {
 func (*PegScore) ProtoMessage() {}
 
 func (x *PegScore) ProtoReflect() protoreflect.Message {
-	mi := &file_cribbage_v1_cribbage_proto_msgTypes[58]
+	mi := &file_cribbage_v1_cribbage_proto_msgTypes[59]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4453,7 +4557,7 @@ func (x *PegScore) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PegScore.ProtoReflect.Descriptor instead.
 func (*PegScore) Descriptor() ([]byte, []int) {
-	return file_cribbage_v1_cribbage_proto_rawDescGZIP(), []int{58}
+	return file_cribbage_v1_cribbage_proto_rawDescGZIP(), []int{59}
 }
 
 func (x *PegScore) GetFifteen() int32 {
@@ -4497,7 +4601,7 @@ type ShowScore struct {
 
 func (x *ShowScore) Reset() {
 	*x = ShowScore{}
-	mi := &file_cribbage_v1_cribbage_proto_msgTypes[59]
+	mi := &file_cribbage_v1_cribbage_proto_msgTypes[60]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4509,7 +4613,7 @@ func (x *ShowScore) String() string {
 func (*ShowScore) ProtoMessage() {}
 
 func (x *ShowScore) ProtoReflect() protoreflect.Message {
-	mi := &file_cribbage_v1_cribbage_proto_msgTypes[59]
+	mi := &file_cribbage_v1_cribbage_proto_msgTypes[60]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4522,7 +4626,7 @@ func (x *ShowScore) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ShowScore.ProtoReflect.Descriptor instead.
 func (*ShowScore) Descriptor() ([]byte, []int) {
-	return file_cribbage_v1_cribbage_proto_rawDescGZIP(), []int{59}
+	return file_cribbage_v1_cribbage_proto_rawDescGZIP(), []int{60}
 }
 
 func (x *ShowScore) GetFifteens() int32 {
@@ -4578,7 +4682,7 @@ type Event struct {
 
 func (x *Event) Reset() {
 	*x = Event{}
-	mi := &file_cribbage_v1_cribbage_proto_msgTypes[60]
+	mi := &file_cribbage_v1_cribbage_proto_msgTypes[61]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4590,7 +4694,7 @@ func (x *Event) String() string {
 func (*Event) ProtoMessage() {}
 
 func (x *Event) ProtoReflect() protoreflect.Message {
-	mi := &file_cribbage_v1_cribbage_proto_msgTypes[60]
+	mi := &file_cribbage_v1_cribbage_proto_msgTypes[61]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4603,7 +4707,7 @@ func (x *Event) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Event.ProtoReflect.Descriptor instead.
 func (*Event) Descriptor() ([]byte, []int) {
-	return file_cribbage_v1_cribbage_proto_rawDescGZIP(), []int{60}
+	return file_cribbage_v1_cribbage_proto_rawDescGZIP(), []int{61}
 }
 
 func (x *Event) GetKind() EventKind {
@@ -4738,12 +4842,16 @@ const file_cribbage_v1_cribbage_proto_rawDesc = "" +
 	"\vcode_length\x18\x02 \x01(\rR\n" +
 	"codeLength\x12\x1d\n" +
 	"\n" +
-	"expires_in\x18\x03 \x01(\rR\texpiresIn\"=\n" +
+	"expires_in\x18\x03 \x01(\rR\texpiresIn\"u\n" +
 	"\tEnterCode\x12\x1c\n" +
 	"\tchallenge\x18\x01 \x01(\tR\tchallenge\x12\x12\n" +
-	"\x04code\x18\x02 \x01(\tR\x04code\"%\n" +
+	"\x04code\x18\x02 \x01(\tR\x04code\x12\x1a\n" +
+	"\busername\x18\x03 \x01(\tR\busername\x12\x1a\n" +
+	"\bnickname\x18\x04 \x01(\tR\bnickname\"]\n" +
 	"\rUseSignInLink\x12\x14\n" +
-	"\x05token\x18\x01 \x01(\tR\x05token\"\x13\n" +
+	"\x05token\x18\x01 \x01(\tR\x05token\x12\x1a\n" +
+	"\busername\x18\x02 \x01(\tR\busername\x12\x1a\n" +
+	"\bnickname\x18\x03 \x01(\tR\bnickname\"\x13\n" +
 	"\x11StartDeviceSignIn\"o\n" +
 	"\n" +
 	"DeviceCode\x12\x1c\n" +
@@ -4814,7 +4922,7 @@ const file_cribbage_v1_cribbage_proto_rawDesc = "" +
 	"\busername\x18\x02 \x01(\tR\busernameJ\x04\b\x01\x10\x02\",\n" +
 	"\x14ConfirmDeleteAccount\x12\x14\n" +
 	"\x05token\x18\x01 \x01(\tR\x05token\"\x0f\n" +
-	"\rSignOutOthers\"\x82\a\n" +
+	"\rSignOutOthers\"\xc7\a\n" +
 	"\rServerMessage\x12\x1d\n" +
 	"\n" +
 	"request_id\x18\x01 \x01(\rR\trequestId\x12*\n" +
@@ -4833,10 +4941,13 @@ const file_cribbage_v1_cribbage_proto_rawDesc = "" +
 	"\vdevice_code\x18\x1c \x01(\v2\x17.cribbage.v1.DeviceCodeH\x00R\n" +
 	"deviceCode\x12F\n" +
 	"\x0fpasskey_options\x18\x1d \x01(\v2\x1b.cribbage.v1.PasskeyOptionsH\x00R\x0epasskeyOptions\x12F\n" +
-	"\x0fdevice_approved\x18\x1e \x01(\v2\x1b.cribbage.v1.DeviceApprovedH\x00R\x0edeviceApproved\x120\n" +
+	"\x0fdevice_approved\x18\x1e \x01(\v2\x1b.cribbage.v1.DeviceApprovedH\x00R\x0edeviceApproved\x12C\n" +
+	"\x0eneeds_username\x18\x1f \x01(\v2\x1a.cribbage.v1.NeedsUsernameH\x00R\rneedsUsername\x120\n" +
 	"\aaccount\x18\f \x01(\v2\x14.cribbage.v1.AccountH\x00R\aaccount\x12'\n" +
 	"\x04pong\x18( \x01(\v2\x11.cribbage.v1.PongH\x00R\x04pongB\x06\n" +
-	"\x04body\"f\n" +
+	"\x04body\"%\n" +
+	"\rNeedsUsername\x12\x14\n" +
+	"\x05email\x18\x01 \x01(\tR\x05email\"f\n" +
 	"\x05Error\x12*\n" +
 	"\x04code\x18\x01 \x01(\x0e2\x16.cribbage.v1.ErrorCodeR\x04code\x12\x18\n" +
 	"\amessage\x18\x02 \x01(\tR\amessage\x12\x17\n" +
@@ -5040,7 +5151,7 @@ func file_cribbage_v1_cribbage_proto_rawDescGZIP() []byte {
 }
 
 var file_cribbage_v1_cribbage_proto_enumTypes = make([]protoimpl.EnumInfo, 6)
-var file_cribbage_v1_cribbage_proto_msgTypes = make([]protoimpl.MessageInfo, 61)
+var file_cribbage_v1_cribbage_proto_msgTypes = make([]protoimpl.MessageInfo, 62)
 var file_cribbage_v1_cribbage_proto_goTypes = []any{
 	(ProtocolVersion)(0),         // 0: cribbage.v1.ProtocolVersion
 	(ErrorCode)(0),               // 1: cribbage.v1.ErrorCode
@@ -5087,28 +5198,29 @@ var file_cribbage_v1_cribbage_proto_goTypes = []any{
 	(*ConfirmDeleteAccount)(nil), // 42: cribbage.v1.ConfirmDeleteAccount
 	(*SignOutOthers)(nil),        // 43: cribbage.v1.SignOutOthers
 	(*ServerMessage)(nil),        // 44: cribbage.v1.ServerMessage
-	(*Error)(nil),                // 45: cribbage.v1.Error
-	(*AuthOk)(nil),               // 46: cribbage.v1.AuthOk
-	(*AccountDeleted)(nil),       // 47: cribbage.v1.AccountDeleted
-	(*Account)(nil),              // 48: cribbage.v1.Account
-	(*Passkey)(nil),              // 49: cribbage.v1.Passkey
-	(*MatchQueued)(nil),          // 50: cribbage.v1.MatchQueued
-	(*Ack)(nil),                  // 51: cribbage.v1.Ack
-	(*Pong)(nil),                 // 52: cribbage.v1.Pong
-	(*PlayerInfo)(nil),           // 53: cribbage.v1.PlayerInfo
-	(*GameSummary)(nil),          // 54: cribbage.v1.GameSummary
-	(*Invite)(nil),               // 55: cribbage.v1.Invite
-	(*Invites)(nil),              // 56: cribbage.v1.Invites
-	(*History)(nil),              // 57: cribbage.v1.History
-	(*Record)(nil),               // 58: cribbage.v1.Record
-	(*GameList)(nil),             // 59: cribbage.v1.GameList
-	(*GameUpdate)(nil),           // 60: cribbage.v1.GameUpdate
-	(*PlayedCard)(nil),           // 61: cribbage.v1.PlayedCard
-	(*Observation)(nil),          // 62: cribbage.v1.Observation
-	(*Action)(nil),               // 63: cribbage.v1.Action
-	(*PegScore)(nil),             // 64: cribbage.v1.PegScore
-	(*ShowScore)(nil),            // 65: cribbage.v1.ShowScore
-	(*Event)(nil),                // 66: cribbage.v1.Event
+	(*NeedsUsername)(nil),        // 45: cribbage.v1.NeedsUsername
+	(*Error)(nil),                // 46: cribbage.v1.Error
+	(*AuthOk)(nil),               // 47: cribbage.v1.AuthOk
+	(*AccountDeleted)(nil),       // 48: cribbage.v1.AccountDeleted
+	(*Account)(nil),              // 49: cribbage.v1.Account
+	(*Passkey)(nil),              // 50: cribbage.v1.Passkey
+	(*MatchQueued)(nil),          // 51: cribbage.v1.MatchQueued
+	(*Ack)(nil),                  // 52: cribbage.v1.Ack
+	(*Pong)(nil),                 // 53: cribbage.v1.Pong
+	(*PlayerInfo)(nil),           // 54: cribbage.v1.PlayerInfo
+	(*GameSummary)(nil),          // 55: cribbage.v1.GameSummary
+	(*Invite)(nil),               // 56: cribbage.v1.Invite
+	(*Invites)(nil),              // 57: cribbage.v1.Invites
+	(*History)(nil),              // 58: cribbage.v1.History
+	(*Record)(nil),               // 59: cribbage.v1.Record
+	(*GameList)(nil),             // 60: cribbage.v1.GameList
+	(*GameUpdate)(nil),           // 61: cribbage.v1.GameUpdate
+	(*PlayedCard)(nil),           // 62: cribbage.v1.PlayedCard
+	(*Observation)(nil),          // 63: cribbage.v1.Observation
+	(*Action)(nil),               // 64: cribbage.v1.Action
+	(*PegScore)(nil),             // 65: cribbage.v1.PegScore
+	(*ShowScore)(nil),            // 66: cribbage.v1.ShowScore
+	(*Event)(nil),                // 67: cribbage.v1.Event
 }
 var file_cribbage_v1_cribbage_proto_depIdxs = []int32{
 	7,  // 0: cribbage.v1.ClientMessage.register:type_name -> cribbage.v1.Register
@@ -5144,53 +5256,54 @@ var file_cribbage_v1_cribbage_proto_depIdxs = []int32{
 	19, // 30: cribbage.v1.ClientMessage.passkey_add_begin:type_name -> cribbage.v1.PasskeyAddBegin
 	20, // 31: cribbage.v1.ClientMessage.passkey_add_finish:type_name -> cribbage.v1.PasskeyAddFinish
 	21, // 32: cribbage.v1.ClientMessage.passkey_remove:type_name -> cribbage.v1.PasskeyRemove
-	63, // 33: cribbage.v1.Act.action:type_name -> cribbage.v1.Action
-	45, // 34: cribbage.v1.ServerMessage.error:type_name -> cribbage.v1.Error
-	46, // 35: cribbage.v1.ServerMessage.auth_ok:type_name -> cribbage.v1.AuthOk
-	59, // 36: cribbage.v1.ServerMessage.game_list:type_name -> cribbage.v1.GameList
-	60, // 37: cribbage.v1.ServerMessage.game_update:type_name -> cribbage.v1.GameUpdate
-	50, // 38: cribbage.v1.ServerMessage.match_queued:type_name -> cribbage.v1.MatchQueued
-	51, // 39: cribbage.v1.ServerMessage.ack:type_name -> cribbage.v1.Ack
-	56, // 40: cribbage.v1.ServerMessage.invites:type_name -> cribbage.v1.Invites
-	57, // 41: cribbage.v1.ServerMessage.history:type_name -> cribbage.v1.History
-	47, // 42: cribbage.v1.ServerMessage.account_deleted:type_name -> cribbage.v1.AccountDeleted
+	64, // 33: cribbage.v1.Act.action:type_name -> cribbage.v1.Action
+	46, // 34: cribbage.v1.ServerMessage.error:type_name -> cribbage.v1.Error
+	47, // 35: cribbage.v1.ServerMessage.auth_ok:type_name -> cribbage.v1.AuthOk
+	60, // 36: cribbage.v1.ServerMessage.game_list:type_name -> cribbage.v1.GameList
+	61, // 37: cribbage.v1.ServerMessage.game_update:type_name -> cribbage.v1.GameUpdate
+	51, // 38: cribbage.v1.ServerMessage.match_queued:type_name -> cribbage.v1.MatchQueued
+	52, // 39: cribbage.v1.ServerMessage.ack:type_name -> cribbage.v1.Ack
+	57, // 40: cribbage.v1.ServerMessage.invites:type_name -> cribbage.v1.Invites
+	58, // 41: cribbage.v1.ServerMessage.history:type_name -> cribbage.v1.History
+	48, // 42: cribbage.v1.ServerMessage.account_deleted:type_name -> cribbage.v1.AccountDeleted
 	9,  // 43: cribbage.v1.ServerMessage.sign_in_started:type_name -> cribbage.v1.SignInStarted
 	13, // 44: cribbage.v1.ServerMessage.device_code:type_name -> cribbage.v1.DeviceCode
 	22, // 45: cribbage.v1.ServerMessage.passkey_options:type_name -> cribbage.v1.PasskeyOptions
 	15, // 46: cribbage.v1.ServerMessage.device_approved:type_name -> cribbage.v1.DeviceApproved
-	48, // 47: cribbage.v1.ServerMessage.account:type_name -> cribbage.v1.Account
-	52, // 48: cribbage.v1.ServerMessage.pong:type_name -> cribbage.v1.Pong
-	1,  // 49: cribbage.v1.Error.code:type_name -> cribbage.v1.ErrorCode
-	48, // 50: cribbage.v1.AuthOk.account:type_name -> cribbage.v1.Account
-	49, // 51: cribbage.v1.Account.passkeys:type_name -> cribbage.v1.Passkey
-	2,  // 52: cribbage.v1.GameSummary.status:type_name -> cribbage.v1.GameStatus
-	53, // 53: cribbage.v1.GameSummary.players:type_name -> cribbage.v1.PlayerInfo
-	53, // 54: cribbage.v1.Invite.from:type_name -> cribbage.v1.PlayerInfo
-	53, // 55: cribbage.v1.Invite.to:type_name -> cribbage.v1.PlayerInfo
-	55, // 56: cribbage.v1.Invites.invites:type_name -> cribbage.v1.Invite
-	54, // 57: cribbage.v1.History.games:type_name -> cribbage.v1.GameSummary
-	58, // 58: cribbage.v1.History.records:type_name -> cribbage.v1.Record
-	58, // 59: cribbage.v1.History.total:type_name -> cribbage.v1.Record
-	53, // 60: cribbage.v1.Record.opponent:type_name -> cribbage.v1.PlayerInfo
-	54, // 61: cribbage.v1.GameList.mine:type_name -> cribbage.v1.GameSummary
-	54, // 62: cribbage.v1.GameList.open:type_name -> cribbage.v1.GameSummary
-	54, // 63: cribbage.v1.GameList.recent:type_name -> cribbage.v1.GameSummary
-	55, // 64: cribbage.v1.GameList.invites:type_name -> cribbage.v1.Invite
-	54, // 65: cribbage.v1.GameUpdate.game:type_name -> cribbage.v1.GameSummary
-	62, // 66: cribbage.v1.GameUpdate.observation:type_name -> cribbage.v1.Observation
-	66, // 67: cribbage.v1.GameUpdate.events:type_name -> cribbage.v1.Event
-	63, // 68: cribbage.v1.GameUpdate.legal:type_name -> cribbage.v1.Action
-	3,  // 69: cribbage.v1.Observation.phase:type_name -> cribbage.v1.Phase
-	61, // 70: cribbage.v1.Observation.played:type_name -> cribbage.v1.PlayedCard
-	4,  // 71: cribbage.v1.Action.kind:type_name -> cribbage.v1.ActionKind
-	5,  // 72: cribbage.v1.Event.kind:type_name -> cribbage.v1.EventKind
-	64, // 73: cribbage.v1.Event.peg:type_name -> cribbage.v1.PegScore
-	65, // 74: cribbage.v1.Event.show:type_name -> cribbage.v1.ShowScore
-	75, // [75:75] is the sub-list for method output_type
-	75, // [75:75] is the sub-list for method input_type
-	75, // [75:75] is the sub-list for extension type_name
-	75, // [75:75] is the sub-list for extension extendee
-	0,  // [0:75] is the sub-list for field type_name
+	45, // 47: cribbage.v1.ServerMessage.needs_username:type_name -> cribbage.v1.NeedsUsername
+	49, // 48: cribbage.v1.ServerMessage.account:type_name -> cribbage.v1.Account
+	53, // 49: cribbage.v1.ServerMessage.pong:type_name -> cribbage.v1.Pong
+	1,  // 50: cribbage.v1.Error.code:type_name -> cribbage.v1.ErrorCode
+	49, // 51: cribbage.v1.AuthOk.account:type_name -> cribbage.v1.Account
+	50, // 52: cribbage.v1.Account.passkeys:type_name -> cribbage.v1.Passkey
+	2,  // 53: cribbage.v1.GameSummary.status:type_name -> cribbage.v1.GameStatus
+	54, // 54: cribbage.v1.GameSummary.players:type_name -> cribbage.v1.PlayerInfo
+	54, // 55: cribbage.v1.Invite.from:type_name -> cribbage.v1.PlayerInfo
+	54, // 56: cribbage.v1.Invite.to:type_name -> cribbage.v1.PlayerInfo
+	56, // 57: cribbage.v1.Invites.invites:type_name -> cribbage.v1.Invite
+	55, // 58: cribbage.v1.History.games:type_name -> cribbage.v1.GameSummary
+	59, // 59: cribbage.v1.History.records:type_name -> cribbage.v1.Record
+	59, // 60: cribbage.v1.History.total:type_name -> cribbage.v1.Record
+	54, // 61: cribbage.v1.Record.opponent:type_name -> cribbage.v1.PlayerInfo
+	55, // 62: cribbage.v1.GameList.mine:type_name -> cribbage.v1.GameSummary
+	55, // 63: cribbage.v1.GameList.open:type_name -> cribbage.v1.GameSummary
+	55, // 64: cribbage.v1.GameList.recent:type_name -> cribbage.v1.GameSummary
+	56, // 65: cribbage.v1.GameList.invites:type_name -> cribbage.v1.Invite
+	55, // 66: cribbage.v1.GameUpdate.game:type_name -> cribbage.v1.GameSummary
+	63, // 67: cribbage.v1.GameUpdate.observation:type_name -> cribbage.v1.Observation
+	67, // 68: cribbage.v1.GameUpdate.events:type_name -> cribbage.v1.Event
+	64, // 69: cribbage.v1.GameUpdate.legal:type_name -> cribbage.v1.Action
+	3,  // 70: cribbage.v1.Observation.phase:type_name -> cribbage.v1.Phase
+	62, // 71: cribbage.v1.Observation.played:type_name -> cribbage.v1.PlayedCard
+	4,  // 72: cribbage.v1.Action.kind:type_name -> cribbage.v1.ActionKind
+	5,  // 73: cribbage.v1.Event.kind:type_name -> cribbage.v1.EventKind
+	65, // 74: cribbage.v1.Event.peg:type_name -> cribbage.v1.PegScore
+	66, // 75: cribbage.v1.Event.show:type_name -> cribbage.v1.ShowScore
+	76, // [76:76] is the sub-list for method output_type
+	76, // [76:76] is the sub-list for method input_type
+	76, // [76:76] is the sub-list for extension type_name
+	76, // [76:76] is the sub-list for extension extendee
+	0,  // [0:76] is the sub-list for field type_name
 }
 
 func init() { file_cribbage_v1_cribbage_proto_init() }
@@ -5247,18 +5360,19 @@ func file_cribbage_v1_cribbage_proto_init() {
 		(*ServerMessage_DeviceCode)(nil),
 		(*ServerMessage_PasskeyOptions)(nil),
 		(*ServerMessage_DeviceApproved)(nil),
+		(*ServerMessage_NeedsUsername)(nil),
 		(*ServerMessage_Account)(nil),
 		(*ServerMessage_Pong)(nil),
 	}
-	file_cribbage_v1_cribbage_proto_msgTypes[56].OneofWrappers = []any{}
-	file_cribbage_v1_cribbage_proto_msgTypes[60].OneofWrappers = []any{}
+	file_cribbage_v1_cribbage_proto_msgTypes[57].OneofWrappers = []any{}
+	file_cribbage_v1_cribbage_proto_msgTypes[61].OneofWrappers = []any{}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_cribbage_v1_cribbage_proto_rawDesc), len(file_cribbage_v1_cribbage_proto_rawDesc)),
 			NumEnums:      6,
-			NumMessages:   61,
+			NumMessages:   62,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

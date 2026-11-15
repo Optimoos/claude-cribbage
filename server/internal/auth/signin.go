@@ -34,10 +34,12 @@ const (
 	maxChallenges     = 100000 // live challenges, so they cannot exhaust memory
 )
 
-// ticket is one account's code and link, or a registration's.
+// ticket is one account's code and link, a registration's, or a new
+// account's (fresh), whose username is chosen once the code is in.
 type ticket struct {
-	userID  int64       // 0 for a registration
+	userID  int64       // 0 for a registration or a fresh account
 	reg     *store.User // the account a registration creates
+	fresh   bool        // creates an account at email, named when used
 	email   string      // where it was sent
 	code    string
 	link    string
@@ -92,6 +94,11 @@ func (s *Service) sweep(now time.Time) {
 			delete(s.tickets, id)
 		}
 	}
+	for k, t := range s.fresh {
+		if now.After(t.expires) || t.used {
+			delete(s.fresh, k)
+		}
+	}
 	for l, t := range s.links {
 		if now.After(t.expires) || t.used {
 			delete(s.links, l)
@@ -134,71 +141,134 @@ func (s *Service) NewChallenge() (string, error) {
 }
 
 // RequestSignIn mails a code and link to the account with this username,
-// or to each account with this email address, and attaches the codes to
-// the challenge. A name with no account is not an error. An account's
-// code is sent again, unchanged, if it is asked for while it still has
-// most of its time left, so a second email does not make the first one's
+// or to each account with this email address, attaches the codes to the
+// challenge, and reports how many accounts it found. Given an address, the
+// email also has a code that creates a new account with it (the only one,
+// if no account has it): see EnterCode. A name with no account is not an
+// error, and nor is an address that asked for no email or has had too
+// many. A code asked for again while it still has most of its time left is
+// sent again, unchanged, so a second email does not make the first one's
 // code wrong.
-func (s *Service) RequestSignIn(ctx context.Context, challengeID, name string) error {
+func (s *Service) RequestSignIn(ctx context.Context, challengeID, name string) (int, error) {
 	if !s.MailEnabled() {
-		return ErrMailDisabled
+		return 0, ErrMailDisabled
 	}
 	s.init()
-	users, err := s.usersNamed(ctx, strings.TrimSpace(name))
-	if err != nil || len(users) == 0 {
-		return err
+	name = strings.TrimSpace(name)
+	users, err := s.usersNamed(ctx, name)
+	if err != nil {
+		return 0, err
+	}
+	byEmail := strings.Contains(name, "@") && mail.ValidAddress(name)
+	if len(users) == 0 && !byEmail {
+		return 0, nil
+	}
+	to := name
+	if len(users) > 0 {
+		to = users[0].Email // as verified, not as typed
 	}
 	now := time.Now()
-	type entry struct {
-		u *store.User
-		t *ticket
-	}
-	var entries []entry
 	s.mu.Lock()
 	c := s.challenges[challengeID]
 	if c == nil {
 		s.mu.Unlock()
-		return nil // expired meanwhile
+		return len(users), nil // expired meanwhile
 	}
+	stale := func(t *ticket) bool {
+		return t == nil || t.used || t.expires.Sub(now) < s.codeTTL()*2/3
+	}
+	var mine []signInCode
 	for _, u := range users {
 		t := s.tickets[u.ID]
-		if t == nil || t.used || t.expires.Sub(now) < s.codeTTL()*2/3 || !strings.EqualFold(t.email, u.Email) {
+		if stale(t) || !strings.EqualFold(t.email, u.Email) {
 			t = s.newTicket(now, u.Email)
 			t.userID = u.ID
 			s.tickets[u.ID] = t
 		}
-		c.tickets = append(c.tickets, t)
-		entries = append(entries, entry{u, t})
+		mine = append(mine, signInCode{u, t})
+	}
+	var fresh *ticket
+	if byEmail {
+		key := strings.ToLower(name)
+		fresh = s.fresh[key]
+		if stale(fresh) {
+			fresh = s.newTicket(now, name)
+			fresh.fresh = true
+			s.fresh[key] = fresh
+		}
 	}
 	s.mu.Unlock()
 
-	// One email per address (accounts found by address all share it).
-	var errs []error
-	for len(entries) > 0 {
-		to := entries[0].u.Email
-		var mine, rest []entry
-		for _, e := range entries {
-			if strings.EqualFold(e.u.Email, to) {
-				mine = append(mine, e)
-			} else {
-				rest = append(rest, e)
-			}
+	var allowed []signInCode
+	for _, e := range mine {
+		if s.mailLimit.Take(strconv.FormatInt(e.u.ID, 10), now) {
+			allowed = append(allowed, e)
 		}
-		entries = rest
-		var allowed []entry
-		for _, e := range mine {
-			if s.mailLimit.Take(strconv.FormatInt(e.u.ID, 10), now) {
-				allowed = append(allowed, e)
-			}
+	}
+	switch {
+	case len(users) > 0 && len(allowed) == 0:
+		s.log().Info("email not sent: too many for this account lately", "kind", "sign-in code")
+		return len(users), nil
+	case len(users) == 0 && !s.regLimit.Take("", now):
+		// Only a new-account code: mail to an address nobody has shown is
+		// theirs, limited like registering.
+		s.log().Warn("email not sent: too many new accounts from everyone lately", "kind", "new-account code")
+		return 0, nil
+	}
+	if !s.rcptLimit.Take(mail.Mailbox(to), now) {
+		s.log().Info("email not sent: too many for this address lately", "kind", "sign-in code")
+		return len(users), nil
+	}
+
+	// The codes go on the challenge only once they are mailed.
+	s.mu.Lock()
+	if c := s.challenges[challengeID]; c != nil {
+		for _, e := range allowed {
+			c.tickets = append(c.tickets, e.t)
 		}
-		if len(allowed) == 0 || !s.rcptLimit.Take(strings.ToLower(to), now) {
-			continue
+		if fresh != nil {
+			c.tickets = append(c.tickets, fresh)
 		}
-		var subject, body string
-		if len(allowed) == 1 {
-			e := allowed[0]
-			subject = "Your Cribbage sign-in code: " + showCode(e.t.code)
-			body = fmt.Sprintf(`Hello %s,
+	}
+	s.mu.Unlock()
+
+	kind, subject, body := s.signInEmail(allowed, fresh)
+	if err := s.send(ctx, kind, to, subject, body); err != nil && !errors.Is(err, ErrEmailStopped) {
+		return len(users), fmt.Errorf("send %s: %w", kind, err)
+	}
+	return len(users), nil
+}
+
+type signInCode struct {
+	u *store.User
+	t *ticket
+}
+
+// signInEmail writes the email with accounts' sign-in codes and, if fresh
+// is set, the code that creates a new account.
+func (s *Service) signInEmail(codes []signInCode, fresh *ticket) (kind, subject, body string) {
+	ttl := duration(s.codeTTL())
+	var b strings.Builder
+	switch len(codes) {
+	case 0:
+		kind, subject = "new-account code", "Your Cribbage code: "+showCode(fresh.code)
+		fmt.Fprintf(&b, `Hello,
+
+Your code to create a cribbage account with this address is:
+
+    %s
+
+Enter it in the game within %s, then choose a username. Or, to do it with the web browser on this device, open this link:
+
+%s
+
+If you did not ask for an account, ignore this email and none will be made.
+`, showCode(fresh.code), ttl, s.link("signin", fresh.link))
+		return kind, subject, b.String()
+	case 1:
+		e := codes[0]
+		kind, subject = "sign-in code", "Your Cribbage sign-in code: "+showCode(e.t.code)
+		fmt.Fprintf(&b, `Hello %s,
 
 Your code to sign in to the cribbage account "%s" is:
 
@@ -207,24 +277,19 @@ Your code to sign in to the cribbage account "%s" is:
 Enter it in the game within %s. Or, to sign in with the web browser on this device, open this link:
 
 %s
-
-If you did not ask to sign in, ignore this email. Nobody can sign in without the code or the link.
-`, e.u.Nickname, e.u.Username, showCode(e.t.code), duration(s.codeTTL()), s.link("signin", e.t.link))
-		} else {
-			subject = "Your Cribbage sign-in codes"
-			var b strings.Builder
-			fmt.Fprintf(&b, "Hello,\n\nThis address belongs to %d cribbage accounts. Enter the code of the one you want within %s, or open its link to sign in with the web browser on this device.\n", len(allowed), duration(s.codeTTL()))
-			for _, e := range allowed {
-				fmt.Fprintf(&b, "\n%s (%s):\n    %s\n    %s\n", e.u.Username, e.u.Nickname, showCode(e.t.code), s.link("signin", e.t.link))
-			}
-			b.WriteString("\nIf you did not ask to sign in, ignore this email. Nobody can sign in without a code or a link.\n")
-			body = b.String()
-		}
-		if err := s.Mailer.Send(ctx, to, subject, body); err != nil {
-			errs = append(errs, fmt.Errorf("send sign-in code to user %d: %w", allowed[0].u.ID, err))
+`, e.u.Nickname, e.u.Username, showCode(e.t.code), ttl, s.link("signin", e.t.link))
+	default:
+		kind, subject = "sign-in code", "Your Cribbage sign-in codes"
+		fmt.Fprintf(&b, "Hello,\n\nThis address belongs to %d cribbage accounts. Enter the code of the one you want within %s, or open its link to sign in with the web browser on this device.\n", len(codes), ttl)
+		for _, e := range codes {
+			fmt.Fprintf(&b, "\n%s (%s):\n    %s\n    %s\n", e.u.Username, e.u.Nickname, showCode(e.t.code), s.link("signin", e.t.link))
 		}
 	}
-	return errors.Join(errs...)
+	if fresh != nil {
+		fmt.Fprintf(&b, "\nTo create another account with this address instead, enter this code and then choose a username:\n    %s\n    %s\n", showCode(fresh.code), s.link("signin", fresh.link))
+	}
+	b.WriteString("\nIf you did not ask to sign in, ignore this email. Nobody can sign in without a code or a link.\n")
+	return kind, subject, b.String()
 }
 
 // usersNamed finds the account with a username, or the accounts with an
@@ -281,10 +346,17 @@ func (s *Service) Register(ctx context.Context, username, nickname, email string
 	} else if !errors.Is(err, store.ErrNotFound) {
 		return "", err
 	}
+	if err := s.stopped(ctx, "registration code", email); err != nil {
+		return "", err
+	}
 	if !s.mailAllowed(0, email) {
 		return "", ErrMailLimit
 	}
 	now := time.Now()
+	if !s.regLimit.Take("", now) {
+		s.log().Warn("email not sent: too many registrations from everyone lately", "kind", "registration code")
+		return "", ErrTooManyAccounts
+	}
 	s.mu.Lock()
 	id, c, err := s.newChallenge(now)
 	if err != nil {
@@ -308,15 +380,26 @@ Enter it in the game within %s. Or, to finish with the web browser on this devic
 
 If you did not ask for an account, ignore this email and none will be made.
 `, nickname, username, showCode(t.code), duration(s.codeTTL()), s.link("signin", t.link))
-	if err := s.Mailer.Send(ctx, email, "Your Cribbage code: "+showCode(t.code), body); err != nil {
+	if err := s.send(ctx, "registration code", email, "Your Cribbage code: "+showCode(t.code), body); err != nil {
 		return "", fmt.Errorf("send registration code: %w", err)
 	}
 	return id, nil
 }
 
+// NeedsUsername is the error from a code or link that creates an account
+// (a fresh one) given without a username. The code or link stays good:
+// give it again with one.
+type NeedsUsername struct {
+	Email string // the address the account gets
+}
+
+func (e *NeedsUsername) Error() string { return "choose a username for the new account" }
+
 // EnterCode signs in (or finishes registering) with a challenge and the
-// code mailed for it.
-func (s *Service) EnterCode(ctx context.Context, challengeID, code string) (*Result, error) {
+// code mailed for it. A code that creates an account needs a username (and
+// optionally a nickname): without one it returns *NeedsUsername, and the
+// code stays good, as it does if the username is taken or invalid.
+func (s *Service) EnterCode(ctx context.Context, challengeID, code, username, nickname string) (*Result, error) {
 	s.init()
 	code = normalCode(code)
 	now := time.Now()
@@ -357,14 +440,61 @@ func (s *Service) EnterCode(ctx context.Context, challengeID, code string) (*Res
 		s.mu.Unlock()
 		return nil, ErrWrongCode
 	}
+	if match.fresh {
+		s.mu.Unlock()
+		return s.createFresh(ctx, match, username, nickname, func() { delete(s.challenges, challengeID) })
+	}
 	s.use(match)
 	delete(s.challenges, challengeID)
 	s.mu.Unlock()
 	return s.complete(ctx, match)
 }
 
-// UseSignInLink signs in (or finishes registering) with a link's token.
-func (s *Service) UseSignInLink(ctx context.Context, token string) (*Result, error) {
+// createFresh creates the account a fresh ticket was mailed for, named
+// username, and signs it in; done runs (holding mu) once it is created.
+// The ticket stays good if the name is missing, invalid or taken.
+func (s *Service) createFresh(ctx context.Context, t *ticket, username, nickname string, done func()) (*Result, error) {
+	username, nickname = strings.TrimSpace(username), strings.TrimSpace(nickname)
+	if username == "" {
+		return nil, &NeedsUsername{Email: t.email}
+	}
+	if nickname == "" {
+		nickname = username
+	}
+	if err := validUsername(username); err != nil {
+		return nil, err
+	}
+	if err := validNickname(nickname); err != nil {
+		return nil, err
+	}
+	// Take the ticket while creating, so it makes one account however many
+	// times it is sent at once, and give it back if that fails.
+	s.mu.Lock()
+	if t.used || time.Now().After(t.expires) {
+		s.mu.Unlock()
+		return nil, ErrBadToken
+	}
+	s.use(t)
+	s.mu.Unlock()
+	u := &store.User{Username: username, Nickname: nickname, Email: t.email, Created: time.Now()}
+	if err := s.Store.CreateUser(ctx, u); err != nil {
+		s.mu.Lock()
+		t.used = false
+		s.links[t.link] = t
+		s.mu.Unlock()
+		return nil, err
+	}
+	s.mu.Lock()
+	done()
+	s.mu.Unlock()
+	s.log().Info("account created", "user", u.ID)
+	return s.SignIn(ctx, u)
+}
+
+// UseSignInLink signs in (or finishes registering) with a link's token. A
+// link that creates an account needs a username, as its code does
+// (EnterCode).
+func (s *Service) UseSignInLink(ctx context.Context, token, username, nickname string) (*Result, error) {
 	if !validToken(token) {
 		return nil, ErrBadToken
 	}
@@ -374,6 +504,10 @@ func (s *Service) UseSignInLink(ctx context.Context, token string) (*Result, err
 	if t == nil || t.used || time.Now().After(t.expires) {
 		s.mu.Unlock()
 		return nil, ErrBadToken
+	}
+	if t.fresh {
+		s.mu.Unlock()
+		return s.createFresh(ctx, t, username, nickname, func() {})
 	}
 	s.use(t)
 	s.mu.Unlock()
@@ -386,6 +520,9 @@ func (s *Service) use(t *ticket) {
 	delete(s.links, t.link)
 	if t.userID != 0 && s.tickets[t.userID] == t {
 		delete(s.tickets, t.userID)
+	}
+	if t.fresh && s.fresh[strings.ToLower(t.email)] == t {
+		delete(s.fresh, strings.ToLower(t.email))
 	}
 }
 

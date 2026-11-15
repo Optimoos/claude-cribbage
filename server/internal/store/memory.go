@@ -3,6 +3,7 @@ package store
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"fmt"
 	"slices"
 	"sort"
@@ -24,6 +25,8 @@ type Memory struct {
 	invites  map[string]Invite
 	tokens   map[string]AccountToken
 	passkeys map[string]Passkey // by ID
+	stops    map[string]bool    // stopped mailboxes, by stop index
+	stopKey  *emailCrypt        // for stop links only: addresses are kept as they are
 }
 
 const maxRecent = 50
@@ -43,7 +46,51 @@ func NewMemory() *Memory {
 		invites:  map[string]Invite{},
 		tokens:   map[string]AccountToken{},
 		passkeys: map[string]Passkey{},
+		stops:    map[string]bool{},
+		stopKey:  randomEmailCrypt(),
 	}
+}
+
+// randomEmailCrypt has a key that lasts as long as the process, like
+// everything in a Memory.
+func randomEmailCrypt() *emailCrypt {
+	key := make([]byte, MinEmailKey)
+	if _, err := rand.Read(key); err != nil {
+		panic(err)
+	}
+	e, err := newEmailCrypt(key)
+	if err != nil {
+		panic(err)
+	}
+	return e
+}
+
+func (m *Memory) StopToken(email string) (string, error) { return m.stopKey.stopToken(email), nil }
+
+func (m *Memory) StopEmail(_ context.Context, token string) error {
+	idx, ok := m.stopKey.checkStopToken(token)
+	if !ok {
+		return ErrNotFound
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.stops[idx] = true
+	return nil
+}
+
+func (m *Memory) EmailStopped(_ context.Context, email string) (bool, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.stops[m.stopKey.stopIndex(email)], nil
+}
+
+func (m *Memory) AllowEmail(_ context.Context, email string) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	idx := m.stopKey.stopIndex(email)
+	was := m.stops[idx]
+	delete(m.stops, idx)
+	return was, nil
 }
 
 func (m *Memory) DeleteUser(_ context.Context, userID int64) error {

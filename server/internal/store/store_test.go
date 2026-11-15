@@ -756,3 +756,60 @@ func TestDeleteUser(t *testing.T) {
 		}
 	})
 }
+
+func TestEmailStops(t *testing.T) {
+	forEachStore(t, func(t *testing.T, s both) {
+		ctx := context.Background()
+		stopped := func(addr string) bool {
+			t.Helper()
+			ok, err := s.EmailStopped(ctx, addr)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return ok
+		}
+		token, err := s.StopToken("F.oo+crib@gmail.com")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if stopped("foo@gmail.com") {
+			t.Fatal("stopped before the link was used")
+		}
+		// Forged and altered tokens add nothing.
+		for _, bad := range []string{"", "zz", strings.Repeat("0", len(token)), token[:len(token)-1] + "0", token[:64] + strings.Repeat("a", 32)} {
+			if bad == token {
+				continue
+			}
+			if err := s.StopEmail(ctx, bad); !errors.Is(err, ErrNotFound) {
+				t.Errorf("StopEmail(%q) = %v, want ErrNotFound", bad, err)
+			}
+		}
+		if stopped("foo@gmail.com") {
+			t.Fatal("a forged token stopped email")
+		}
+		if err := s.StopEmail(ctx, token); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.StopEmail(ctx, token); err != nil { // the link opened twice
+			t.Fatal(err)
+		}
+		// The whole mailbox stops: +tags, dots and case at Gmail.
+		for _, a := range []string{"foo@gmail.com", "FOO+other@googlemail.com", "f.o.o@gmail.com"} {
+			if !stopped(a) {
+				t.Errorf("%s not stopped", a)
+			}
+		}
+		if stopped("foo@example.com") {
+			t.Error("another mailbox stopped")
+		}
+		if was, err := s.AllowEmail(ctx, "foo+x@gmail.com"); err != nil || !was {
+			t.Fatalf("AllowEmail = %v, %v; want true", was, err)
+		}
+		if stopped("foo@gmail.com") {
+			t.Error("still stopped after AllowEmail")
+		}
+		if was, _ := s.AllowEmail(ctx, "foo@gmail.com"); was {
+			t.Error("AllowEmail reported a stop that was undone")
+		}
+	})
+}

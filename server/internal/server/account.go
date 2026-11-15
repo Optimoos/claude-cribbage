@@ -77,9 +77,12 @@ func (s *Server) pushAccount(ctx context.Context, userID int64, r reply) error {
 
 // sendAccountError reports a failed account or sign-in request.
 func (s *Server) sendAccountError(c *Conn, id uint32, what string, err error) {
+	var needs *auth.NeedsUsername
 	switch {
+	case errors.As(err, &needs):
+		c.send(&pb.ServerMessage{RequestId: id, Body: &pb.ServerMessage_NeedsUsername{NeedsUsername: &pb.NeedsUsername{Email: needs.Email}}})
 	case errors.Is(err, auth.ErrInvalidInput), errors.Is(err, auth.ErrMailDisabled),
-		errors.Is(err, auth.ErrPasskeysDisabled):
+		errors.Is(err, auth.ErrPasskeysDisabled), errors.Is(err, auth.ErrEmailStopped):
 		c.sendError(id, pb.ErrorCode_ERROR_CODE_BAD_REQUEST, "", err.Error())
 	case errors.Is(err, store.ErrUsernameTaken):
 		c.sendError(id, pb.ErrorCode_ERROR_CODE_USERNAME_TAKEN, "", "that username is taken")
@@ -87,7 +90,7 @@ func (s *Server) sendAccountError(c *Conn, id uint32, what string, err error) {
 		c.sendError(id, pb.ErrorCode_ERROR_CODE_INVALID_CREDENTIALS, "", err.Error())
 	case errors.Is(err, auth.ErrBadToken), errors.Is(err, auth.ErrTooManyTries):
 		c.sendError(id, pb.ErrorCode_ERROR_CODE_NOT_FOUND, "", err.Error())
-	case errors.Is(err, auth.ErrMailLimit):
+	case errors.Is(err, auth.ErrMailLimit), errors.Is(err, auth.ErrTooManyAccounts):
 		c.sendError(id, pb.ErrorCode_ERROR_CODE_RATE_LIMITED, "", err.Error())
 	default:
 		s.log.Error(what, "err", err)
@@ -164,9 +167,12 @@ func (s *Server) requestSignIn(c *Conn, id uint32, name string) {
 	s.background(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()
-		if err := s.auth.RequestSignIn(ctx, challenge, name); err != nil {
+		// The log says whether the name matched an account, never the name.
+		found, err := s.auth.RequestSignIn(ctx, challenge, name)
+		if err != nil {
 			s.log.Error("sign-in email", "err", err)
 		}
+		s.log.Info("sign-in code asked for", "accounts", found)
 	})
 }
 
@@ -251,6 +257,16 @@ func (s *Server) closeUserConns(userID int64, keep *Conn) {
 // AdminSetEmail recovers an account: it sets the account's address, ends
 // its sessions, removes its passkeys and disconnects it. It returns the
 // address it replaced ("" if none).
+// AdminAllowEmail lets email go to an address again after its owner (or
+// someone with one of its emails) stopped it.
+func (s *Server) AdminAllowEmail(ctx context.Context, email string) (bool, error) {
+	was, err := s.auth.AllowEmail(ctx, email)
+	if err == nil && was {
+		s.log.Info("email allowed again by admin")
+	}
+	return was, err
+}
+
 func (s *Server) AdminSetEmail(ctx context.Context, username, email string) (old string, err error) {
 	u, err := s.auth.AdminSetEmail(ctx, username, email)
 	if errors.Is(err, store.ErrNotFound) {

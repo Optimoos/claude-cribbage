@@ -70,6 +70,9 @@ func (s *Service) SetEmail(ctx context.Context, u *store.User, email string) err
 		// Keeping the address: drop a pending change.
 		return s.Store.SetEmail(ctx, u.ID, u.Email)
 	}
+	if err := s.stopped(ctx, "address confirmation", email); err != nil {
+		return err
+	}
 	if u.Email == "" {
 		return s.mailVerify(ctx, u, email)
 	}
@@ -95,7 +98,7 @@ If that was you, open this link within %s to confirm, then open the link we send
 
 If it was not you, ignore this email and nothing will change. Someone may be using a device you left signed in: in the game, open Account and choose "Sign out other devices".
 `, u.Nickname, u.Username, email, duration(ttl), s.link("change", token))
-	if err := s.Mailer.Send(ctx, u.Email, "Confirm changing your Cribbage email address", body); err != nil {
+	if err := s.send(ctx, "address change", u.Email, "Confirm changing your Cribbage email address", body); err != nil {
 		return fmt.Errorf("send address change: %w", err)
 	}
 	return nil
@@ -123,7 +126,7 @@ To use this address for signing in to the cribbage account "%s", open this link 
 
 If you did not ask for this, ignore this email and nothing will change.
 `, u.Username, duration(ttl), s.link("verify", token))
-	if err := s.Mailer.Send(ctx, email, "Confirm your email for Cribbage", body); err != nil {
+	if err := s.send(ctx, "address confirmation", email, "Confirm your email for Cribbage", body); err != nil {
 		return fmt.Errorf("send verification: %w", err)
 	}
 	return nil
@@ -179,7 +182,7 @@ Sign-in codes for your cribbage account "%s" now go to another address (%s), so 
 If you did not do this, ask whoever runs the server to set your address back.
 `, u.Nickname, u.Username, maskAddress(to))
 	// Best effort: the change is made either way.
-	_ = s.Mailer.Send(ctx, u.Email, "Your Cribbage email address was changed", body)
+	_ = s.send(ctx, "address changed", u.Email, "Your Cribbage email address was changed", body)
 }
 
 // maskAddress shows enough of an address to recognize it: "j***@example.com".
@@ -224,7 +227,7 @@ Deleting ends your unfinished games (you resign them), removes your account, ema
 
 If it was not you, ignore this email and nothing will change. Someone may be using a device you left signed in: in the game, open Account and choose "Sign out other devices".
 `, u.Nickname, u.Username, duration(ttl), s.link("delete", token), store.DeletedNickname)
-	if err := s.Mailer.Send(ctx, u.Email, "Confirm deleting your Cribbage account", body); err != nil {
+	if err := s.send(ctx, "account deletion", u.Email, "Confirm deleting your Cribbage account", body); err != nil {
 		return false, fmt.Errorf("send delete link: %w", err)
 	}
 	return true, nil

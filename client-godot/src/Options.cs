@@ -19,7 +19,7 @@ namespace Cribbage;
 //	--pace S                      wait S seconds between moves
 //	--animate                     animate while autoplaying (rapid otherwise)
 //	--screenshot FILE --after S   save the window after S seconds and quit
-//	--show history|account|settings|register|code|device
+//	--show history|account|settings|username|code|device
 //	                              open that window or sign-in screen once
 //	                              possible, for screenshots (code asks for
 //	                              a code for --user)

@@ -488,7 +488,8 @@ const state = {
   pane: null,         // 'history' while the history replaces the table
   account: null,      // Account: email address, passkeys
   passkeysOffered: false, // the server offers passkeys (api/config)
-  signin: null,       // a sign-in waiting for its emailed code: { challenge, name, register }
+  signin: null,       // a sign-in waiting for its emailed code: { challenge, name }
+  newAccount: null,   // a code or link that creates an account, waiting for a username: { retry }
   history: null,      // {games, next, records, total} once fetched
   picked: new Set(),  // cards selected for discard
   logShown: { id: null, n: 0 },
@@ -566,18 +567,21 @@ function setReportLinks(url) {
 // out of the address bar and history.
 let emailLink = null;
 let pendingDevice = null; // a device code to approve once signed in
+let stopToken = null; // from the link in an email that stops email to its address
 (() => {
   const m = /^#(signin|verify|change|delete)=([0-9a-f]{64})$/.exec(location.hash);
   const d = /^#device=([A-Za-z]{4}-?[A-Za-z]{4})$/.exec(location.hash);
+  const s = /^#stop=([0-9a-f]{96})$/.exec(location.hash);
   if (location.hash) history.replaceState(null, '', location.pathname + location.search);
   if (m) emailLink = { kind: m[1], token: m[2] };
   if (d) pendingDevice = d[1].toUpperCase();
+  if (s) stopToken = s[1];
 })();
 
 // A link opened in a tab already showing the client changes only the
 // fragment; load the page afresh so it is read like any other.
 addEventListener('hashchange', () => {
-  if (/^#(signin|verify|change|delete|device)=/.test(location.hash)) location.reload();
+  if (/^#(signin|verify|change|delete|device|stop)=/.test(location.hash)) location.reload();
 });
 
 function onOpen() {
@@ -587,6 +591,7 @@ function onOpen() {
   $('offline').hidden = true;
   loadBots();
   state.me = null; // each connection authenticates afresh
+  if (stopToken) { show('stop-panel'); return; }
   if (emailLink && (emailLink.kind === 'verify' || emailLink.kind === 'change')) {
     const { kind, token } = emailLink;
     emailLink = null;
@@ -600,7 +605,7 @@ function onOpen() {
   if (emailLink && emailLink.kind === 'delete') { setMsg('delete-panel-msg', ''); show('delete-panel'); return; }
   const token = localStorage.getItem('token');
   if (token) conn.send({ resume: { token } });
-  else if ($('register-panel').hidden && $('code-panel').hidden) showLogin();
+  else if ($('code-panel').hidden && $('username-panel').hidden) showLogin();
 }
 
 // showLogin shows the sign-in page, saying why if a device is waiting.
@@ -635,7 +640,7 @@ function setStatus(text) {
 }
 
 function show(...ids) {
-  for (const id of ['login', 'lobby', 'register-panel', 'code-panel', 'link-panel', 'delete-panel']) $(id).hidden = !ids.includes(id);
+  for (const id of ['login', 'lobby', 'username-panel', 'code-panel', 'link-panel', 'delete-panel', 'stop-panel']) $(id).hidden = !ids.includes(id);
   if (!ids.includes('lobby')) { $('table').hidden = true; $('empty').hidden = true; }
 }
 
@@ -1208,12 +1213,16 @@ function formatCode(s) {
 }
 
 // startCode shows the code page for a sign-in the server has started.
-function startCode(started, name, register) {
-  state.signin = { challenge: started.challenge, name, register };
+function startCode(started, name) {
+  state.signin = { challenge: started.challenge, name };
   const mins = Math.round((started.expiresIn || 900) / 60);
-  $('code-hint').textContent = register
-    ? `We sent a code to ${register.email}. Enter it within ${mins} minutes to finish creating your account, or open the link in the email.`
-    : `If “${name}” has an account, we sent a code to its email address. Enter it within ${mins} minutes, or open the link in the email on this device.`;
+  const byEmail = name.includes('@');
+  $('code-hint').textContent = byEmail
+    ? `We sent a code to ${name}. Enter it here within ${mins} minutes, or open the link in the email on this device. New to Cribbage? The same code creates your account.`
+    : `If “${name}” has an account, we sent a code to its email address. Enter it here within ${mins} minutes, or open the link in the email on this device.`;
+  $('code-new').textContent = byEmail
+    ? 'No email after a few minutes? Check your spam folder.'
+    : 'No email after a few minutes? Check your spam folder. New here? Go back and enter your email address instead: a username only works once you have an account.';
   $('signin-code-form').reset();
   setMsg('signin-code-msg', '');
   show('code-panel');
@@ -1227,36 +1236,41 @@ $('signin-form').onsubmit = ev => {
   setMsg('login-error', '');
   const sent = request({ requestSignIn: { name } }, m => {
     if (m.error) { setMsg('login-error', m.error.message); return true; }
-    startCode(m.signInStarted, name, null);
+    startCode(m.signInStarted, name);
     return true;
   });
   if (!sent) setMsg('login-error', 'Not connected yet…');
 };
 
-$('to-register').onclick = () => {
-  const name = String($('signin-form').elements.name.value).trim();
-  const f = $('register-form');
-  f.reset();
-  if (name.includes('@')) f.elements.email.value = name;
-  else f.elements.username.value = name;
-  setMsg('register-msg', '');
-  show('register-panel');
-};
+// chooseUsername asks for the new account's name, once the server has
+// taken a code or link that creates one (NeedsUsername). retry sends the
+// code or link again with { username, nickname }.
+function chooseUsername(email, retry) {
+  state.newAccount = { retry };
+  $('username-hint').textContent = `Your account will use ${email}. Choose a username: other players see your nickname.`;
+  $('username-form').reset();
+  setMsg('username-msg', '');
+  show('username-panel');
+  $('username-form').elements.username.focus();
+}
 
-$('register-form').onsubmit = ev => {
+$('username-form').onsubmit = ev => {
   ev.preventDefault();
+  if (!state.newAccount) return showLogin();
   const f = new FormData(ev.target);
-  const reg = { username: String(f.get('username')).trim(), nickname: String(f.get('nickname')).trim(), email: String(f.get('email')).trim() };
-  setMsg('register-msg', 'Sending…', true);
-  const sent = request({ register: reg }, m => {
-    if (m.error) {
-      setMsg('register-msg', m.error.code === 'ERROR_CODE_USERNAME_TAKEN' ? 'That username is taken. Try another.' : m.error.message);
-      return true;
-    }
-    startCode(m.signInStarted, reg.username, reg);
+  const names = { username: String(f.get('username')).trim(), nickname: String(f.get('nickname')).trim() };
+  setMsg('username-msg', '');
+  const sent = state.newAccount.retry(names, m => {
+    if (!m.error) return false; // AuthOk signs in as usual
+    if (m.error.code === 'ERROR_CODE_USERNAME_TAKEN') setMsg('username-msg', 'That username is taken. Try another.');
+    else if (m.error.code === 'ERROR_CODE_NOT_FOUND') {
+      state.newAccount = null;
+      setMsg('login-error', 'That code has expired. Enter your email again for a new one.');
+      showLogin();
+    } else setMsg('username-msg', m.error.message);
     return true;
   });
-  if (!sent) setMsg('register-msg', 'Not connected yet…');
+  if (!sent) setMsg('username-msg', 'Not connected yet…');
 };
 
 $('signin-code-form').elements.code.addEventListener('input', e => {
@@ -1268,13 +1282,16 @@ $('signin-code-form').onsubmit = ev => {
   ev.preventDefault();
   if (!state.signin) return showLogin();
   const code = String(new FormData(ev.target).get('code'));
+  const { challenge } = state.signin;
   setMsg('signin-code-msg', '');
-  const sent = request({ enterCode: { challenge: state.signin.challenge, code } }, m => {
+  const sent = request({ enterCode: { challenge, code } }, m => {
+    if (m.needsUsername) {
+      chooseUsername(m.needsUsername.email, (names, onReply) => request({ enterCode: { challenge, code, ...names } }, onReply));
+      return true;
+    }
     if (!m.error) return false; // AuthOk signs in as usual
     if (m.error.code === 'ERROR_CODE_NOT_FOUND') {
       setMsg('signin-code-msg', 'That code has expired or had too many wrong tries. Choose “Send again” for a new one.');
-    } else if (m.error.code === 'ERROR_CODE_USERNAME_TAKEN') {
-      setMsg('signin-code-msg', 'Someone took that username meanwhile. Go back and choose another.');
     } else {
       setMsg('signin-code-msg', m.error.message);
     }
@@ -1286,10 +1303,9 @@ $('signin-code-form').onsubmit = ev => {
 $('code-resend').onclick = () => {
   const s = state.signin;
   if (!s) return showLogin();
-  const body = s.register ? { register: s.register } : { requestSignIn: { name: s.name } };
-  const sent = request(body, m => {
+  const sent = request({ requestSignIn: { name: s.name } }, m => {
     if (m.error) { setMsg('signin-code-msg', m.error.message); return true; }
-    startCode(m.signInStarted, s.name, s.register);
+    startCode(m.signInStarted, s.name);
     setMsg('signin-code-msg', 'Sent. Check your email (and its spam folder).', true);
     return true;
   });
@@ -1298,7 +1314,13 @@ $('code-resend').onclick = () => {
 
 $('link-confirm').onclick = () => {
   if (!emailLink || emailLink.kind !== 'signin') return showLogin();
-  const sent = request({ useSignInLink: { token: emailLink.token } }, m => {
+  const { token } = emailLink;
+  const sent = request({ useSignInLink: { token } }, m => {
+    if (m.needsUsername) {
+      emailLink = null;
+      chooseUsername(m.needsUsername.email, (names, onReply) => request({ useSignInLink: { token, ...names } }, onReply));
+      return true;
+    }
     if (!m.error) return false;
     emailLink = null;
     setMsg('login-error', m.error.code === 'ERROR_CODE_NOT_FOUND'
@@ -1313,6 +1335,7 @@ for (const b of document.querySelectorAll('[data-to-login]')) {
   b.onclick = () => {
     emailLink = null;
     state.signin = null;
+    state.newAccount = null;
     setMsg('login-error', '');
     showLogin();
     const token = localStorage.getItem('token');
@@ -2025,5 +2048,30 @@ if (narrow()) $('log-panel').open = false;
 applyPrefs();
 buildBoard();
 sideBoard.addEventListener('change', buildBoard);
+// The stop link in an email. It needs no connection: it posts its token
+// to the server over HTTPS, as mail apps' one-click unsubscribe does.
+$('stop-confirm').onclick = async () => {
+  $('stop-confirm').disabled = true;
+  setMsg('stop-msg', 'Stopping…', true);
+  try {
+    const r = await fetch(serverURL('api/stop?t=' + stopToken), { method: 'POST', signal: AbortSignal.timeout(10000) });
+    if (r.ok) {
+      setMsg('stop-msg', 'Done. Cribbage will not email this address again.', true);
+      $('stop-cancel').textContent = 'Close';
+      return;
+    }
+    setMsg('stop-msg', r.status === 404 ? 'That link is not one this server sent.' : 'That did not work. Try again in a few minutes.');
+  } catch (e) {
+    setMsg('stop-msg', 'Could not reach the server. Try again in a few minutes.');
+  }
+  $('stop-confirm').disabled = false;
+};
+$('stop-cancel').onclick = () => {
+  stopToken = null;
+  show();
+  if (conn.dc) onOpen();
+};
+
+if (stopToken) show('stop-panel');
 conn.connect();
 watchOffline();
