@@ -45,7 +45,9 @@ jobs:
           key: godot-4.7.2-mono-${{ hashFiles('client-godot/ci/install-godot.sh') }}
 
       - name: Install Godot and its export templates
-        run: echo "GODOT=$(client-godot/ci/install-godot.sh)" >> "$GITHUB_ENV"
+        run: |
+          godot=$(client-godot/ci/install-godot.sh)
+          echo "GODOT=$godot" >> "$GITHUB_ENV"
 
       - name: Version
         env:
