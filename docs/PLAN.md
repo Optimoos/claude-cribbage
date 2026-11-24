@@ -1587,6 +1587,7 @@ Games:
 |---|---|---|---|---|---|
 | `@400,is` | `@400` | 32k (stopped, H0 v +0.5) | 50.12 ± 0.28 | +0.15 ± 0.07 | +0.015 ± 0.006 |
 | policy `@400,is` | policy `@400` | 12k (stopped, H1 +0.3) | **51.07 ± 0.45** | +0.53 ± 0.12 | +0.053 ± 0.010 |
+| policy `@400,islambda=0.5` | policy `@400,is` | 28k (stopped, H1 +0.3) | **50.50 ± 0.27** | +0.16 ± 0.07 | +0.017 ± 0.006 |
 
 - Both runs were stopped by the sequential test, so their estimates read
   high (a test stopped at H1 stops on a run of good luck) and the ± is not
@@ -1595,7 +1596,11 @@ Games:
 - Alone the search gains little; on top of proposal 2 it gains a point.
   At my nodes the search averages over the worlds, so it is only as good
   as their weights, and proposal 2 is what makes them good.
-- PENDING: the blend (islambda), and guards for the combination.
+- The blend adds about half a point more: an opponent who is not
+  clairvoyant does not always find my worst case, and planning for the
+  plays they will actually make pays. (These runs used the policy without
+  the mix.) Smaller λ is not yet tried.
+- The whole stack is measured at fixed length in M41.
 
 ### M40: Discards conditioned on the opponent's hand (proposal 4)
 
