@@ -16,9 +16,9 @@ type Level struct {
 // bundle, paired against the heuristic: easy 51.0%, medium 54.8%, expert
 // 57.2%.
 var Levels = []Level{
-	{"expert-easy", bots.Info{Label: "Expert (easy)", Blurb: "A quick look ahead", Icon: "♝"}, Options{Effort: 10, NoKeepModel: true, NoPegModel: true, HeuristicDiscard: true}},
-	{"expert-medium", bots.Info{Label: "Expert (medium)", Blurb: "A lighter search", Icon: "♜"}, Options{Effort: 50, NoKeepModel: true, NoPegModel: true}},
-	{BotName, bots.Info{Label: "Expert", Blurb: "Searches and plays to win", Icon: "♛"}, Options{Effort: DefaultEffort}},
+	{"expert-easy", bots.Info{Label: "Medium", Blurb: "Looks a little ahead", Icon: "♝"}, Options{Effort: 10, NoKeepModel: true, NoPegModel: true, HeuristicDiscard: true}},
+	{"expert-medium", bots.Info{Label: "Hard", Blurb: "Searches the play", Icon: "♜"}, Options{Effort: 50, NoKeepModel: true, NoPegModel: true}},
+	{BotName, bots.Info{Label: "Very hard", Blurb: "Reads your hand and plays to win", Icon: "♛"}, Options{Effort: DefaultEffort}},
 }
 
 // Register makes every level of the bundle available by name. Bots created

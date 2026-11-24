@@ -4,13 +4,13 @@ package bots
 // on the table and in the game history.
 type Info struct {
 	Name  string `json:"name"`
-	Label string `json:"label"`           // e.g. "Expert (medium)"
+	Label string `json:"label"`           // e.g. "Hard"
 	Blurb string `json:"blurb,omitempty"` // one short line, e.g. "A lighter search"
 	Icon  string `json:"icon,omitempty"`  // a single character the web client shows beside the label
 }
 
 var infos = map[string]Info{
-	"random":     {Label: "Random bot", Blurb: "For practice", Icon: "⚄"},
+	"random":     {Label: "Easy", Blurb: "Plays at random, for practice", Icon: "⚄"},
 	"heuristic":  {Label: "Heuristic bot", Blurb: "Plays the expected value", Icon: "♞"},
 	"heuristic2": {Label: "Heuristic bot (strong)", Blurb: "Looks ahead and plays to win", Icon: "♘"},
 }

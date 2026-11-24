@@ -62,7 +62,7 @@ func main() {
 	backupDir := flag.String("backup-dir", "", "write database backups here (empty disables)")
 	backupEvery := flag.Duration("backup-every", 24*time.Hour, "how often to back up the database (also at startup, unless the last backup is more recent)")
 	backupKeep := flag.Int("backup-keep", 7, "how many backups to keep")
-	lobby := flag.String("lobby", "expert,expert-medium,heuristic2,expert-easy,nn,heuristic,random", "comma-separated bots the clients offer in the lobby, hardest first; bots this server lacks (nn and expert need -model and -expert) are left out, and the rest stay playable by name")
+	lobby := flag.String("lobby", "expert,expert-medium,expert-easy,random", "comma-separated bots the clients offer in the lobby, hardest first; bots this server lacks (nn and expert need -model and -expert) are left out, and the rest stay playable by name")
 	expertPath := flag.String("expert", "", "expert bundle to offer as the \"expert\" bots (e.g. models-expert/expert.bin)")
 	adminSocket := flag.String("admin-socket", "", "listen for admin commands (cribserver admin ...) on this Unix socket, e.g. "+defaultAdminSocket+" (empty disables)")
 	publicURL := flag.String("public-url", "", "the web client's public address, for links in emails and for passkeys (e.g. https://cribbage.example.com); defaults to http://localhost:<http port>")

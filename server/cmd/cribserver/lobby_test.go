@@ -14,7 +14,7 @@ func TestLobbyInfo(t *testing.T) {
 	for _, b := range l.Bots {
 		labels[b.Name] = b.Label
 	}
-	if labels["heuristic2"] != "Heuristic bot (strong)" || labels["random"] != "Random bot" {
+	if labels["heuristic2"] != "Heuristic bot (strong)" || labels["random"] != "Easy" {
 		t.Errorf("labels = %v", labels)
 	}
 	if l := lobbyInfo(""); l.Offer == nil || len(l.Offer) != 0 {

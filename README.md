@@ -22,7 +22,7 @@ go run ./cmd/botclient -user bob -games 1000      # matchmaking: run two of thes
 go run ./cmd/botclient -addr ws://localhost:8080/rtc -user carol -opponent random   # over WebRTC
 go run ./cmd/botclient -user dave -bot nn -model models-ft/best.bin -opponent heuristic   # NN plays as the client
 go run ./cmd/sim -a heuristic -b random -n 100000 # in-process bot matches
-go run ./cmd/gauntlet -bot heuristic2 -vs heuristic -n 200000   # heuristic2 (M17-M21, the lobby's "Heuristic bot (strong)") vs the frozen heuristic
+go run ./cmd/gauntlet -bot heuristic2 -vs heuristic -n 200000   # heuristic2 (M17-M21) vs the frozen heuristic
 go generate ./internal/bots                       # rebuild heuristic2's self-play statistics (h2stats.go)
 go run ./cmd/train run -out models                # train the neural network (Ctrl-C to stop)
 go run ./cmd/train eval -model models/best.bin -vs heuristic -n 10000
@@ -92,10 +92,11 @@ the player's own observation.
   over 20k games, level with the heuristic. It wins 99% against the random bot.
 
 **In the server.** `cribserver -model <file>` registers the network as the
-`nn` bot, which the web lobby then offers as "vs neural network bot".
+`nn` bot, playable by name and offered in the lobby if listed in `-lobby`.
 `GET /api/bots` lists the bots a server has, and `GET /api/lobby` tells the
-clients which to offer (the `-lobby` flag, hardest first) and how to label
-each, so the lineup changes without new client builds. Every game creates its own
+clients which to offer (the `-lobby` flag, hardest first; by default
+`expert,expert-medium,expert-easy,random`, labelled Very hard, Hard, Medium
+and Easy) and how to label each, so the lineup changes without new client builds. Every game creates its own
 `Agent`, and all of them share one read-only copy of the weights. A move
 takes well under a millisecond. Saved games against `nn` resume after a
 restart only if the server is started with a model again. Otherwise they

@@ -1271,7 +1271,7 @@ function onHistory(h) {
   renderHistory();
 }
 
-// botLabel names a bot as the lobby does ("Expert (medium)").
+// botLabel names a bot as the lobby does ("Hard").
 function botLabel(bot) {
   const b = botInfo.get(bot);
   return b ? b.label : 'Computer';
