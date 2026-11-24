@@ -30,6 +30,9 @@ type Options struct {
 	KeepEpsSet       bool    // otherwise DefaultKeepEps
 	NoSmallFixes     bool    // play as M14 did: no heels order, even odds when both peg out, no hidden suits, one crib
 	ISSearch         bool    // peg by information-set search rather than minimax per world (proposal 1)
+	NoPegPolicy      bool    // ignore the bundle's fitted pegging policy: the softmax on points at PegTemp
+	ISLambda         float64 // with ISSearch and a pegging policy: the weight of the opponent's best reply against the policy, when ISLambdaSet
+	ISLambdaSet      bool    // otherwise 1, best reply alone
 }
 
 // Oracle is how much of the opponent's hand a test oracle lets the pegging
@@ -64,6 +67,10 @@ func NewBotWith(b *Bundle, opt Options) *Bot {
 	bot.search.oracle = opt.Oracle
 	bot.search.noFixes = opt.NoSmallFixes
 	bot.search.isSearch = opt.ISSearch
+	bot.search.isLambda = 1
+	if opt.ISLambdaSet {
+		bot.search.isLambda = opt.ISLambda
+	}
 	if b.Discard != nil && !opt.HeuristicDiscard {
 		bot.discard = newDiscarder(b.Win, b.Discard)
 		bot.discard.noFixes = opt.NoSmallFixes
@@ -79,6 +86,9 @@ func NewBotWith(b *Bundle, opt Options) *Bot {
 		bot.search.pegTemp = opt.PegTemp
 		if bot.search.pegTemp == 0 {
 			bot.search.pegTemp = DefaultPegTemp
+		}
+		if b.PegPolicy != nil && !opt.NoPegPolicy && opt.PegTemp == 0 {
+			bot.search.pegPol = b.PegPolicy
 		}
 	}
 	return bot

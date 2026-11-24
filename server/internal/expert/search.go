@@ -48,6 +48,8 @@ type searcher struct {
 	// made with it (a softmax on immediate points at pegTemp, 0 to skip).
 	keep      *keepModel
 	pegTemp   float64
+	pegPol    *PegPolicy // the fitted pegging policy (proposal 2); replaces pegTemp's softmax
+	oppPlays  []oppPlay  // the opponent's plays this hand, prepared for pegPol
 	keepKey   keepCacheKey
 	keepGen   uint32 // keepVal[s] is valid for keepKey when keepStamp[s] == keepGen
 	keepStamp [numShapes]uint32
@@ -65,6 +67,10 @@ type searcher struct {
 	isSearch bool // information-set search (issearch.go) instead of minimax per world
 	isVals   []float64
 	isb      *isBuf // borrowed from isBufs during an information-set search
+	// isLambda blends the opponent's nodes: λ·(their best reply) +
+	// (1-λ)·(their play by pegPol), 1 for best reply alone.
+	isLambda float64
+	isAvail  [14]int8 // each rank's count unseen from the public view at the root
 }
 
 // endCache holds end-of-hand values by (opponent show, my pegging, their
@@ -179,6 +185,7 @@ func (s *searcher) choose(o *engine.Observation, legal []engine.Action) engine.A
 		}
 		var v, total float64
 		if s.isSearch {
+			s.isAvail = publicAvail(o)
 			s.isVals = append(s.isVals[:0], make([]float64, len(worlds))...)
 			s.isRoot(root, idx, worlds, worldCribs, s.isVals)
 			for i := range worlds {
@@ -490,8 +497,11 @@ type keepCacheKey struct {
 // reweight multiplies each world's weight by the opponent model, dropping
 // worlds the model rules out (unless it rules out all of them).
 func (s *searcher) reweight(o *engine.Observation, oppPlayed []engine.Card, worlds []world) []world {
-	if s.keep == nil && s.pegTemp <= 0 {
+	if s.keep == nil && s.pegTemp <= 0 && s.pegPol == nil {
 		return worlds
+	}
+	if s.pegPol != nil {
+		s.prepPegPolicy(o)
 	}
 	useKeep := s.keep != nil && s.oracle == NoOracle // an oracle has weighted its worlds already
 	key := keepCacheKey{starter: o.Starter, oppSide: 1}
@@ -512,7 +522,9 @@ func (s *searcher) reweight(o *engine.Observation, oppPlayed []engine.Card, worl
 		if useKeep {
 			w.weight *= s.keepWeight(key, oppPlayed, w)
 		}
-		if s.pegTemp > 0 {
+		if s.pegPol != nil {
+			w.weight *= s.pegPolicyLik(w)
+		} else if s.pegTemp > 0 {
 			w.weight *= s.pegLikelihood(o, w)
 		}
 		if w.weight > 0 {

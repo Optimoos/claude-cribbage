@@ -1,6 +1,9 @@
 package expert
 
-import "sync"
+import (
+	"math"
+	"sync"
+)
 
 // Information-set pegging search (proposal 1). The minimax search values
 // each world on its own, as if I would know the opponent's hand on every
@@ -98,20 +101,26 @@ func (s *searcher) isRoot(root pegNode, i int, worlds []world, worldCribs bool, 
 		n.turn = 0
 		nodes[k], idx[k] = n, int32(k)
 	}
-	s.isPlay(isGroup{nodes, idx}, i, nil, worlds, worldCribs, vals)
+	s.isPlay(isGroup{nodes, idx}, i, nil, worlds, worldCribs, s.isAvail, vals)
 }
 
 // isPlay has the player to move in every node of g play the card at
 // position i of their hand (or at pos[k] in node k, when pos is not nil;
-// it must be legal in each), then values the results into vals (by
-// position in g).
-func (s *searcher) isPlay(g isGroup, i int, pos []int, worlds []world, worldCribs bool, vals []float64) {
+// it must be legal in each, and the same rank in all), then values the
+// results into vals (by position in g). avail is each rank's count unseen
+// from the public view before the play.
+func (s *searcher) isPlay(g isGroup, i int, pos []int, worlds []world, worldCribs bool, avail [14]int8, vals []float64) {
 	b := s.isb
 	m := b.mark()
 	defer b.release(m)
 	n := len(g.nodes)
 	after := b.node(n)
 	gid := b.int(n)
+	if pos == nil {
+		avail[g.nodes[0].hand[g.nodes[0].turn][i]]--
+	} else {
+		avail[g.nodes[0].hand[g.nodes[0].turn][pos[0]]]--
+	}
 	var keys [8]pegNode
 	var codes [8]int
 	var sizes [8]int
@@ -166,7 +175,7 @@ func (s *searcher) isPlay(g isGroup, i int, pos []int, worlds []world, worldCrib
 			}
 		default:
 			if ng == 1 {
-				s.isNode(isGroup{after, g.idx}, worlds, worldCribs, vals)
+				s.isNode(isGroup{after, g.idx}, worlds, worldCribs, avail, vals)
 				continue
 			}
 			gm := b.mark()
@@ -179,7 +188,7 @@ func (s *searcher) isPlay(g isGroup, i int, pos []int, worlds []world, worldCrib
 					at++
 				}
 			}
-			s.isNode(sub, worlds, worldCribs, sv)
+			s.isNode(sub, worlds, worldCribs, avail, sv)
 			at = 0
 			for k := range gid {
 				if gid[k] == j {
@@ -193,7 +202,7 @@ func (s *searcher) isPlay(g isGroup, i int, pos []int, worlds []world, worldCrib
 }
 
 // isNode values a group whose public state has a player to move.
-func (s *searcher) isNode(g isGroup, worlds []world, worldCribs bool, vals []float64) {
+func (s *searcher) isNode(g isGroup, worlds []world, worldCribs bool, avail [14]int8, vals []float64) {
 	b := s.isb
 	m := b.mark()
 	defer b.release(m)
@@ -210,7 +219,7 @@ func (s *searcher) isNode(g isGroup, worlds []world, worldCribs bool, vals []flo
 				continue
 			}
 			tried |= 1 << r
-			s.isPlay(g, i, nil, worlds, worldCribs, tmp)
+			s.isPlay(g, i, nil, worlds, worldCribs, avail, tmp)
 			var v float64
 			for k := range tmp {
 				v += worlds[g.idx[k]].weight * tmp[k]
@@ -222,13 +231,29 @@ func (s *searcher) isNode(g isGroup, worlds []world, worldCribs bool, vals []flo
 		}
 		return
 	}
-	// The opponent: in each world, the card worst for me.
+	// The opponent: in each world, the card worst for me, blended with
+	// the policy's expectation when isLambda < 1.
 	for k := range vals {
 		vals[k] = 2
 	}
 	sub := isGroup{b.node(n), b.i32(n)}
 	at, pos := b.int(n), b.int(n)
 	sv := b.f64(n)
+	blend := s.isLambda < 1 && s.pegPol != nil
+	var pub [14]float64
+	var ev, z []float64
+	if blend {
+		ev, z = b.f64(n), b.f64(n)
+		clear(ev)
+		clear(z)
+		var f [nPegFeat]float64
+		for r := int8(1); r <= 13; r++ {
+			if n0.count+rankValue(r) <= 31 {
+				pegPublic(n0.seq[:n0.seqN], n0.count, &avail, r, &f)
+				pub[r] = s.pegPol.dot(&f)
+			}
+		}
+	}
 	for r := int8(1); r <= 13; r++ {
 		if n0.count+rankValue(r) > 31 {
 			continue
@@ -247,9 +272,30 @@ func (s *searcher) isNode(g isGroup, worlds []world, worldCribs bool, vals []flo
 		if m == 0 {
 			continue
 		}
-		s.isPlay(isGroup{sub.nodes[:m], sub.idx[:m]}, 0, pos[:m], worlds, worldCribs, sv[:m])
+		s.isPlay(isGroup{sub.nodes[:m], sub.idx[:m]}, 0, pos[:m], worlds, worldCribs, avail, sv[:m])
 		for j := 0; j < m; j++ {
 			vals[at[j]] = min(vals[at[j]], sv[j])
+		}
+		if blend {
+			var f [nPegFeat]float64
+			var rest [4]int8
+			if n0.count == 0 {
+				f[pfLead] = 1
+			}
+			for j := 0; j < m; j++ {
+				nd := &sub.nodes[j]
+				nr := copy(rest[:], nd.hand[1][:pos[j]])
+				nr += copy(rest[nr:], nd.hand[1][pos[j]+1:nd.n[1]])
+				pegPrivate(rest[:nr], n0.count, r, &f)
+				e := math.Exp(pub[r] + s.pegPol.dotPrivate(&f))
+				ev[at[j]] += e * sv[j]
+				z[at[j]] += e
+			}
+		}
+	}
+	if blend {
+		for k := range vals {
+			vals[k] = s.isLambda*vals[k] + (1-s.isLambda)*ev[k]/z[k]
 		}
 	}
 }

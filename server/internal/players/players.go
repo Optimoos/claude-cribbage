@@ -18,7 +18,9 @@ import (
 // nokeep, nopeg, heurdiscard, pegtemp=X, is (information-set pegging
 // search), nofixes (M14's play, without
 // proposal 6's small fixes), noexact (ignore the exact keep
-// table), keepeps=X (its mix with the softmax), and the test oracles oracle=six
+// table), keepeps=X (its mix with the softmax), nopegpol (ignore the fitted
+// pegging policy), islambda=X (information-set search, the opponent's best
+// reply at weight X against the policy), and the test oracles oracle=six
 // and oracle=hand (see expert.Oracle).
 //
 //	models-expert/expert.bin@100,nokeep
@@ -44,6 +46,11 @@ func Resolve(spec string) (func(worker int) bots.Bot, error) {
 				opt.NoSmallFixes = true
 			case o == "noexact":
 				opt.NoExactKeep = true
+			case o == "nopegpol":
+				opt.NoPegPolicy = true
+			case strings.HasPrefix(o, "islambda="):
+				opt.ISLambda, err = strconv.ParseFloat(o[len("islambda="):], 64)
+				opt.ISLambdaSet, opt.ISSearch = true, true
 			case strings.HasPrefix(o, "keepeps="):
 				opt.KeepEps, err = strconv.ParseFloat(o[len("keepeps="):], 64)
 				opt.KeepEpsSet = true

@@ -66,6 +66,9 @@ type Bundle struct {
 	// option order (see BuildExactKeep). The opponent model then mixes it
 	// with the softmax.
 	KeepExact *[2][]float32
+	// PegPolicy, when not nil, is the fitted opponent pegging policy
+	// (proposal 2) that weights worlds by the plays made in them.
+	PegPolicy *PegPolicy
 
 	keepMu sync.Mutex
 	keeps  map[float64]*keepModel // by mixing weight; -1 for the softmax alone
@@ -122,6 +125,14 @@ func (b *Bundle) tables() ([]Table, [][]float32) {
 	if b.KeepExact != nil {
 		ts = append(ts, Table{"keepx", keepxShape()})
 		data = append(data, append(append([]float32{}, b.KeepExact[0]...), b.KeepExact[1]...))
+	}
+	if p := b.PegPolicy; p != nil {
+		ts = append(ts, Table{"pegpol", pegPolicyShape})
+		v := make([]float32, nPegFeat)
+		for i, w := range p {
+			v[i] = float32(w)
+		}
+		data = append(data, v)
 	}
 	return ts, data
 }
@@ -184,7 +195,7 @@ func ReadBundle(r io.Reader) (*Bundle, error) {
 	if b.Meta.Version != BundleVersion {
 		return nil, fmt.Errorf("expert: bundle version %d; this build reads version %d", b.Meta.Version, BundleVersion)
 	}
-	want := map[string][]int{"win": winShape, "crib": cribShape, "peg": pegShape, "show": showShape, "keep": keepShape, "keepx": keepxShape()}
+	want := map[string][]int{"win": winShape, "crib": cribShape, "peg": pegShape, "show": showShape, "keep": keepShape, "keepx": keepxShape(), "pegpol": pegPolicyShape}
 	d := new(DiscardTables)
 	nd := 0
 	buf := make([]byte, 4)
@@ -220,6 +231,11 @@ func ReadBundle(r io.Reader) (*Bundle, error) {
 		case "keepx":
 			n := len(vals) / 2
 			b.KeepExact = &[2][]float32{vals[:n], vals[n:]}
+		case "pegpol":
+			b.PegPolicy = new(PegPolicy)
+			for i, v := range vals {
+				b.PegPolicy[i] = float64(v)
+			}
 		}
 	}
 	if b.Win == nil {
