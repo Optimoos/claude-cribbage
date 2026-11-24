@@ -1731,11 +1731,21 @@ Guards, 20k games each, coupled against `runs/base-m14`:
   to `models-expert/expert-v1.bin`, beside the reference `expert.bin`) as
   the server's `-expert` bundle, and set the lobby list (`-lobby` on the
   `lobby-bots` branch) to `expert,expert-medium,expert-easy,random`.
+- `lobby-bots` (off main) now has that lineup as the `-lobby` default and
+  the labels Very hard, Hard, Medium and Easy (random). Merging it and this
+  stack into main conflicts only in `levels.go`: keep `lobby-bots`' `Info`
+  field and this branch's options and comment. A trial merge built, passed
+  every test, and served `/api/lobby` with the four tiers.
+- `cribserver` checks every level against the bundle at startup
+  (`Bundle.Check`) and refuses the old `expert.bin`, so the code cannot run
+  the very hard level at λ 1 by accident. `runs/` and `models-expert/` are
+  not in git: the bundle to ship exists only on the development machine.
 - Speed on the t4g.micro for the stack: M39/M40 (pegging 12.4 ms mean,
   161 ms max; discard about 25 ms).
 - Not done: proposal 5 (deferred in M34: it could only add to what 4
-  leaves of the measured discard ceiling, at the cost of a Python step) and
-  proposal 9 (last).
+  leaves of the measured discard ceiling, at the cost of a Python step).
+  Proposal 9 passes M34's kill rule (clairvoyant pegging +0.99 a hand, over
+  the 0.5 threshold) and is next: first its exploitability measurement.
 
 ---
 
