@@ -12,13 +12,15 @@ type Level struct {
 }
 
 // Levels lists the difficulties from weakest to strongest; the last is the
-// full-strength bot, registered under BotName. Measured with the M14
-// bundle, paired against the heuristic: easy 51.0%, medium 54.8%, expert
-// 57.2%.
+// full-strength bot, registered under BotName. Measured with the bundle of
+// PLAN M41 (M14's tables, the exact keep table and the pegging policy),
+// paired against the heuristic: medium 50.5%, hard 54.4%, very hard 58.6%
+// (random, the easy level, wins 0.6%). With a bundle lacking the policy
+// the very hard level searches with λ 1.
 var Levels = []Level{
-	{"expert-easy", "Expert (easy)", Options{Effort: 10, NoKeepModel: true, NoPegModel: true, HeuristicDiscard: true}},
-	{"expert-medium", "Expert (medium)", Options{Effort: 50, NoKeepModel: true, NoPegModel: true}},
-	{BotName, "Expert", Options{Effort: DefaultEffort}},
+	{"expert-easy", "Medium", Options{Effort: 10, NoKeepModel: true, NoPegModel: true, HeuristicDiscard: true}},
+	{"expert-medium", "Hard", Options{Effort: 50, NoKeepModel: true, NoPegModel: true}},
+	{BotName, "Very hard", Options{Effort: DefaultEffort, ISSearch: true, ISLambda: 0.5, ISLambdaSet: true, CondDiscard: true}},
 }
 
 // Register makes every level of the bundle available by name. Bots created

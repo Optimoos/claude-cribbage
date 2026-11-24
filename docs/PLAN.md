@@ -1707,6 +1707,35 @@ Guards, 20k games each, coupled against `runs/base-m14`:
   for the flat prior (rare shapes slightly better, the rest worse).
   Dropped.
 
+### M43: Levels on the new bundle
+
+- λ 0.25 against λ 0.5 (both on the stack): **49.93 ± 0.23**, SPRT accepted
+  H0. λ stays 0.5.
+- Each level re-measured with `runs/final/expert-v1.bin` against heuristic,
+  20k games each (`runs/final/levels.txt`):
+
+  | Player | Win % | Margin |
+  |---|---|---|
+  | stack (`@400,islambda=0.5,cond`, M41) | 58.57 | |
+  | `@400` | 57.38 ± 0.46 | +2.02 |
+  | `@50,nokeep,nopeg` | 54.41 ± 0.45 | +0.78 |
+  | heuristic2 | 52.73 ± 0.42 | +1.16 |
+  | `@10,nokeep,nopeg,heurdiscard` | 50.53 ± 0.39 | -0.31 |
+  | random | 0.58 ± 0.10 | -43.57 |
+
+- `levels.go`: `expert` is the full stack (Very hard), `expert-medium`
+  is Hard, `expert-easy` is Medium. With random as Easy that gives the four
+  tiers asked for. The steps are about 4 points each above random; the gap
+  to random is large, as it is for any curve that keeps random.
+- To ship (the user's step): deploy `runs/final/expert-v1.bin` (also copied
+  to `models-expert/expert-v1.bin`, beside the reference `expert.bin`) as
+  the server's `-expert` bundle, and set the lobby list (`-lobby` on the
+  `lobby-bots` branch) to `expert,expert-medium,expert-easy,random`.
+- Speed on the t4g.micro for the stack: M39/M40 (pegging 12.4 ms mean,
+  161 ms max; discard about 25 ms).
+- Not done: proposal 5 (deferred by its kill rule, since the gains it
+  needed from 1 and 2 are taken) and proposal 9 (last).
+
 ---
 
 # Roadmap: three-player games (not started)
