@@ -6,8 +6,9 @@ import "cribbage/internal/engine"
 // game, through the hand that follows and the win table. It keeps scratch
 // space, so it is not safe for concurrent use.
 type discarder struct {
-	win *WinTable
-	t   *DiscardTables
+	win     *WinTable
+	t       *DiscardTables
+	noFixes bool // M14's discards: heels with the show, even odds when both peg out
 
 	// Per decision.
 	me, opp int
@@ -65,7 +66,7 @@ const heelsOrderFrom = 90
 
 // value is my win probability after keeping kept and discarding disc.
 func (d *discarder) value(kept [4]engine.Card, disc [2]engine.Card, held *[52]bool) float64 {
-	if max(d.me, d.opp) < heelsOrderFrom {
+	if d.noFixes || max(d.me, d.opp) < heelsOrderFrom {
 		return d.valueOver(kept, disc, held, func(engine.Card) bool { return true }, true)
 	}
 	// Jack starters: the dealer scores two at the cut, which may win.
@@ -202,6 +203,8 @@ func (d *discarder) valueOver(kept [4]engine.Card, disc [2]engine.Card, held *[5
 			b := d.opp + op
 			var x float64
 			switch {
+			case a >= engine.WinScore && b >= engine.WinScore && d.noFixes:
+				x = 0.5
 			case a >= engine.WinScore && b >= engine.WinScore:
 				x = pegOutFirst(engine.WinScore-d.me, mp, engine.WinScore-d.opp, op)
 			case a >= engine.WinScore:

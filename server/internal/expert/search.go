@@ -59,6 +59,8 @@ type searcher struct {
 	oracle Oracle
 	game   *engine.Game
 	seat   int
+
+	noFixes bool // M14's search: no hidden suits in their show, one crib for every world
 }
 
 // endCache holds end-of-hand values by (opponent show, my pegging, their
@@ -129,7 +131,9 @@ func (s *searcher) choose(o *engine.Observation, legal []engine.Action) engine.A
 	for i := range worlds { // only the searched worlds need their show
 		w := &worlds[i]
 		w.show = oppShow(oppPlayed, w.ranks[:w.n], o.Starter)
-		w.pNobs, w.pFlush4, w.pFlush5 = hiddenSuits(oppPlayed, w.ranks[:w.n], o.Starter, &seen)
+		if !s.noFixes {
+			w.pNobs, w.pFlush4, w.pFlush5 = hiddenSuits(oppPlayed, w.ranks[:w.n], o.Starter, &seen)
+		}
 	}
 
 	// The root: my hand, the current count and whose card was last.
@@ -153,7 +157,7 @@ func (s *searcher) choose(o *engine.Observation, legal []engine.Action) engine.A
 
 	// Near 121 the crib's distribution matters through the win table, and
 	// it depends on the world: what they kept says what they threw.
-	worldCribs := max(s.base[0], s.base[1]) >= cribByWorldFrom
+	worldCribs := !s.noFixes && max(s.base[0], s.base[1]) >= cribByWorldFrom
 	if worldCribs {
 		s.worldCribs(o, oppPlayed, &seen, worlds)
 	}

@@ -28,6 +28,7 @@ type Options struct {
 	NoExactKeep      bool    // ignore the bundle's exact keep table: the softmax model alone
 	KeepEps          float64 // the softmax's weight against the exact keep table, when KeepEpsSet
 	KeepEpsSet       bool    // otherwise DefaultKeepEps
+	NoSmallFixes     bool    // play as M14 did: no heels order, even odds when both peg out, no hidden suits, one crib
 }
 
 // Oracle is how much of the opponent's hand a test oracle lets the pegging
@@ -60,8 +61,10 @@ func NewBot(b *Bundle, effort int) *Bot { return NewBotWith(b, Options{Effort: e
 func NewBotWith(b *Bundle, opt Options) *Bot {
 	bot := &Bot{search: newSearcher(b.Win, opt.Effort)}
 	bot.search.oracle = opt.Oracle
+	bot.search.noFixes = opt.NoSmallFixes
 	if b.Discard != nil && !opt.HeuristicDiscard {
 		bot.discard = newDiscarder(b.Win, b.Discard)
+		bot.discard.noFixes = opt.NoSmallFixes
 	}
 	if !opt.NoKeepModel {
 		eps := DefaultKeepEps
