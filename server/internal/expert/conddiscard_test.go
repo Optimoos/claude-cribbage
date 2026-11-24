@@ -138,3 +138,54 @@ func TestCondPosteriorMatchesSampling(t *testing.T) {
 		}
 	}
 }
+
+// A shape-pair table that does not depend on the opponent's shape shifts
+// nothing: every option values exactly as without it.
+func TestCondPegConstantTableIsIdentity(t *testing.T) {
+	b, err := LoadBundle("../../models-expert/expert.bin")
+	if err != nil {
+		t.Skip(err)
+	}
+	pp := &PegPairTable{Dealer: make([]float32, numShapes*numShapes), Pone: make([]float32, numShapes*numShapes)}
+	for i := range pp.Dealer {
+		pp.Dealer[i], pp.Pone[i] = 3.5, 2.5
+	}
+	b.PegPair = pp
+	plain := NewBotWith(b, Options{Effort: 25, CondDiscard: true})
+	paired := NewBotWith(b, Options{Effort: 25, CondDiscard: true, CondPeg: true})
+	if paired.discard.pair == nil {
+		t.Fatal("condpeg not set up")
+	}
+	rng := rand.New(rand.NewPCG(11, 12))
+	for trial := 0; trial < 40; trial++ {
+		deck := rng.Perm(52)
+		var hands [2][6]engine.Card
+		for i := 0; i < 12; i++ {
+			hands[i/6][i%6] = engine.Card(deck[i])
+		}
+		g := engine.NewHand(1, trial%2, [2]int{rng.IntN(121), rng.IntN(121)}, hands, engine.Card(deck[12]))
+		var o engine.Observation
+		g.ObserveInto(0, &o)
+		legal := g.Legal(0)
+		plain.Choose(&o, legal)
+		paired.Choose(&o, legal)
+		var held [52]bool
+		for _, c := range hands[0] {
+			held[c] = true
+		}
+		for _, a := range legal {
+			var kept [4]engine.Card
+			n := 0
+			for _, c := range hands[0] {
+				if c != a.Cards[0] && c != a.Cards[1] {
+					kept[n] = c
+					n++
+				}
+			}
+			x, y := plain.discard.value(kept, a.Cards, &held), paired.discard.value(kept, a.Cards, &held)
+			if math.Abs(x-y) > 1e-12 {
+				t.Fatalf("trial %d %v: cond %v, condpeg %v", trial, a, x, y)
+			}
+		}
+	}
+}

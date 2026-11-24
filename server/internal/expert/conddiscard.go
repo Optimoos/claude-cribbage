@@ -1,6 +1,7 @@
 package expert
 
 import (
+	"math"
 	"sync"
 
 	"cribbage/internal/engine"
@@ -27,9 +28,11 @@ type condPost struct {
 	m   [13][maxShow][numPairs]float64
 	z   [13]float64
 	qHi [13]int // q < qHi wherever m is non-zero
-	// avail is each rank's count among the cards I cannot see; pairJ is
-	// how many jacks each pair holds.
+	// avail is each rank's count among the cards I cannot see.
 	avail [14]int
+	// wK is the weight on each shape they kept (over any throw and
+	// starter), for the shape-pair pegging table.
+	wK [numShapes]float64
 }
 
 // cribRank[a][b][sr-1] is the crib's fifteens, pairs and runs when the two
@@ -98,6 +101,7 @@ func (p *condPost) posterior(keep *keepModel, oside int, six [6]engine.Card) {
 	clear(p.m[:])
 	clear(p.z[:])
 	clear(p.qHi[:])
+	clear(p.wK[:])
 	byKept := keep.byKept[oside]
 	for k := 0; k < numShapes; k++ {
 		kr := shapeRanks[k]
@@ -139,6 +143,7 @@ func (p *condPost) posterior(keep *keepModel, oside int, six [6]engine.Card) {
 							w *= smallBinom[p.avail[r]][cnt[r]]
 						}
 					}
+					p.wK[k] += w
 					for sr := 1; sr <= 13; sr++ {
 						left := float64(p.avail[sr] - cnt[sr])
 						if left <= 0 {
@@ -262,4 +267,145 @@ func (d *discarder) condOption(kept [4]engine.Card, disc [2]engine.Card, held *[
 			}
 		}
 	}
+}
+
+// keptPrior returns, for an opponent on side oside, the keep model's
+// weight on each shape they keep when the only cards removed are the
+// ranks in mine (so the table's average opponent, given my four).
+func keptPrior(keep *keepModel, oside int, mine [4]int8, out *[numShapes]float64) {
+	var avail [14]int
+	for r := 1; r <= 13; r++ {
+		avail[r] = 4
+	}
+	for _, r := range mine {
+		avail[r]--
+	}
+	clear(out[:])
+	byKept := keep.byKept[oside]
+	for k := 0; k < numShapes; k++ {
+		kr := shapeRanks[k]
+		var cnt [14]int
+		for _, r := range kr {
+			cnt[r]++
+		}
+		if cnt[kr[0]] > avail[kr[0]] || cnt[kr[1]] > avail[kr[1]] || cnt[kr[2]] > avail[kr[2]] || cnt[kr[3]] > avail[kr[3]] {
+			continue
+		}
+		probs := byKept[k*numPairs : (k+1)*numPairs]
+		for r1 := 1; r1 <= 13; r1++ {
+			for r2 := r1; r2 <= 13; r2++ {
+				pk := float64(probs[pairIdx[r1][r2]])
+				if pk == 0 {
+					continue
+				}
+				cnt[r1]++
+				cnt[r2]++
+				w := pk
+				var seen uint16
+				for _, r := range [6]int{int(kr[0]), int(kr[1]), int(kr[2]), int(kr[3]), r1, r2} {
+					if cnt[r] > avail[r] {
+						w = 0
+						break
+					}
+					if seen&(1<<r) == 0 {
+						seen |= 1 << r
+						w *= smallBinom[avail[r]][cnt[r]]
+					}
+				}
+				out[k] += w
+				cnt[r1]--
+				cnt[r2]--
+			}
+		}
+	}
+}
+
+// pegPairMeans is my and their mean pegging when I keep shape s on side
+// (0 the dealer), averaged over their kept shape with weights wK.
+func (t *PegPairTable) means(side, s int, wK *[numShapes]float64) (mine, theirs float64) {
+	var tot float64
+	for k, w := range wK {
+		if w == 0 {
+			continue
+		}
+		var i int
+		if side == 0 {
+			i = s*numShapes + k
+		} else {
+			i = k*numShapes + s
+		}
+		var m, o float32
+		if side == 0 {
+			m, o = t.Dealer[i], t.Pone[i]
+		} else {
+			m, o = t.Pone[i], t.Dealer[i]
+		}
+		if m == 0 && o == 0 {
+			continue // an impossible pair
+		}
+		mine += w * float64(m)
+		theirs += w * float64(o)
+		tot += w
+	}
+	if tot == 0 {
+		return 0, 0
+	}
+	return mine / tot, theirs / tot
+}
+
+// pegBase holds, per side and kept shape, the shape-pair table's means
+// against the table's average opponent: what the discard tables already
+// reflect, so only the difference from it is applied.
+type pegBase struct {
+	mine, theirs [2][numShapes]float64
+}
+
+var pegBases sync.Map // *pegBaseKey -> *pegBase
+
+type pegBaseKey struct {
+	t    *PegPairTable
+	keep *keepModel
+}
+
+func pegBaseFor(t *PegPairTable, keep *keepModel) *pegBase {
+	key := pegBaseKey{t, keep}
+	if v, ok := pegBases.Load(key); ok {
+		return v.(*pegBase)
+	}
+	handEVTable()
+	pb := new(pegBase)
+	var wg sync.WaitGroup
+	for side := 0; side < 2; side++ {
+		for part := 0; part < 8; part++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				var w [numShapes]float64
+				for s := part; s < numShapes; s += 8 {
+					keptPrior(keep, 1-side, shapeRanks[s], &w)
+					pb.mine[side][s], pb.theirs[side][s] = t.means(side, s, &w)
+				}
+			}()
+		}
+	}
+	wg.Wait()
+	v, _ := pegBases.LoadOrStore(key, pb)
+	return v.(*pegBase)
+}
+
+// shiftDist moves distribution p by delta points (spreading a fractional
+// shift between neighbours), clamped to [0, pegBins), into out.
+func shiftDist(p []float32, delta float64, out *[pegBins]float32) []float32 {
+	clear(out[:])
+	n := math.Floor(delta)
+	f := float32(delta - n)
+	for i, x := range p {
+		if x == 0 {
+			continue
+		}
+		j := i + int(n)
+		out[min(max(j, 0), pegBins-1)] += x * (1 - f)
+		out[min(max(j+1, 0), pegBins-1)] += x * f
+	}
+	return trim(out[:])
 }

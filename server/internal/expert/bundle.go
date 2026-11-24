@@ -69,6 +69,9 @@ type Bundle struct {
 	// PegPolicy, when not nil, is the fitted opponent pegging policy
 	// (proposal 2) that weights worlds by the plays made in them.
 	PegPolicy *PegPolicy
+	// PegPair, when not nil, is each pair of kept shapes' mean pegging
+	// (proposal 4), for discards conditioned on the opponent's hand.
+	PegPair *PegPairTable
 
 	keepMu sync.Mutex
 	keeps  map[float64]*keepModel // by mixing weight; -1 for the softmax alone
@@ -134,6 +137,10 @@ func (b *Bundle) tables() ([]Table, [][]float32) {
 		}
 		data = append(data, v)
 	}
+	if p := b.PegPair; p != nil {
+		ts = append(ts, Table{"pegpair", pegPairShape})
+		data = append(data, append(append([]float32{}, p.Dealer...), p.Pone...))
+	}
 	return ts, data
 }
 
@@ -195,7 +202,7 @@ func ReadBundle(r io.Reader) (*Bundle, error) {
 	if b.Meta.Version != BundleVersion {
 		return nil, fmt.Errorf("expert: bundle version %d; this build reads version %d", b.Meta.Version, BundleVersion)
 	}
-	want := map[string][]int{"win": winShape, "crib": cribShape, "peg": pegShape, "show": showShape, "keep": keepShape, "keepx": keepxShape(), "pegpol": pegPolicyShape}
+	want := map[string][]int{"win": winShape, "crib": cribShape, "peg": pegShape, "show": showShape, "keep": keepShape, "keepx": keepxShape(), "pegpol": pegPolicyShape, "pegpair": pegPairShape}
 	d := new(DiscardTables)
 	nd := 0
 	buf := make([]byte, 4)
@@ -231,6 +238,9 @@ func ReadBundle(r io.Reader) (*Bundle, error) {
 		case "keepx":
 			n := len(vals) / 2
 			b.KeepExact = &[2][]float32{vals[:n], vals[n:]}
+		case "pegpair":
+			n := len(vals) / 2
+			b.PegPair = &PegPairTable{Dealer: vals[:n], Pone: vals[n:]}
 		case "pegpol":
 			b.PegPolicy = new(PegPolicy)
 			for i, v := range vals {

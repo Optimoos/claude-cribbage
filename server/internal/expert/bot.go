@@ -34,6 +34,7 @@ type Options struct {
 	ISLambda         float64 // with ISSearch and a pegging policy: the weight of the opponent's best reply against the policy, when ISLambdaSet
 	ISLambdaSet      bool    // otherwise 1, best reply alone
 	CondDiscard      bool    // condition the opponent's show and the crib on their likely hands (proposal 4)
+	CondPeg          bool    // with CondDiscard and a shape-pair table: condition the pegging too
 }
 
 // Oracle is how much of the opponent's hand a test oracle lets the pegging
@@ -81,6 +82,10 @@ func NewBotWith(b *Bundle, opt Options) *Bot {
 				eps = opt.KeepEps
 			}
 			bot.discard.keep = b.keepModelMix(eps, opt.NoExactKeep)
+			if opt.CondPeg && b.PegPair != nil && bot.discard.keep != nil {
+				bot.discard.pair = b.PegPair
+				bot.discard.base = pegBaseFor(b.PegPair, bot.discard.keep)
+			}
 		}
 	}
 	if !opt.NoKeepModel {

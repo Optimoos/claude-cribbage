@@ -13,6 +13,11 @@ type discarder struct {
 	// their likely hands (conddiscard.go) through post.
 	keep *keepModel
 	post *condPost
+	// pair, when not nil, shifts the pegging tables by what the
+	// opponent's likely hands change in the shape-pair table (with keep).
+	pair         *PegPairTable
+	base         *pegBase
+	pmBuf, poBuf [pegBins]float32
 
 	// Per decision.
 	me, opp int
@@ -126,6 +131,11 @@ func (d *discarder) valueOver(kept [4]engine.Card, disc [2]engine.Card, held *[5
 	shape := shapeOf(kept)
 	d.pm = trim(d.t.peg(side, shape, 0))
 	d.po = trim(d.t.peg(side, shape, 1))
+	if d.pair != nil && d.keep != nil {
+		m, o := d.pair.means(side, shape, &d.post.wK)
+		d.pm = shiftDist(d.pm, m-d.base.mine[side][shape], &d.pmBuf)
+		d.po = shiftDist(d.po, o-d.base.theirs[side][shape], &d.poBuf)
+	}
 	if d.keep != nil {
 		d.condOption(kept, disc, held, in, heelsInShow)
 	} else {

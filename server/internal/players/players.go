@@ -20,7 +20,7 @@ import (
 // proposal 6's small fixes), noexact (ignore the exact keep
 // table), keepeps=X (its mix with the softmax), nopegpol (ignore the fitted
 // pegging policy), cond (discards conditioned on the opponent's likely
-// hands), islambda=X (information-set search, the opponent's best
+// hands), condpeg (and their pegging, with a shape-pair table), islambda=X (information-set search, the opponent's best
 // reply at weight X against the policy), and the test oracles oracle=six
 // and oracle=hand (see expert.Oracle).
 //
@@ -49,6 +49,8 @@ func Resolve(spec string) (func(worker int) bots.Bot, error) {
 				opt.NoExactKeep = true
 			case o == "cond":
 				opt.CondDiscard = true
+			case o == "condpeg":
+				opt.CondDiscard, opt.CondPeg = true, true
 			case o == "nopegpol":
 				opt.NoPegPolicy = true
 			case strings.HasPrefix(o, "islambda="):
@@ -75,6 +77,9 @@ func Resolve(spec string) (func(worker int) bots.Bot, error) {
 		}
 	}
 	if b, err := expert.LoadBundle(path); err == nil {
+		if opt.CondPeg && b.PegPair == nil {
+			return nil, fmt.Errorf("%q: condpeg needs a bundle with a shape-pair pegging table", spec)
+		}
 		if opt.ISLambdaSet && opt.ISLambda < 1 && (b.PegPolicy == nil || opt.NoPegPolicy || opt.PegTemp != 0) {
 			return nil, fmt.Errorf("%q: islambda below 1 needs the bundle's pegging policy", spec)
 		}
