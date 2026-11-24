@@ -1250,6 +1250,66 @@ the key cannot open a person's account. Protocol version 2.
 
 ---
 
+# Expert bot improvements (M32 onward)
+
+Started 2026-11-23 from `docs/BOT_IMPROVEMENT_PROPOSALS.md` (ten proposals,
+four enablers E1 to E4). The goal is general strength: a change is accepted
+on its paired result head to head against the previous expert, and must not
+lose ground against the guards (`heuristic`, `heuristic2`, `models-big`).
+`models-expert/expert.bin` (M14) stays as the reference bundle. Runs and
+their pair files live in `server/runs/` (gitignored); the commands below
+regenerate them.
+
+### M32: A more sensitive test harness (E1)
+
+**Built (2026-11-23):** `cmd/gauntlet` and `internal/ai`.
+- `-save-pairs DIR` writes every deal of a match (wins, margin, pegging,
+  hands, a hash of the play) to `DIR/<opponent>.csv`. `-base DIR` plays a
+  candidate on the same deals and reports its change deal by deal. Every
+  bot is deterministic and the engine's generator is used only for dealing,
+  so a deal both played the same way differs by exactly zero; only deals
+  where the candidate deviated add variance. The random bot is reseeded per
+  deal so it couples too.
+- `-sprt LO,HI` stops a match once a GSPRT (normal approximation, variance
+  from the data) decides between the two win rates, or with `-base` the two
+  changes. Defaults: alpha 0.005 (0.05 over ten candidates), beta 0.05, no
+  decision before 2000 pairs.
+- Evaluation seeds default to 900001; seeds below 900000 are for building
+  tables, so tables are never scored on the deals they came from.
+- A/A: the expert against its own saved baseline gives exactly zero, with
+  no deviating deal, over 1000 deals; so does `heuristic2` against
+  `heuristic` and `random`.
+- For the head-to-head gate the plain paired arena already has this
+  property (a deal played identically splits one win each), so coupling
+  mainly helps the guards. There the head-to-head needs about 100k pairs to
+  resolve 0.2 points: per-pair standard deviation about 0.19 (M14 round 2).
+
+Baselines, `gauntlet -bot models-expert/expert.bin@400 -n 40000 -save-pairs
+runs/base-m14` (seed 900001, 24 workers at nice 19, other jobs running):
+
+| Expert@400 v | Win % | Margin per game | Pegging per hand |
+|---|---|---|---|
+| `heuristic` | 57.22 ± 0.32 | +1.95 ± 0.09 | +0.249 ± 0.007 |
+| `heuristic2` | 55.98 ± 0.31 | +1.36 ± 0.09 | +0.159 ± 0.007 |
+| `models-big` | 56.00 ± 0.32 | +1.97 ± 0.10 | +0.168 ± 0.007 |
+| itself `@400,nokeep` | 51.98 ± 0.26 | +0.90 ± 0.07 | +0.087 ± 0.006 |
+| itself `@400,heurdiscard` | 51.53 ± 0.28 | +0.13 ± 0.08 | +0.089 ± 0.005 |
+| itself `@25` | 51.56 ± 0.26 | +0.66 ± 0.07 | +0.069 ± 0.006 |
+| itself `@400,nopeg` | 50.07 ± 0.20 | +0.04 ± 0.05 | +0.003 ± 0.004 |
+| itself `@0` (every world) | 49.92 ± 0.15 | −0.06 ± 0.03 | −0.004 ± 0.003 |
+
+- The M14 figures reproduce on held-out seeds (57.16 and 55.85 then).
+- The keep model is worth about 2 points and the discard tables about 1.5.
+- The pegging-play likelihood is worth nothing measurable (M13 reported
+  +0.34 ± 0.28 from a run ten times smaller), so proposal 2 must bring a
+  genuinely better model to gain anything.
+- Effort 400 plays as well as searching every world: search is saturated.
+- Times: 40k games took 5.5 to 6 minutes against a guard, 11 minutes
+  expert against expert and 25 at effort 0; the whole run 83.5 minutes.
+  Games average 9.05 hands.
+
+---
+
 # Roadmap: three-player games (not started)
 
 Noted 2026-11-15, to look at soon. The goal is three-handed cribbage,
