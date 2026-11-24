@@ -61,19 +61,46 @@ type Bundle struct {
 	// side; zero when the bundle has none (the search then weights
 	// opponent hands only by card counts).
 	KeepTemp [2]float64
+	// KeepExact, when not nil, is the share of each six-rank shape's
+	// options that the real discarder keeps, by side, in the keep model's
+	// option order (see BuildExactKeep). The opponent model then mixes it
+	// with the softmax.
+	KeepExact *[2][]float32
 
-	keepOnce sync.Once
-	keep     *keepModel
+	keepMu sync.Mutex
+	keeps  map[float64]*keepModel // by mixing weight; -1 for the softmax alone
 }
 
-// keepModel returns the opponent discard model, built on first use, or nil.
-func (b *Bundle) keepModel() *keepModel {
-	b.keepOnce.Do(func() {
-		if b.Discard != nil && b.KeepTemp[0] > 0 && b.KeepTemp[1] > 0 {
-			b.keep = newKeepModel(b.Discard, b.KeepTemp)
-		}
-	})
-	return b.keep
+// DefaultKeepEps is the softmax's weight in the opponent model when the
+// bundle has an exact keep table.
+const DefaultKeepEps = 0.1
+
+// keepModel returns the opponent discard model with the default mix,
+// built on first use, or nil.
+func (b *Bundle) keepModel() *keepModel { return b.keepModelMix(DefaultKeepEps, false) }
+
+// keepModelMix returns the opponent discard model with the softmax at
+// weight eps against the exact table (or alone with softmaxOnly or
+// without one), built on first use; nil when the bundle has no model.
+func (b *Bundle) keepModelMix(eps float64, softmaxOnly bool) *keepModel {
+	if b.Discard == nil || b.KeepTemp[0] <= 0 || b.KeepTemp[1] <= 0 {
+		return nil
+	}
+	exact := b.KeepExact
+	if softmaxOnly || exact == nil {
+		eps, exact = -1, nil
+	}
+	b.keepMu.Lock()
+	defer b.keepMu.Unlock()
+	if m := b.keeps[eps]; m != nil {
+		return m
+	}
+	if b.keeps == nil {
+		b.keeps = map[float64]*keepModel{}
+	}
+	m := newKeepModel(b.Discard, b.KeepTemp, exact, eps)
+	b.keeps[eps] = m
+	return m
 }
 
 // tables lists the bundle's tables in file order with their data.
@@ -91,6 +118,10 @@ func (b *Bundle) tables() ([]Table, [][]float32) {
 	if b.KeepTemp[0] > 0 {
 		ts = append(ts, Table{"keep", keepShape})
 		data = append(data, []float32{float32(b.KeepTemp[0]), float32(b.KeepTemp[1])})
+	}
+	if b.KeepExact != nil {
+		ts = append(ts, Table{"keepx", keepxShape()})
+		data = append(data, append(append([]float32{}, b.KeepExact[0]...), b.KeepExact[1]...))
 	}
 	return ts, data
 }
@@ -153,7 +184,7 @@ func ReadBundle(r io.Reader) (*Bundle, error) {
 	if b.Meta.Version != BundleVersion {
 		return nil, fmt.Errorf("expert: bundle version %d; this build reads version %d", b.Meta.Version, BundleVersion)
 	}
-	want := map[string][]int{"win": winShape, "crib": cribShape, "peg": pegShape, "show": showShape, "keep": keepShape}
+	want := map[string][]int{"win": winShape, "crib": cribShape, "peg": pegShape, "show": showShape, "keep": keepShape, "keepx": keepxShape()}
 	d := new(DiscardTables)
 	nd := 0
 	buf := make([]byte, 4)
@@ -186,6 +217,9 @@ func ReadBundle(r io.Reader) (*Bundle, error) {
 			d.Show, nd = vals, nd+1
 		case "keep":
 			b.KeepTemp = [2]float64{float64(vals[0]), float64(vals[1])}
+		case "keepx":
+			n := len(vals) / 2
+			b.KeepExact = &[2][]float32{vals[:n], vals[n:]}
 		}
 	}
 	if b.Win == nil {

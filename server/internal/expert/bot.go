@@ -25,6 +25,9 @@ type Options struct {
 	NoPegModel       bool    // do not weight opponent hands by the plays made with them
 	HeuristicDiscard bool    // discard as the heuristic does, ignoring the discard tables
 	Oracle           Oracle  // test only: let pegging see some of the opponent's hidden cards
+	NoExactKeep      bool    // ignore the bundle's exact keep table: the softmax model alone
+	KeepEps          float64 // the softmax's weight against the exact keep table, when KeepEpsSet
+	KeepEpsSet       bool    // otherwise DefaultKeepEps
 }
 
 // Oracle is how much of the opponent's hand a test oracle lets the pegging
@@ -61,7 +64,11 @@ func NewBotWith(b *Bundle, opt Options) *Bot {
 		bot.discard = newDiscarder(b.Win, b.Discard)
 	}
 	if !opt.NoKeepModel {
-		bot.search.keep = b.keepModel()
+		eps := DefaultKeepEps
+		if opt.KeepEpsSet {
+			eps = opt.KeepEps
+		}
+		bot.search.keep = b.keepModelMix(eps, opt.NoExactKeep)
 	}
 	if !opt.NoPegModel {
 		bot.search.pegTemp = opt.PegTemp

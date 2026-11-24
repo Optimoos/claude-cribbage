@@ -37,6 +37,10 @@ func main() {
 		err = iterate(ctx, os.Args[2:])
 	case "eval":
 		err = eval(ctx, os.Args[2:])
+	case "keepx":
+		err = keepx(ctx, os.Args[2:])
+	case "keepcheck":
+		err = keepcheck(ctx, os.Args[2:])
 	case "corpus":
 		err = corpus(ctx, os.Args[2:])
 	case "rollout":
@@ -51,7 +55,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: expert build|inspect|eval|iterate|rollout|corpus [flags]")
+	fmt.Fprintln(os.Stderr, "usage: expert build|inspect|eval|iterate|rollout|corpus|keepx|keepcheck [flags]")
 	os.Exit(2)
 }
 

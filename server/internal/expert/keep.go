@@ -173,7 +173,10 @@ func softmax(values []float64, temp float64, out []float32) {
 }
 
 // newKeepModel precomputes the keep probabilities of every six-rank shape.
-func newKeepModel(t *DiscardTables, temp [2]float64) *keepModel {
+// With exact (the share of each option the real discarder keeps, laid out
+// as keepLayout), each probability is (1-eps)*exact + eps*softmax, so the
+// true hand never gets zero weight.
+func newKeepModel(t *DiscardTables, temp [2]float64, exact *[2][]float32, eps float64) *keepModel {
 	m := &keepModel{temp: temp}
 	kv := newKeepValues(t)
 	var opts [numShapes6][2]struct {
@@ -188,6 +191,18 @@ func newKeepModel(t *DiscardTables, temp [2]float64) *keepModel {
 			o := &opts[rank6(r)][side]
 			o.shapes, o.probs = shapes, probs
 		})
+	}
+	if exact != nil {
+		var off int
+		for k := range opts {
+			for side := 0; side < 2; side++ {
+				for i := range opts[k][side].probs {
+					p := &opts[k][side].probs[i]
+					*p = float32((1-eps)*float64(exact[side][off+i]) + eps*float64(*p))
+				}
+			}
+			off += len(opts[k][0].shapes)
+		}
 	}
 	for side := 0; side < 2; side++ {
 		m.byKept[side] = make([]float32, numShapes*numPairs)
@@ -324,3 +339,30 @@ func FitKeepTemps(t *DiscardTables, hands []HandStat) (temps [2]float64, logLik 
 	}
 	return temps, logLik
 }
+
+// keepLayout numbers every option of every six-rank shape: the options of
+// the shape numbered k (by rank6) are shapes[start[k]:start[k+1]], in the
+// order keepOptions lists them. The keep model and the exact keep table
+// share this layout.
+var keepLayout = sync.OnceValue(func() *struct {
+	start  [numShapes6 + 1]int32
+	shapes []int16
+} {
+	handEVTable()
+	l := &struct {
+		start  [numShapes6 + 1]int32
+		shapes []int16
+	}{}
+	var per [numShapes6][]int16
+	kv := new(keepValues) // values are not needed, only the options
+	forEachShape6(func(r [6]int8) {
+		per[rank6(r)], _ = kv.keepOptions(r, 0)
+	})
+	for k := range per {
+		l.start[k+1] = l.start[k] + int32(len(per[k]))
+		l.shapes = append(l.shapes, per[k]...)
+	}
+	return l
+})
+
+func keepxShape() []int { return []int{2, len(keepLayout().shapes)} }

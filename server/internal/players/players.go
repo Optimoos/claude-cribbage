@@ -15,7 +15,8 @@ import (
 // registered bot name, a network model file (played greedily), or an
 // expert bundle file, optionally followed by @ and comma-separated options:
 // a number (opponent hands searched per pegging decision; 0 for all),
-// nokeep, nopeg, heurdiscard, pegtemp=X, and the test oracles oracle=six
+// nokeep, nopeg, heurdiscard, pegtemp=X, noexact (ignore the exact keep
+// table), keepeps=X (its mix with the softmax), and the test oracles oracle=six
 // and oracle=hand (see expert.Oracle).
 //
 //	models-expert/expert.bin@100,nokeep
@@ -35,6 +36,11 @@ func Resolve(spec string) (func(worker int) bots.Bot, error) {
 				opt.NoPegModel = true
 			case o == "heurdiscard":
 				opt.HeuristicDiscard = true
+			case o == "noexact":
+				opt.NoExactKeep = true
+			case strings.HasPrefix(o, "keepeps="):
+				opt.KeepEps, err = strconv.ParseFloat(o[len("keepeps="):], 64)
+				opt.KeepEpsSet = true
 			case o == "oracle=six":
 				opt.Oracle = expert.OracleSix
 			case o == "oracle=hand":
