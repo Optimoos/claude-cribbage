@@ -13,18 +13,34 @@ func TestKeepModel(t *testing.T) {
 	m := newKeepModel(d, [2]float64{0.5, 0.5})
 	// Probabilities over the options of a hand sum to one.
 	six := [6]int8{1, 5, 5, 5, 11, 13}
-	row := m.rows[0][key6(six)]
+	k := rank6(six)
+	probs := m.probs[0][m.start[k]:m.start[k+1]]
 	var sum float64
-	for _, p := range row.probs {
+	for _, p := range probs {
 		sum += float64(p)
 	}
-	if math.Abs(sum-1) > 1e-5 || len(row.shapes) < 3 {
-		t.Fatalf("row %+v sums to %v", row, sum)
+	if math.Abs(sum-1) > 1e-5 || len(probs) < 3 {
+		t.Fatalf("options %v sum to %v", probs, sum)
 	}
 	// Keeping three fives and a king is the clear choice.
 	keep := int16(shapeOf([4]engine.Card{engine.NewCard(5, 0), engine.NewCard(5, 1), engine.NewCard(5, 2), engine.NewCard(13, 0)}))
 	if p := m.prob(0, [6]int8{1, 5, 5, 5, 9, 13}, keep); p < 0.5 {
 		t.Errorf("P(keep 5-5-5-K) = %.3f", p)
+	}
+}
+
+// rank6 numbers every six-rank shape differently, within its bound.
+func TestRank6Dense(t *testing.T) {
+	seen := map[int]bool{}
+	forEachShape6(func(r [6]int8) {
+		k := rank6(r)
+		if k < 0 || k >= numShapes6 || seen[k] {
+			t.Fatalf("rank6(%v) = %d, out of range or repeated", r, k)
+		}
+		seen[k] = true
+	})
+	if len(seen) != 18395 {
+		t.Errorf("%d six-rank shapes, want 18395", len(seen))
 	}
 }
 

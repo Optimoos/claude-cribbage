@@ -11,7 +11,8 @@ import (
 
 // world is one possible opponent hand, as ranks, with its weight: the
 // number of card combinations it stands for (or, when sampled, the number
-// of times it was drawn).
+// of times it was drawn). Its show is filled in only for the worlds
+// searched.
 type world struct {
 	ranks  [4]int8
 	n      int8
@@ -44,7 +45,9 @@ type searcher struct {
 	keep      *keepModel
 	pegTemp   float64
 	keepKey   keepCacheKey
-	keepCache map[int16]float64
+	keepGen   uint32 // keepVal[s] is valid for keepKey when keepStamp[s] == keepGen
+	keepStamp [numShapes]uint32
+	keepVal   [numShapes]float64
 	ends      *endCache // borrowed from endCaches during choose
 }
 
@@ -114,6 +117,9 @@ func (s *searcher) choose(o *engine.Observation, legal []engine.Action) engine.A
 	if s.effort > 0 && len(worlds) > s.effort {
 		worlds = systematic(worlds, s.effort, &s.sampled)
 	}
+	for i := range worlds { // only the searched worlds need their show
+		worlds[i].show = oppShow(oppPlayed, worlds[i].ranks[:worlds[i].n], o.Starter)
+	}
 
 	// The root: my hand, the current count and whose card was last.
 	var root pegNode
@@ -153,7 +159,7 @@ func (s *searcher) choose(o *engine.Observation, legal []engine.Action) engine.A
 			n.hand[1], n.n[1] = w.ranks, w.n
 			n.turn = 0
 			s.show = w.show
-			v += w.weight * s.after(&n, idx, -1, 2)
+			v += w.weight * s.after(n, idx, -1, 2)
 			total += w.weight
 		}
 		if v /= total; v > bestV {
@@ -167,7 +173,10 @@ func (s *searcher) choose(o *engine.Observation, legal []engine.Action) engine.A
 // win probability while the opponent minimizes it, searched with
 // alpha-beta pruning: the result is exact when it lies inside (alpha,
 // beta), and otherwise only a bound on the side it falls.
-func (s *searcher) value(n *pegNode, alpha, beta float64) float64 {
+//
+// Nodes pass by value: a pointer to a copy would escape to the heap
+// through the recursion, one allocation per node.
+func (s *searcher) value(n pegNode, alpha, beta float64) float64 {
 	p := n.turn
 	best := 2.0
 	if p == 0 {
@@ -180,8 +189,7 @@ func (s *searcher) value(n *pegNode, alpha, beta float64) float64 {
 			continue
 		}
 		tried |= 1 << r
-		c := *n
-		v := s.after(&c, i, alpha, beta)
+		v := s.after(n, i, alpha, beta)
 		if p == 0 {
 			best = max(best, v)
 			alpha = max(alpha, v)
@@ -197,7 +205,7 @@ func (s *searcher) value(n *pegNode, alpha, beta float64) float64 {
 }
 
 // after plays card i for the player to move in c and values the result.
-func (s *searcher) after(c *pegNode, i int, alpha, beta float64) float64 {
+func (s *searcher) after(c pegNode, i int, alpha, beta float64) float64 {
 	switch c.apply(i, s.base) {
 	case pegWon:
 		if c.turn == 0 {
@@ -302,9 +310,7 @@ func (s *searcher) enumerate(o *engine.Observation, seen *[52]bool, oppPlayed []
 	var rec func(r, left int, weight float64)
 	rec = func(r, left int, weight float64) {
 		if left == 0 {
-			w := world{ranks: ranks, n: int8(k), weight: weight}
-			w.show = oppShow(oppPlayed, ranks[:k], o.Starter)
-			s.worlds = append(s.worlds, w)
+			s.worlds = append(s.worlds, world{ranks: ranks, n: int8(k), weight: weight})
 			return
 		}
 		if r > 13 {
@@ -342,8 +348,12 @@ func (s *searcher) reweight(o *engine.Observation, oppPlayed []engine.Card, worl
 	if o.Dealer != o.Player {
 		key.oppSide = 0
 	}
-	if s.keep != nil && (s.keepCache == nil || key != s.keepKey) {
-		s.keepKey, s.keepCache = key, map[int16]float64{}
+	if s.keep != nil && (s.keepGen == 0 || key != s.keepKey) {
+		s.keepKey = key
+		if s.keepGen++; s.keepGen == 0 { // wrapped: clear the stamps
+			clear(s.keepStamp[:])
+			s.keepGen = 1
+		}
 	}
 	s.weighted = s.weighted[:0]
 	for _, w := range worlds {
@@ -379,8 +389,8 @@ func (s *searcher) keepWeight(key keepCacheKey, oppPlayed []engine.Card, w world
 	}
 	sort.Ints(k4[:])
 	shape := shapeIdx[((k4[0]*14+k4[1])*14+k4[2])*14+k4[3]]
-	if v, ok := s.keepCache[shape]; ok {
-		return v
+	if s.keepStamp[shape] == s.keepGen {
+		return s.keepVal[shape]
 	}
 	var avail [14]int
 	for r := 1; r <= 13; r++ {
@@ -394,6 +404,7 @@ func (s *searcher) keepWeight(key keepCacheKey, oppPlayed []engine.Card, w world
 		avail[r]--
 	}
 	var v float64
+	probs := s.keep.byKept[key.oppSide][int(shape)*numPairs:][:numPairs]
 	for r1 := 1; r1 <= 13; r1++ {
 		for r2 := r1; r2 <= 13; r2++ {
 			combos := avail[r1] * avail[r2]
@@ -403,10 +414,10 @@ func (s *searcher) keepWeight(key keepCacheKey, oppPlayed []engine.Card, w world
 			if combos <= 0 {
 				continue
 			}
-			v += float64(combos) * s.keep.prob(key.oppSide, merge6(k4, r1, r2), shape)
+			v += float64(combos) * float64(probs[pairIdx[r1][r2]])
 		}
 	}
-	s.keepCache[shape] = v
+	s.keepVal[shape], s.keepStamp[shape] = v, s.keepGen
 	return v
 }
 
