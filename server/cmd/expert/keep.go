@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"cribbage/internal/bots"
 	"cribbage/internal/expert"
 	"cribbage/internal/players"
 )
@@ -19,6 +20,7 @@ import (
 func keepx(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("keepx", flag.ExitOnError)
 	in := fs.String("bundle", "models-expert/expert.bin", "bundle whose discarder decides, and which gets the table")
+	opts := fs.String("opts", "", "player options for the discarder, as after @ in a player spec (e.g. cond); effort does not matter")
 	out := fs.String("out", "", "bundle to write (required)")
 	scores := fs.String("scores", "30,30", "MINE,THEIRS: the scores the discards are decided at")
 	workers := fs.Int("workers", runtime.NumCPU(), "parallel workers")
@@ -35,7 +37,15 @@ func keepx(ctx context.Context, args []string) error {
 		return err
 	}
 	t0 := time.Now()
-	ex, err := expert.BuildExactKeep(ctx, b, sc, *workers, func(n int) {
+	spec := *in + "@1"
+	if *opts != "" {
+		spec += "," + *opts
+	}
+	newBot, err := players.Resolve(spec)
+	if err != nil {
+		return err
+	}
+	ex, err := expert.BuildExactKeep(ctx, func() bots.Bot { return newBot(0) }, sc, *workers, func(n int) {
 		if n%2000 == 0 {
 			fmt.Fprintf(os.Stderr, "  %d/18395 rank shapes, %v\n", n, time.Since(t0).Round(time.Second))
 		}
@@ -47,7 +57,7 @@ func keepx(ctx context.Context, args []string) error {
 	if b.Meta.Metrics == nil {
 		b.Meta.Metrics = map[string]float64{}
 	}
-	b.Meta.Notes = strings.TrimSpace(b.Meta.Notes + fmt.Sprintf(" keepx: own discarder at %d-%d (%s).", sc[0], sc[1], *in))
+	b.Meta.Notes = strings.TrimSpace(b.Meta.Notes + fmt.Sprintf(" keepx: discarder %s at %d-%d.", spec, sc[0], sc[1]))
 	b.Meta.Saved = time.Now().UTC().Format(time.RFC3339)
 	if err := b.Save(*out); err != nil {
 		return err

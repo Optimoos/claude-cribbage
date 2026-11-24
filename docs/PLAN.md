@@ -1548,6 +1548,9 @@ With `pegmix=0.2`:
   +0.042 ± 0.010 (stopped at H1 +0.3 after 4,594 pairs).
 - Guards: `heuristic` -0.14 ± 0.25, `heuristic2` **+1.00 ± 0.25**,
   `models-big` -0.20 ± 0.27.
+- Both head-to-head runs stopped at H1 of the sequential test, so their
+  estimates read high and their ± is not a fixed-sample interval; the
+  guards are fixed-length (40k games each).
 - **Decision:** the policy is on whenever the bundle has one, mixed at 0.2
   (`DefaultPegMix`). No guard loses significantly; the mix costs nothing
   measurable and protects against opponents unlike the fitted bots.
@@ -1585,6 +1588,10 @@ Games:
 | `@400,is` | `@400` | 32k (stopped, H0 v +0.5) | 50.12 ± 0.28 | +0.15 ± 0.07 | +0.015 ± 0.006 |
 | policy `@400,is` | policy `@400` | 12k (stopped, H1 +0.3) | **51.07 ± 0.45** | +0.53 ± 0.12 | +0.053 ± 0.010 |
 
+- Both runs were stopped by the sequential test, so their estimates read
+  high (a test stopped at H1 stops on a run of good luck) and the ± is not
+  a fixed-sample interval. The fixed-length check of the whole stack is
+  M41's.
 - Alone the search gains little; on top of proposal 2 it gains a point.
   At my nodes the search averages over the worlds, so it is only as good
   as their weights, and proposal 2 is what makes them good.
@@ -1622,10 +1629,11 @@ Games:
 - `cond` is a real but small gain: 4.9% of discards change, each by 0.15
   win points, so about +0.07 win points per game, too small for games to
   see. It costs 25 ms per discard on the t4g.micro (2.6 ms before).
-- `condpeg` gains nothing: with 4 samples a pair's mean has a standard
-  deviation of about 1.2 points, which swamps the interaction it is meant
-  to carry. A smoothed model of the interaction might do better; it is not
-  pursued, since the rollouts put the whole of this part near zero.
+- `condpeg` is unresolved rather than refuted: +0.001 ± 0.018 covers all
+  of `cond`'s gain. With 4 samples a pair's mean has a standard deviation
+  of about 1.2 points, which can swamp the interaction it is meant to
+  carry. A smoothed model of the interaction, or many more samples, might
+  do better; neither is pursued now.
 - **Decision:** `cond` goes into the top level; `condpeg` and its 27 MB
   table stay out.
 - Times: rollcheck 2 to 3 minutes per set of policies; rollpair 38

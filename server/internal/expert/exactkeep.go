@@ -6,16 +6,19 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"cribbage/internal/bots"
 	"cribbage/internal/engine"
 )
 
-// BuildExactKeep runs the bundle's own discarder on every six-card hand, on
-// both sides, with the given scores (mine, theirs), and returns the share
-// of each six-rank shape's hands that keep each option, in keepLayout's
-// order. Hands that differ only by relabelling suits discard alike, so each
-// class is decided once and weighted by the hands it stands for. progress,
-// if not nil, is called with the shapes done so far.
-func BuildExactKeep(ctx context.Context, b *Bundle, scores [2]int, workers int, progress func(done int)) (*[2][]float32, error) {
+// BuildExactKeep runs a discarder (each worker makes its own with newBot,
+// usually the bundle's expert with the options it plays with) on every
+// six-card hand, on both sides, with the given scores (mine, theirs), and
+// returns the share of each six-rank shape's hands that keep each option,
+// in keepLayout's order. Hands that differ only by relabelling suits
+// discard alike, so each class is decided once and weighted by the hands
+// it stands for. progress, if not nil, is called with the shapes done so
+// far.
+func BuildExactKeep(ctx context.Context, newBot func() bots.Bot, scores [2]int, workers int, progress func(done int)) (*[2][]float32, error) {
 	l := keepLayout()
 	out := &[2][]float32{make([]float32, len(l.shapes)), make([]float32, len(l.shapes))}
 	var shapes [][6]int8
@@ -26,7 +29,7 @@ func BuildExactKeep(ctx context.Context, b *Bundle, scores [2]int, workers int, 
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			bot := NewBotWith(b, Options{Effort: 1})
+			bot := newBot()
 			for ctx.Err() == nil {
 				i := int(next.Add(1) - 1)
 				if i >= len(shapes) {
@@ -62,7 +65,7 @@ func BuildExactKeep(ctx context.Context, b *Bundle, scores [2]int, workers int, 
 
 // discardShape returns the rank shape bot keeps from six on side (0 the
 // dealer) at scores (mine, theirs).
-func discardShape(bot *Bot, six [6]engine.Card, side int, scores [2]int) int16 {
+func discardShape(bot bots.Bot, six [6]engine.Card, side int, scores [2]int) int16 {
 	var hands [2][6]engine.Card
 	hands[0] = six
 	n := 0
