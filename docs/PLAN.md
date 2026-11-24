@@ -1672,7 +1672,18 @@ Proposal 6's endgame parts:
   ~50 samples per option has about 7% noise per value against differences
   of about 0.15%; it cannot resolve them within the latency budget.
 
-PENDING: guards.
+Guards, 20k games each, coupled against `runs/base-m14`:
+
+| Opponent | Win % | Change from M14 | Margin change | Pegging change |
+|---|---|---|---|---|
+| `heuristic` | 58.57 ± 0.46 | **+1.21 ± 0.46** | +0.48 ± 0.11 | +0.038 ± 0.009 |
+| `heuristic2` | 58.47 ± 0.45 | **+2.31 ± 0.47** | +0.93 ± 0.12 | +0.086 ± 0.009 |
+| `models-big` | 57.27 ± 0.45 | **+1.34 ± 0.49** | +0.52 ± 0.13 | +0.046 ± 0.010 |
+
+- Every guard improves, by 1.2 to 2.3 points; the stack generalizes beyond
+  the expert-like opponents its policy was fitted to.
+- Times: head to head 41 minutes, guards 31 minutes (about 16 to 37 games
+  a second under load against estimates of 2 to 2.5 hours in all).
 
 ---
 
