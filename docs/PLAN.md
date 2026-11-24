@@ -1685,6 +1685,28 @@ Guards, 20k games each, coupled against `runs/base-m14`:
 - Times: head to head 41 minutes, guards 31 minutes (about 16 to 37 games
   a second under load against estimates of 2 to 2.5 hours in all).
 
+### M42: Tables rebuilt from the stack's own play (proposal 10)
+
+- 150k self-play games of the stack (`@400,is,cond`, seed 500001; 1.37M
+  hands, 1 h 44 min against an estimate of 3 to 3.5 hours as the machine's
+  other load fell) rebuilt the discard tables and keep temperatures
+  (`expert build -corpus`), keeping the win table.
+- Stored rollouts: regret 0.112 ± 0.021 against 0.081 ± 0.015 for M14's
+  tables (change -0.031 ± 0.019; with `cond` -0.026 ± 0.019). The rollouts
+  value options under the old bot's pegging, which favours the old tables,
+  so games decided.
+- Games, both `@400,cond` with neither the exact keep table nor the policy,
+  40k: rebuilt **49.59 ± 0.27**, margin -0.19 ± 0.07. The rebuilt tables are
+  worse; M14's stay.
+- The likely cause is data: 807k detailed hands against the 1.6M M14's
+  tables came from, with the same smoothing. Pooling across rounds, as the
+  proposal suggests, needs counts the old build did not keep.
+- A grouped prior for rare pegging shapes (shapes with the same counts of
+  low cards, fives, ten-cards, pairs and runs), tried on the corpora of
+  M38: held-out log-likelihood of the real pegging -3.8044 against -3.7990
+  for the flat prior (rare shapes slightly better, the rest worse).
+  Dropped.
+
 ---
 
 # Roadmap: three-player games (not started)
