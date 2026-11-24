@@ -1645,6 +1645,35 @@ Games:
   minutes (35 of them playouts) against an estimate of 15 to 20, slowed by
   three other jobs.
 
+### M41: The whole stack, and proposal 6's endgame parts
+
+The stack: the exact keep table (eps 0.5), the pegging policy mixed at 0.2,
+IS search at λ 0.5, `cond` discards and proposal 6's small fixes, in one
+bundle (`runs/final/expert-v1.bin`: M14's tables plus `keepx` and
+`pegpol`), spec `@400,islambda=0.5,cond`.
+
+Fixed length, 40k games (seed 950001) against M14's play
+(`expert.bin@400,nofixes`): **52.13 ± 0.27**, margin +0.94 ± 0.07 per game,
+pegging +0.096 ± 0.006 per hand. About two points, at the top of the
+proposals' own realistic range (+1 to +3).
+
+Proposal 6's endgame parts:
+- **Win table:** 100k games of the stack started at random scores in
+  60-120 (210k hands, 30 minutes) rebuilt W where both scores are 70 or
+  more (`expert wintable`). Held-out log loss on 20k more such games:
+  0.28217 for M14's table, 0.28182 rebuilt (window 500 hands; worst 10x10
+  bin |z| 3.9 to 2.9). In 40k games started at 90-120 the two tables play
+  **49.98 ± 0.05**: no difference. M14's table is already calibrated in
+  the endgame; it stays.
+- **Need-aware discard solver:** not built. On the stored rollouts the
+  expert's discard regret is 0.149 win % per decision when either score is
+  90 or more (495 decisions) against 0.058 below, so about half the
+  remaining discard regret is in the endgame. But at run time a rollout of
+  ~50 samples per option has about 7% noise per value against differences
+  of about 0.15%; it cannot resolve them within the latency budget.
+
+PENDING: guards.
+
 ---
 
 # Roadmap: three-player games (not started)
