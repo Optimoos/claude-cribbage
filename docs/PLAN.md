@@ -1337,6 +1337,78 @@ games against `heuristic`, `GOARCH=arm64`):
 Map access was dearer on ARM than on x86, so the gain there is 2.7x. The
 working budget is about 200 ms per decision on one core.
 
+### M34: Oracles that bound the headroom (E2)
+
+**Built (2026-11-23):** expert options `oracle=six` and `oracle=hand`
+(test only: `bots.Watcher` hands the bot the game), and `cmd/expert
+rollout`. `engine.NewHand` starts a game at a given deal.
+- `oracle=hand` searches only the opponent's real hand (clairvoyant
+  pegging). `oracle=six` searches the hands four of their six dealt cards
+  make, weighted by the keep model's chance of keeping each from those
+  six. Discards are unchanged.
+- `rollout` takes discard decisions from expert self-play (seed 950001),
+  and for each deals 1000 opponent sixes and starters shared by all
+  options. The opponent discards with the expert's discarder (it cannot
+  see mine), both players peg at effort 25, and the hand's end is valued
+  through the win table. Each policy's regret is the best option's value
+  less its choice's: "naive" picks the best on all samples (biased high),
+  "split" picks on one half and scores on the other (biased low).
+
+Pegging oracles, 40k games each (seed 900001):
+
+| `@400` with | v expert@400 | Pegging/hand | v `heuristic` (change, coupled) |
+|---|---|---|---|
+| `oracle=hand` | 70.38 ± 0.34 | +0.994 ± 0.006 | +18.62 ± 0.40 |
+| `oracle=six` | 69.36 ± 0.34 | +0.957 ± 0.006 | +17.95 ± 0.39 |
+
+- Hidden cards are worth about a point of pegging per hand. That is a
+  ceiling on what any inference or search change could reach, not an
+  estimate: the doc's "10 to 25% reachable" would mean 2 to 7 win points
+  from pegging alone, more than its own realistic total of 1 to 3 for all
+  proposals together. The kill rule for proposals 1, 2 and 9 (gap under
+  0.5) passes, but at this size it would pass for almost any oracle.
+- Proposal 1 corrects strategy fusion, a structural error, which no oracle
+  here measures; it has to be tested directly.
+- The six-card oracle is not a bound on proposal 3. It shows that once the
+  six cards are known the current keep model recovers nearly everything
+  (0.957 of 0.994), but proposal 3 sharpens the keep model when the six is
+  unknown, as in play. Proposal 3 is cheap, so it is judged on its own
+  test (probability of the true keep on held-out hands, then games).
+
+Rollout discards, `expert rollout -decisions 2000 -samples 1000 -out
+runs/e2-rollout.csv` (49 minutes, 24 workers). Regret per decision:
+
+| Policy | Agrees with best | Win % naive | Win % split | Points naive | Points split |
+|---|---|---|---|---|---|
+| expert | 82.8% | 0.090 ± 0.022 | 0.042 ± 0.023 | 0.078 ± 0.012 | 0.061 ± 0.012 |
+| `heuristic2` | 79.8% | 0.181 ± 0.042 | 0.132 ± 0.041 | 0.081 ± 0.011 | 0.063 ± 0.011 |
+| `heuristic` | 77.8% | 0.249 ± 0.050 | 0.200 ± 0.050 | 0.086 ± 0.011 | 0.069 ± 0.011 |
+
+- Regret in points cannot tell the expert from the heuristic, which is 1.5
+  win points worse, so the doc's kill rules in points (0.02, 0.04) are not
+  applied. Win-probability regret separates them.
+- Calibration: at 9.05 discards per player per game, the heuristic's
+  extra regret is (0.200 − 0.042) × 9.05 = 1.43 win points (naive 1.44),
+  against 1.53 ± 0.28 measured for `@400,heurdiscard`. The oracle is
+  calibrated.
+- The expert's own regret is therefore 0.4 to 0.8 win points per game:
+  the combined ceiling for proposals 4 and 5 against an expert-like
+  opponent, with playouts at effort 25.
+- `runs/e2-rollout.csv` holds every option's values, the offline test set
+  for proposal 4; the command above regenerates it.
+- Times: oracle matches 1 to 4 minutes each (an oracle searches about 30x
+  less per decision), rollouts 49 minutes; the whole run 59 minutes
+  against an estimate of 78.
+
+Kill rules, applied:
+- Proposals 1 and 2: proceed; proposal 2's ablation (`nopeg` = 0) means
+  the current likelihood gives nothing to build on.
+- Proposal 3: proceed, judged on its own test.
+- Proposal 4: proceed, with its gain capped by the 0.4 to 0.8 measured.
+- Proposal 5: defer; it would only add to what 4 leaves of that ceiling,
+  at the cost of a Python step.
+- Proposal 9: unchanged, last.
+
 ---
 
 # Roadmap: three-player games (not started)
