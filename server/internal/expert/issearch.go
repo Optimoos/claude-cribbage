@@ -22,10 +22,20 @@ import (
 // they can.
 
 // isGroup is a set of worlds sharing one public state: nodes[k] is the
-// state in world idx[k].
+// state in world idx[k]. w[k], when w is not nil, is that world's weight
+// here: its root weight times the policy's chance of the opponent's plays
+// since the root (blended search only).
 type isGroup struct {
 	nodes []pegNode
 	idx   []int32
+	w     []float64
+}
+
+func (g *isGroup) weight(k int, worlds []world) float64 {
+	if g.w != nil {
+		return g.w[k]
+	}
+	return worlds[g.idx[k]].weight
 }
 
 // publicKey is a node with the opponent's hidden cards left out.
@@ -76,7 +86,7 @@ func take[T any](buf *[]T, top *int, n int) []T {
 
 // isDepthFactor bounds the scratch a search takes, in slices of the
 // number of worlds of each kind.
-const isDepthFactor = 40
+const isDepthFactor = 48
 
 var isBufs = sync.Pool{New: func() any { return new(isBuf) }}
 
@@ -101,7 +111,7 @@ func (s *searcher) isRoot(root pegNode, i int, worlds []world, worldCribs bool, 
 		n.turn = 0
 		nodes[k], idx[k] = n, int32(k)
 	}
-	s.isPlay(isGroup{nodes, idx}, i, nil, worlds, worldCribs, s.isAvail, vals)
+	s.isPlay(isGroup{nodes: nodes, idx: idx}, i, nil, worlds, worldCribs, s.isAvail, vals)
 }
 
 // isPlay has the player to move in every node of g play the card at
@@ -175,16 +185,22 @@ func (s *searcher) isPlay(g isGroup, i int, pos []int, worlds []world, worldCrib
 			}
 		default:
 			if ng == 1 {
-				s.isNode(isGroup{after, g.idx}, worlds, worldCribs, avail, vals)
+				s.isNode(isGroup{after, g.idx, g.w}, worlds, worldCribs, avail, vals)
 				continue
 			}
 			gm := b.mark()
-			sub := isGroup{b.node(sizes[j]), b.i32(sizes[j])}
+			sub := isGroup{nodes: b.node(sizes[j]), idx: b.i32(sizes[j])}
+			if g.w != nil {
+				sub.w = b.f64(sizes[j])
+			}
 			sv := b.f64(sizes[j])
 			at := 0
 			for k := range gid {
 				if gid[k] == j {
 					sub.nodes[at], sub.idx[at] = after[k], g.idx[k]
+					if g.w != nil {
+						sub.w[at] = g.w[k]
+					}
 					at++
 				}
 			}
@@ -222,7 +238,7 @@ func (s *searcher) isNode(g isGroup, worlds []world, worldCribs bool, avail [14]
 			s.isPlay(g, i, nil, worlds, worldCribs, avail, tmp)
 			var v float64
 			for k := range tmp {
-				v += worlds[g.idx[k]].weight * tmp[k]
+				v += g.weight(k, worlds) * tmp[k]
 			}
 			if v > bestV {
 				bestV = v
@@ -236,21 +252,48 @@ func (s *searcher) isNode(g isGroup, worlds []world, worldCribs bool, avail [14]
 	for k := range vals {
 		vals[k] = 2
 	}
-	sub := isGroup{b.node(n), b.i32(n)}
+	sub := isGroup{nodes: b.node(n), idx: b.i32(n)}
 	at, pos := b.int(n), b.int(n)
 	sv := b.f64(n)
 	blend := s.isLambda < 1 && s.pegPol != nil
 	var pub [14]float64
 	var ev, z []float64
+	var f [nPegFeat]float64
+	var rest [4]int8
+	// e is the policy's unnormalized chance that the opponent of node nd
+	// plays its card at position i.
+	e := func(nd *pegNode, i int) float64 {
+		nr := copy(rest[:], nd.hand[1][:i])
+		nr += copy(rest[nr:], nd.hand[1][i+1:nd.n[1]])
+		pegPrivate(rest[:nr], nd.count, nd.hand[1][i], &f)
+		return math.Exp(pub[nd.hand[1][i]] + s.pegPol.dotPrivate(&f))
+	}
 	if blend {
-		ev, z = b.f64(n), b.f64(n)
+		ev, z, sub.w = b.f64(n), b.f64(n), b.f64(n)
 		clear(ev)
 		clear(z)
-		var f [nPegFeat]float64
 		for r := int8(1); r <= 13; r++ {
 			if n0.count+rankValue(r) <= 31 {
 				pegPublic(n0.seq[:n0.seqN], n0.count, &avail, r, &f)
 				pub[r] = s.pegPol.dot(&f)
+			}
+		}
+		f = [nPegFeat]float64{}
+		if n0.count == 0 {
+			f[pfLead] = 1
+		}
+		// Each world's total, so the policy's chances can weight the
+		// worlds below this node.
+		for k := range g.nodes {
+			nd := &g.nodes[k]
+			var tried uint16
+			for i := 0; i < int(nd.n[1]); i++ {
+				r := nd.hand[1][i]
+				if tried&(1<<r) != 0 || n0.count+rankValue(r) > 31 {
+					continue
+				}
+				tried |= 1 << r
+				z[k] += e(nd, i)
 			}
 		}
 	}
@@ -264,6 +307,9 @@ func (s *searcher) isNode(g isGroup, worlds []world, worldCribs bool, avail [14]
 			for i := 0; i < int(nd.n[1]); i++ {
 				if nd.hand[1][i] == r {
 					sub.nodes[m], sub.idx[m], at[m], pos[m] = *nd, g.idx[k], k, i
+					if blend {
+						sub.w[m] = g.weight(k, worlds) * e(nd, i) / z[k]
+					}
 					m++
 					break
 				}
@@ -272,30 +318,21 @@ func (s *searcher) isNode(g isGroup, worlds []world, worldCribs bool, avail [14]
 		if m == 0 {
 			continue
 		}
-		s.isPlay(isGroup{sub.nodes[:m], sub.idx[:m]}, 0, pos[:m], worlds, worldCribs, avail, sv[:m])
+		sg := isGroup{nodes: sub.nodes[:m], idx: sub.idx[:m]}
+		if blend {
+			sg.w = sub.w[:m]
+		}
+		s.isPlay(sg, 0, pos[:m], worlds, worldCribs, avail, sv[:m])
 		for j := 0; j < m; j++ {
 			vals[at[j]] = min(vals[at[j]], sv[j])
-		}
-		if blend {
-			var f [nPegFeat]float64
-			var rest [4]int8
-			if n0.count == 0 {
-				f[pfLead] = 1
-			}
-			for j := 0; j < m; j++ {
-				nd := &sub.nodes[j]
-				nr := copy(rest[:], nd.hand[1][:pos[j]])
-				nr += copy(rest[nr:], nd.hand[1][pos[j]+1:nd.n[1]])
-				pegPrivate(rest[:nr], n0.count, r, &f)
-				e := math.Exp(pub[r] + s.pegPol.dotPrivate(&f))
-				ev[at[j]] += e * sv[j]
-				z[at[j]] += e
+			if blend {
+				ev[at[j]] += e(&sub.nodes[j], pos[j]) / z[at[j]] * sv[j]
 			}
 		}
 	}
 	if blend {
 		for k := range vals {
-			vals[k] = s.isLambda*vals[k] + (1-s.isLambda)*ev[k]/z[k]
+			vals[k] = s.isLambda*vals[k] + (1-s.isLambda)*ev[k]
 		}
 	}
 }

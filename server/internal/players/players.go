@@ -72,6 +72,9 @@ func Resolve(spec string) (func(worker int) bots.Bot, error) {
 		}
 	}
 	if b, err := expert.LoadBundle(path); err == nil {
+		if opt.ISLambdaSet && opt.ISLambda < 1 && (b.PegPolicy == nil || opt.NoPegPolicy || opt.PegTemp != 0) {
+			return nil, fmt.Errorf("%q: islambda below 1 needs the bundle's pegging policy", spec)
+		}
 		return func(int) bots.Bot { return expert.NewBotWith(b, opt) }, nil
 	} else if path != spec {
 		return nil, err
