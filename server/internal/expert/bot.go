@@ -33,6 +33,7 @@ type Options struct {
 	NoPegPolicy      bool    // ignore the bundle's fitted pegging policy: the softmax on points at PegTemp
 	ISLambda         float64 // with ISSearch and a pegging policy: the weight of the opponent's best reply against the policy, when ISLambdaSet
 	ISLambdaSet      bool    // otherwise 1, best reply alone
+	CondDiscard      bool    // condition the opponent's show and the crib on their likely hands (proposal 4)
 }
 
 // Oracle is how much of the opponent's hand a test oracle lets the pegging
@@ -74,6 +75,13 @@ func NewBotWith(b *Bundle, opt Options) *Bot {
 	if b.Discard != nil && !opt.HeuristicDiscard {
 		bot.discard = newDiscarder(b.Win, b.Discard)
 		bot.discard.noFixes = opt.NoSmallFixes
+		if opt.CondDiscard {
+			eps := DefaultKeepEps
+			if opt.KeepEpsSet {
+				eps = opt.KeepEps
+			}
+			bot.discard.keep = b.keepModelMix(eps, opt.NoExactKeep)
+		}
 	}
 	if !opt.NoKeepModel {
 		eps := DefaultKeepEps

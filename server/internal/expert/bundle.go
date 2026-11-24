@@ -76,7 +76,7 @@ type Bundle struct {
 
 // DefaultKeepEps is the softmax's weight in the opponent model when the
 // bundle has an exact keep table.
-const DefaultKeepEps = 0.1
+const DefaultKeepEps = 0.5
 
 // keepModel returns the opponent discard model with the default mix,
 // built on first use, or nil.

@@ -9,6 +9,10 @@ type discarder struct {
 	win     *WinTable
 	t       *DiscardTables
 	noFixes bool // M14's discards: heels with the show, even odds when both peg out
+	// keep, when not nil, conditions the opponent's show and the crib on
+	// their likely hands (conddiscard.go) through post.
+	keep *keepModel
+	post *condPost
 
 	// Per decision.
 	me, opp int
@@ -40,6 +44,18 @@ func (d *discarder) choose(o *engine.Observation, legal []engine.Action) engine.
 	var held [52]bool
 	for _, c := range hand {
 		held[c] = true
+	}
+	if d.keep != nil {
+		if d.post == nil {
+			d.post = new(condPost)
+		}
+		var six [6]engine.Card
+		copy(six[:], hand)
+		oside := 0
+		if d.iDeal {
+			oside = 1
+		}
+		d.post.posterior(d.keep, oside, six)
 	}
 	best, bestV := legal[0], -1.0
 	for _, a := range legal {
@@ -103,13 +119,29 @@ func (d *discarder) value(kept [4]engine.Card, disc [2]engine.Card, held *[52]bo
 // valueOver is my win probability over the starters in that I cannot see,
 // counting the heels with the show when heelsInShow.
 func (d *discarder) valueOver(kept [4]engine.Card, disc [2]engine.Card, held *[52]bool, in func(engine.Card) bool, heelsInShow bool) float64 {
-	side, oside := 1, 0
+	side := 1
 	if d.iDeal {
-		side, oside = 0, 1
+		side = 0
 	}
 	shape := shapeOf(kept)
 	d.pm = trim(d.t.peg(side, shape, 0))
 	d.po = trim(d.t.peg(side, shape, 1))
+	if d.keep != nil {
+		d.condOption(kept, disc, held, in, heelsInShow)
+	} else {
+		d.tableOption(kept, disc, held, in, heelsInShow)
+	}
+	d.dealerTable()
+	return d.pegValue()
+}
+
+// tableOption fills the per-option distributions from the show and crib
+// tables.
+func (d *discarder) tableOption(kept [4]engine.Card, disc [2]engine.Card, held *[52]bool, in func(engine.Card) bool, heelsInShow bool) {
+	side, oside := 1, 0
+	if d.iDeal {
+		side, oside = 0, 1
+	}
 	pair := pairOf(disc[0], disc[1])
 
 	clear(d.qmix[:])
@@ -169,7 +201,10 @@ func (d *discarder) valueOver(kept [4]engine.Card, disc [2]engine.Card, held *[5
 			}
 		}
 	}
+}
 
+// dealerTable fills d.g for the dealer from d.hand.
+func (d *discarder) dealerTable() {
 	if d.iDeal {
 		for mp := range d.pm {
 			a := d.me + mp
@@ -189,7 +224,10 @@ func (d *discarder) valueOver(kept [4]engine.Card, disc [2]engine.Card, held *[5
 			}
 		}
 	}
+}
 
+// pegValue is the option's win probability over both players' pegging.
+func (d *discarder) pegValue() float64 {
 	var v float64
 	for mp, pmp := range d.pm {
 		if pmp == 0 {

@@ -227,12 +227,18 @@ type roller struct {
 // values plays every option of d over the same samples of the opponent's
 // six cards and the starter.
 func (r *roller) values(d discardDecision, samples int, seed uint64) decisionValues {
-	var v decisionValues
+	var opts [][2]engine.Card
 	for i := 0; i < 6; i++ {
 		for j := i + 1; j < 6; j++ {
-			v.options = append(v.options, [2]engine.Card{d.six[i], d.six[j]})
+			opts = append(opts, [2]engine.Card{d.six[i], d.six[j]})
 		}
 	}
+	return r.valuesOf(d, opts, samples, seed)
+}
+
+// valuesOf is values for the given options only.
+func (r *roller) valuesOf(d discardDecision, opts [][2]engine.Card, samples int, seed uint64) decisionValues {
+	v := decisionValues{options: opts}
 	nopt := len(v.options)
 	v.winAll, v.ptsAll = make([]float64, nopt), make([]float64, nopt)
 	for h := 0; h < 2; h++ {
