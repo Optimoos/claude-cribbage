@@ -17,7 +17,10 @@ type world struct {
 	ranks  [4]int8
 	n      int8
 	weight float64
-	show   int // the opponent's show score with this hand
+	show   int // the opponent's show score with this hand, without hidden suits
+	// The chances that hidden suits add nobs, or a flush of four or five
+	// (taken as independent of each other).
+	pNobs, pFlush4, pFlush5 float32
 }
 
 const (
@@ -34,7 +37,8 @@ type searcher struct {
 	iDeal    bool
 	myShow   int
 	crib     [maxShow]float64 // probability of each crib score
-	show     int              // the current world's opponent show
+	world    *world           // the world being searched
+	cribs    [][maxShow]float64 // per searched world in the endgame: the crib given that world
 	worlds   []world
 	pool     []world
 	sampled  []world
@@ -86,11 +90,7 @@ func (s *searcher) choose(o *engine.Observation, legal []engine.Action) engine.A
 		endCaches.Put(s.ends)
 		s.ends = nil
 	}()
-	s.ends.gen++
-	if s.ends.gen == 0 { // wrapped: clear the stamps
-		clear(s.ends.stamp)
-		s.ends.gen = 1
-	}
+	s.newEnds()
 
 	var seen [52]bool
 	for _, c := range o.Kept {
@@ -127,7 +127,9 @@ func (s *searcher) choose(o *engine.Observation, legal []engine.Action) engine.A
 		worlds = systematic(worlds, s.effort, &s.sampled)
 	}
 	for i := range worlds { // only the searched worlds need their show
-		worlds[i].show = oppShow(oppPlayed, worlds[i].ranks[:worlds[i].n], o.Starter)
+		w := &worlds[i]
+		w.show = oppShow(oppPlayed, w.ranks[:w.n], o.Starter)
+		w.pNobs, w.pFlush4, w.pFlush5 = hiddenSuits(oppPlayed, w.ranks[:w.n], o.Starter, &seen)
 	}
 
 	// The root: my hand, the current count and whose card was last.
@@ -149,6 +151,12 @@ func (s *searcher) choose(o *engine.Observation, legal []engine.Action) engine.A
 		}
 	}
 
+	// Near 121 the crib's distribution matters through the win table, and
+	// it depends on the world: what they kept says what they threw.
+	worldCribs := max(s.base[0], s.base[1]) >= cribByWorldFrom
+	if worldCribs {
+		s.worldCribs(o, oppPlayed, &seen, worlds)
+	}
 	best, bestV := legal[0], -1.0
 	var tried uint16
 	for _, a := range legal {
@@ -167,7 +175,11 @@ func (s *searcher) choose(o *engine.Observation, legal []engine.Action) engine.A
 			n := root
 			n.hand[1], n.n[1] = w.ranks, w.n
 			n.turn = 0
-			s.show = w.show
+			s.world = w
+			if worldCribs {
+				s.crib = s.cribs[i]
+				s.newEnds() // end values depend on the crib
+			}
 			v += w.weight * s.after(n, idx, -1, 2)
 			total += w.weight
 		}
@@ -231,9 +243,32 @@ func (s *searcher) after(c pegNode, i int, alpha, beta float64) float64 {
 // the crib in that order, each of which can win the game, then the next
 // hand through the win table.
 func (s *searcher) end(myPeg, oppPeg int) float64 {
+	w := s.world
+	if w.pNobs == 0 && w.pFlush4 == 0 && w.pFlush5 == 0 {
+		return s.endAt(w.show, myPeg, oppPeg)
+	}
+	pn, p4, p5 := float64(w.pNobs), float64(w.pFlush4), float64(w.pFlush5)
+	var v float64
+	for _, f := range [3]struct {
+		pts int
+		p   float64
+	}{{0, 1 - p4 - p5}, {4, p4}, {5, p5}} {
+		if f.p == 0 {
+			continue
+		}
+		v += f.p * (1 - pn) * s.endAt(min(w.show+f.pts, maxShow-1), myPeg, oppPeg)
+		if pn > 0 {
+			v += f.p * pn * s.endAt(min(w.show+f.pts+1, maxShow-1), myPeg, oppPeg)
+		}
+	}
+	return v
+}
+
+// endAt is end for an opponent show of exactly show.
+func (s *searcher) endAt(show, myPeg, oppPeg int) float64 {
 	k := -1
 	if myPeg < maxPeg && oppPeg < maxPeg {
-		k = (s.show*maxPeg+myPeg)*maxPeg + oppPeg
+		k = (show*maxPeg+myPeg)*maxPeg + oppPeg
 		if s.ends.stamp[k] == s.ends.gen {
 			return s.ends.val[k]
 		}
@@ -241,9 +276,9 @@ func (s *searcher) end(myPeg, oppPeg int) float64 {
 	me, opp := s.base[0]+myPeg, s.base[1]+oppPeg
 	var v float64
 	if s.iDeal {
-		v = s.showThenCrib(opp+s.show, me+s.myShow, false)
+		v = s.showThenCrib(opp+show, me+s.myShow, false)
 	} else {
-		v = s.showThenCrib(me+s.myShow, opp+s.show, true)
+		v = s.showThenCrib(me+s.myShow, opp+show, true)
 	}
 	if k >= 0 {
 		s.ends.val[k], s.ends.stamp[k] = v, s.ends.gen
@@ -669,4 +704,174 @@ func merge6(k4 [4]int, r1, r2 int) [6]int8 {
 		n++
 	}
 	return six
+}
+
+// hiddenSuits returns the chances that the suits of the opponent's hidden
+// cards, drawn from those I have not seen, give their hand nobs, or a
+// flush of four or of five (with the starter). Each hidden card's suit is
+// taken as independent of the others' but for two of a rank, which cannot
+// share a suit.
+func hiddenSuits(known []engine.Card, hidden []int8, starter engine.Card, seen *[52]bool) (nobs, flush4, flush5 float32) {
+	if len(hidden) == 0 {
+		return 0, 0, 0
+	}
+	var unseenOf [14]int // unseen cards of each rank
+	for c := engine.Card(0); c < 52; c++ {
+		if !seen[c] {
+			unseenOf[c.Rank()]++
+		}
+	}
+	var heldOf [14]int
+	for _, r := range hidden {
+		heldOf[r]++
+	}
+	// Nobs: one of their hidden jacks is the jack of the starter's suit.
+	hasNobs := false
+	for _, c := range known {
+		if c.Rank() == 11 && c.Suit() == starter.Suit() {
+			hasNobs = true
+		}
+	}
+	if j := engine.NewCard(11, starter.Suit()); !hasNobs && !seen[j] && heldOf[11] > 0 {
+		nobs = float32(heldOf[11]) / float32(unseenOf[11])
+	}
+	// Flush: every card of the hand in one suit.
+	for su := engine.Suit(0); su < 4; su++ {
+		ok := true
+		for _, c := range known {
+			if c.Suit() != su {
+				ok = false
+			}
+		}
+		if !ok {
+			continue
+		}
+		p := 1.0
+		for r := 1; r <= 13 && p > 0; r++ {
+			switch {
+			case heldOf[r] == 0:
+			case heldOf[r] > 1 || seen[engine.NewCard(r, su)]:
+				p = 0
+			default:
+				p /= float64(unseenOf[r])
+			}
+		}
+		if su == starter.Suit() {
+			flush5 += float32(p)
+		} else {
+			flush4 += float32(p)
+		}
+	}
+	return nobs, flush4, flush5
+}
+
+// newEnds forgets every cached end value.
+func (s *searcher) newEnds() {
+	s.ends.gen++
+	if s.ends.gen == 0 { // wrapped: clear the stamps
+		clear(s.ends.stamp)
+		s.ends.gen = 1
+	}
+}
+
+// cribByWorldFrom is the score from which the search gives each world its
+// own crib. Below it a world's crib shifts all its ends alike, which
+// barely changes a choice, so the cheaper common crib is used.
+const cribByWorldFrom = 90
+
+// worldCribs fills s.cribs with each world's crib distribution: my two
+// discards, the two cards they threw and the starter. The pair they threw
+// is weighted as keepWeight weighs it (by card counts and the keep model)
+// given the four they kept. Fifteens, pairs and runs are exact; nobs from
+// their cards is its chance; a crib flush, which needs five cards of a
+// suit, is left out for their cards.
+func (s *searcher) worldCribs(o *engine.Observation, oppPlayed []engine.Card, seen *[52]bool, worlds []world) {
+	handEVTable()
+	s.cribs = s.cribs[:0]
+	key := keepCacheKey{starter: o.Starter, oppSide: 1}
+	if o.Dealer != o.Player {
+		key.oppSide = 0
+	}
+	sr := o.Starter.Rank()
+	d1, d2 := o.Discards[0], o.Discards[1]
+	myNobs := (d1.Rank() == 11 && d1.Suit() == o.Starter.Suit()) || (d2.Rank() == 11 && d2.Suit() == o.Starter.Suit())
+	jStar := engine.NewCard(11, o.Starter.Suit())
+	for i := range worlds {
+		w := &worlds[i]
+		var k4 [4]int
+		n := 0
+		for _, c := range oppPlayed {
+			k4[n] = c.Rank()
+			n++
+		}
+		for _, r := range w.ranks[:w.n] {
+			k4[n] = int(r)
+			n++
+		}
+		sort.Ints(k4[:])
+		shape := shapeIdx[((k4[0]*14+k4[1])*14+k4[2])*14+k4[3]]
+		// Cards they could have thrown: unseen by me, not in this world.
+		var avail [14]int
+		for c := engine.Card(0); c < 52; c++ {
+			if !seen[c] {
+				avail[c.Rank()]++
+			}
+		}
+		for _, r := range w.ranks[:w.n] {
+			avail[r]--
+		}
+		jStarFree := !seen[jStar] // the jack of the starter's suit may be theirs
+		var probs []float32
+		if s.keep != nil {
+			probs = s.keep.byKept[key.oppSide][int(shape)*numPairs:][:numPairs]
+		}
+		var crib [maxShow]float64
+		var total float64
+		for r1 := 1; r1 <= 13; r1++ {
+			for r2 := r1; r2 <= 13; r2++ {
+				combos := avail[r1] * avail[r2]
+				if r1 == r2 {
+					combos = choose(avail[r1], 2)
+				}
+				if combos <= 0 {
+					continue
+				}
+				wt := float64(combos)
+				if probs != nil {
+					wt *= float64(probs[pairIdx[r1][r2]])
+				}
+				if wt == 0 {
+					continue
+				}
+				c4 := [4]int{d1.Rank(), d2.Rank(), r1, r2}
+				sort.Ints(c4[:])
+				pts := int(handEVByShape[shapeIdx[((c4[0]*14+c4[1])*14+c4[2])*14+c4[3]]][sr-1])
+				pNobs := 0.0
+				switch {
+				case myNobs:
+					pts++
+				case jStarFree && avail[11] > 0:
+					jacks := 0
+					if r1 == 11 {
+						jacks++
+					}
+					if r2 == 11 {
+						jacks++
+					}
+					pNobs = float64(jacks) / float64(avail[11])
+				}
+				crib[min(pts, maxShow-1)] += wt * (1 - pNobs)
+				crib[min(pts+1, maxShow-1)] += wt * pNobs
+				total += wt
+			}
+		}
+		if total == 0 {
+			crib = s.crib // nothing fits: keep the common crib
+		} else {
+			for c := range crib {
+				crib[c] /= total
+			}
+		}
+		s.cribs = append(s.cribs, crib)
+	}
 }

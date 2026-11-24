@@ -57,8 +57,51 @@ func (d *discarder) choose(o *engine.Observation, legal []engine.Action) engine.
 	return best
 }
 
+// heelsOrderFrom is the score from which a discard values the dealer's
+// heels (two for a jack starter) before pegging, as they are scored, rather
+// than with the show. Below it no one can reach 121 in the hand, so the
+// order does not matter and the cheaper single pass is exact enough.
+const heelsOrderFrom = 90
+
 // value is my win probability after keeping kept and discarding disc.
 func (d *discarder) value(kept [4]engine.Card, disc [2]engine.Card, held *[52]bool) float64 {
+	if max(d.me, d.opp) < heelsOrderFrom {
+		return d.valueOver(kept, disc, held, func(engine.Card) bool { return true }, true)
+	}
+	// Jack starters: the dealer scores two at the cut, which may win.
+	var nJ, nOther float64
+	for s := engine.Card(0); s < 52; s++ {
+		if !held[s] {
+			if s.Rank() == 11 {
+				nJ++
+			} else {
+				nOther++
+			}
+		}
+	}
+	vOther := d.valueOver(kept, disc, held, func(s engine.Card) bool { return s.Rank() != 11 }, false)
+	var vJ float64
+	me, opp := d.me, d.opp
+	if d.iDeal {
+		d.me += 2
+	} else {
+		d.opp += 2
+	}
+	switch {
+	case d.me >= engine.WinScore:
+		vJ = 1
+	case d.opp >= engine.WinScore:
+		vJ = 0
+	default:
+		vJ = d.valueOver(kept, disc, held, func(s engine.Card) bool { return s.Rank() == 11 }, false)
+	}
+	d.me, d.opp = me, opp
+	return (nJ*vJ + nOther*vOther) / (nJ + nOther)
+}
+
+// valueOver is my win probability over the starters in that I cannot see,
+// counting the heels with the show when heelsInShow.
+func (d *discarder) valueOver(kept [4]engine.Card, disc [2]engine.Card, held *[52]bool, in func(engine.Card) bool, heelsInShow bool) float64 {
 	side, oside := 1, 0
 	if d.iDeal {
 		side, oside = 0, 1
@@ -71,15 +114,21 @@ func (d *discarder) value(kept [4]engine.Card, disc [2]engine.Card, held *[52]bo
 	clear(d.qmix[:])
 	clear(d.hand[:])
 	clear(d.cribByH[:])
-	const w = 1.0 / 46
+	var nIn float64
 	for s := engine.Card(0); s < 52; s++ {
-		if held[s] {
+		if !held[s] && in(s) {
+			nIn++
+		}
+	}
+	w := 1 / nIn
+	for s := engine.Card(0); s < 52; s++ {
+		if held[s] || !in(s) {
 			continue
 		}
 		sr := s.Rank()
 		h := engine.ScoreHand(kept, s, false).Total()
 		heels := 0
-		if sr == 11 {
+		if sr == 11 && heelsInShow {
 			heels = 2 // scored by the dealer at the cut; counted with the show here
 		}
 		for q, p := range d.t.show(oside, sr) {
@@ -154,7 +203,7 @@ func (d *discarder) value(kept [4]engine.Card, disc [2]engine.Card, held *[52]bo
 			var x float64
 			switch {
 			case a >= engine.WinScore && b >= engine.WinScore:
-				x = 0.5 // both peg out; which first is not modelled
+				x = pegOutFirst(engine.WinScore-d.me, mp, engine.WinScore-d.opp, op)
 			case a >= engine.WinScore:
 				x = 1
 			case b >= engine.WinScore:
@@ -209,4 +258,21 @@ func trim(p []float32) []float32 {
 		n--
 	}
 	return p[:n]
+}
+
+// pegOutFirst is the chance I peg out first when both of us reach 121 in
+// the pegging: I need myNeed of my myPeg points and they theirNeed of
+// their theirPeg. Pegging points come at a roughly steady rate through the
+// play, so whoever needs the smaller share of their points tends to get
+// there first.
+func pegOutFirst(myNeed, myPeg, theirNeed, theirPeg int) float64 {
+	a := float64(myNeed) / float64(max(myPeg, 1))
+	b := float64(theirNeed) / float64(max(theirPeg, 1))
+	switch {
+	case a < b:
+		return 1
+	case a > b:
+		return 0
+	}
+	return 0.5
 }
