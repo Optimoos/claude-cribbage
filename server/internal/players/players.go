@@ -19,7 +19,8 @@ import (
 // search), nofixes (M14's play, without
 // proposal 6's small fixes), noexact (ignore the exact keep
 // table), keepeps=X (its mix with the softmax), nopegpol (ignore the fitted
-// pegging policy), cond (discards conditioned on the opponent's likely
+// pegging policy), pegmix=X (mix the softmax on points into it at weight
+// X), cond (discards conditioned on the opponent's likely
 // hands), condpeg (and their pegging, with a shape-pair table), islambda=X (information-set search, the opponent's best
 // reply at weight X against the policy), and the test oracles oracle=six
 // and oracle=hand (see expert.Oracle).
@@ -53,6 +54,8 @@ func Resolve(spec string) (func(worker int) bots.Bot, error) {
 				opt.CondDiscard, opt.CondPeg = true, true
 			case o == "nopegpol":
 				opt.NoPegPolicy = true
+			case strings.HasPrefix(o, "pegmix="):
+				opt.PegMix, err = strconv.ParseFloat(o[len("pegmix="):], 64)
 			case strings.HasPrefix(o, "islambda="):
 				opt.ISLambda, err = strconv.ParseFloat(o[len("islambda="):], 64)
 				opt.ISLambdaSet, opt.ISSearch = true, true

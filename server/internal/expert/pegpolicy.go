@@ -165,6 +165,7 @@ type oppPlay struct {
 	count int8
 	lead  bool
 	pub   [14]float64
+	pts   [14]float64 // the points each rank scores at once
 }
 
 // publicAvail is each rank's count not yet seen from the public view: not
@@ -206,6 +207,7 @@ func (s *searcher) prepPegPolicy(o *engine.Observation) {
 				}
 				pegPublic(seq[:ns], count, &avail, h, &f)
 				op.pub[h] = s.pegPol.dot(&f)
+				op.pts[h] = f[pfPoints]
 			}
 			s.oppPlays = append(s.oppPlays, op)
 		}
@@ -238,7 +240,7 @@ func (s *searcher) pegPolicyLik(w world) float64 {
 		} else {
 			f[pfLead] = 0
 		}
-		var z, chosen float64
+		var z, chosen, zs, chosenS float64
 		var tried uint16
 		for i, h := range hand[:nh] {
 			if tried&(1<<h) != 0 || op.count+rankValue(h) > 31 {
@@ -253,8 +255,19 @@ func (s *searcher) pegPolicyLik(w world) float64 {
 			if h == op.rank {
 				chosen = e
 			}
+			if s.pegMix > 0 {
+				es := math.Exp(op.pts[h] / s.pegTemp)
+				zs += es
+				if h == op.rank {
+					chosenS = es
+				}
+			}
 		}
-		lik *= chosen / z
+		if s.pegMix > 0 {
+			lik *= (1-s.pegMix)*chosen/z + s.pegMix*chosenS/zs
+		} else {
+			lik *= chosen / z
+		}
 		for i := range hand[:nh] {
 			if hand[i] == op.rank {
 				hand[i] = hand[nh-1]

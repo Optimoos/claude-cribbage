@@ -49,6 +49,7 @@ type searcher struct {
 	keep      *keepModel
 	pegTemp   float64
 	pegPol    *PegPolicy // the fitted pegging policy (proposal 2); replaces pegTemp's softmax
+	pegMix    float64    // the softmax's weight mixed into pegPol's chances, for robustness
 	oppPlays  []oppPlay  // the opponent's plays this hand, prepared for pegPol
 	keepKey   keepCacheKey
 	keepGen   uint32 // keepVal[s] is valid for keepKey when keepStamp[s] == keepGen
