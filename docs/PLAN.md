@@ -1542,7 +1542,16 @@ Games, `@400` with the policy v `@400` (both with proposal 6's fixes):
 - `pegmix=X` mixes the old softmax into each play's chance at weight X. At
   0.2 the bad tail against `models-big` falls from 5.0% to 1.8% and the mean
   gain there rises to +0.078 (heuristic2 +0.179, heuristic +0.125).
-  PENDING: guards and head to head at 0.2.
+
+With `pegmix=0.2`:
+- Head to head v `@400`: **51.17 ± 0.47**, margin +0.43 ± 0.12, pegging
+  +0.042 ± 0.010 (stopped at H1 +0.3 after 4,594 pairs).
+- Guards: `heuristic` -0.14 ± 0.25, `heuristic2` **+1.00 ± 0.25**,
+  `models-big` -0.20 ± 0.27.
+- **Decision:** the policy is on whenever the bundle has one, mixed at 0.2
+  (`DefaultPegMix`). No guard loses significantly; the mix costs nothing
+  measurable and protects against opponents unlike the fitted bots.
+- Times: the corpus took 9 minutes, the fit 11 seconds.
 
 ### M39: Information-set pegging search (proposal 1)
 
@@ -1580,6 +1589,48 @@ Games:
   At my nodes the search averages over the worlds, so it is only as good
   as their weights, and proposal 2 is what makes them good.
 - PENDING: the blend (islambda), and guards for the combination.
+
+### M40: Discards conditioned on the opponent's hand (proposal 4)
+
+**Built (2026-11-23):**
+- `cond`: once per discard decision, every (kept four, thrown pair) the
+  opponent may hold is weighted by the ways it can be dealt from the 46
+  unseen cards and by the keep model, filling a table by starter rank,
+  their show and their pair (about 165k combinations, shared by the 15
+  options). Their show then follows exactly from their four and the
+  starter, the crib from my pair, their pair and the starter, and the
+  pone's total keeps the two joint. Ranks only, with hidden nobs at its
+  chance of a suit match; my own discarded jack's nobs is exact. Checked
+  against sampling (means within 0.01 to 0.02 points).
+- `condpeg`: a shape-pair pegging table (`expert pegpair`, every pair of
+  kept shapes played 4 times with the pegger at effort 25 from 0-0, 1 h 4
+  min, 27 MB), and each option's pegging distributions shifted by how the
+  opponent's likely shapes move its means, relative to the table's average
+  opponent.
+- `expert rollcheck` scores discarders on stored rollouts; `expert
+  rollpair` finds where two discarders disagree in self-play and plays out
+  just those two choices on shared samples.
+
+| Test | `cond` | `condpeg` |
+|---|---|---|
+| Stored rollouts (2,000 decisions): decisions changed | 93 | 120 |
+| ... change in rollout win % per decision | +0.011 ± 0.007 | +0.001 ± 0.018 |
+| ... regret | 0.069 ± 0.014 (from 0.081) | 0.080 ± 0.021 |
+| `rollpair`: disagreements in 40k decisions | 1,966 (4.9%) | |
+| ... gain where they differ, win % | **+0.153 ± 0.035** | |
+
+- `cond` is a real but small gain: 4.9% of discards change, each by 0.15
+  win points, so about +0.07 win points per game, too small for games to
+  see. It costs 25 ms per discard on the t4g.micro (2.6 ms before).
+- `condpeg` gains nothing: with 4 samples a pair's mean has a standard
+  deviation of about 1.2 points, which swamps the interaction it is meant
+  to carry. A smoothed model of the interaction might do better; it is not
+  pursued, since the rollouts put the whole of this part near zero.
+- **Decision:** `cond` goes into the top level; `condpeg` and its 27 MB
+  table stay out.
+- Times: rollcheck 2 to 3 minutes per set of policies; rollpair 38
+  minutes (35 of them playouts) against an estimate of 15 to 20, slowed by
+  three other jobs.
 
 ---
 
