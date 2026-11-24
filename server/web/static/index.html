@@ -128,15 +128,7 @@
 
   <aside id="lobby" class="panel lobby" hidden>
     <h2>New game</h2>
-    <div class="bot-picks">
-      <button class="pick" data-create="expert" hidden><span class="pick-icon">♛</span><span><b>Expert</b><small>Searches and plays to win</small></span></button>
-      <button class="pick" data-create="expert-medium" hidden><span class="pick-icon">♜</span><span><b>Expert (medium)</b><small>A lighter search</small></span></button>
-      <button class="pick" data-create="heuristic2"><span class="pick-icon">♘</span><span><b>Heuristic bot (strong)</b><small>Looks ahead and plays to win</small></span></button>
-      <button class="pick" data-create="expert-easy" hidden><span class="pick-icon">♝</span><span><b>Expert (easy)</b><small>A quick look ahead</small></span></button>
-      <button class="pick" data-create="nn" hidden><span class="pick-icon">◆</span><span><b>Neural network</b><small>Learned by self-play</small></span></button>
-      <button class="pick" data-create="heuristic"><span class="pick-icon">♞</span><span><b>Heuristic bot</b><small>Plays the expected value</small></span></button>
-      <button class="pick" data-create="random"><span class="pick-icon">⚄</span><span><b>Random bot</b><small>For practice</small></span></button>
-    </div>
+    <div class="bot-picks" id="bot-picks"></div>
     <div class="row wrap people">
       <button id="find-match" class="btn">Find a match</button>
       <button id="create-open" class="btn">Create open game</button>

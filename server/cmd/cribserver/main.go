@@ -62,6 +62,7 @@ func main() {
 	backupDir := flag.String("backup-dir", "", "write database backups here (empty disables)")
 	backupEvery := flag.Duration("backup-every", 24*time.Hour, "how often to back up the database (also at startup, unless the last backup is more recent)")
 	backupKeep := flag.Int("backup-keep", 7, "how many backups to keep")
+	lobby := flag.String("lobby", "expert,expert-medium,heuristic2,expert-easy,nn,heuristic,random", "comma-separated bots the clients offer in the lobby, hardest first; bots this server lacks (nn and expert need -model and -expert) are left out, and the rest stay playable by name")
 	expertPath := flag.String("expert", "", "expert bundle to offer as the \"expert\" bots (e.g. models-expert/expert.bin)")
 	adminSocket := flag.String("admin-socket", "", "listen for admin commands (cribserver admin ...) on this Unix socket, e.g. "+defaultAdminSocket+" (empty disables)")
 	publicURL := flag.String("public-url", "", "the web client's public address, for links in emails and for passkeys (e.g. https://cribbage.example.com); defaults to http://localhost:<http port>")
@@ -288,6 +289,17 @@ func main() {
 			w.Header().Set("Content-Type", "application/json")
 			w.Header().Set("Access-Control-Allow-Origin", "*")
 			json.NewEncoder(w).Encode(bots.Names())
+		})
+		// The clients build their lobby and label bots from this, so bots
+		// can change without new client builds.
+		lobbyJSON, err := json.Marshal(lobbyInfo(*lobby))
+		if err != nil {
+			fail("lobby", err)
+		}
+		mux.HandleFunc("/api/lobby", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("Access-Control-Allow-Origin", "*")
+			w.Write(lobbyJSON)
 		})
 		// The stop link in every email: the web client POSTs its token here,
 		// and so do mail apps' one-click "Unsubscribe" (RFC 8058), which add

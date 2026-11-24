@@ -1273,8 +1273,8 @@ function onHistory(h) {
 
 // botLabel names a bot as the lobby does ("Expert (medium)").
 function botLabel(bot) {
-  const b = document.querySelector(`[data-create="${CSS.escape(bot)}"] b`);
-  return b ? b.textContent : bot + ' bot';
+  const b = botInfo.get(bot);
+  return b ? b.label : 'Computer';
 }
 
 function playerLabel(p) {
@@ -1869,18 +1869,13 @@ function cardEl(c, opts = {}) {
   return el;
 }
 
-const BOT_LABELS = {
-  expert: 'Expert bot', 'expert-medium': 'Expert bot (medium)', 'expert-easy': 'Expert bot (easy)',
-  heuristic2: 'Heuristic bot (strong)', nn: 'Neural network bot', heuristic: 'Heuristic bot', random: 'Random bot',
-};
-
 function plate(el, v, seat, isMe) {
   const g = v.g;
   const p = (g.players || [])[seat] || {};
   const name = isMe ? 'You' : (p.nickname || 'Waiting…');
   const initial = (isMe ? (state.me && state.me.nickname) || 'Y' : p.nickname || '?').trim().charAt(0).toUpperCase();
   const online = isMe || p.bot || p.connected;
-  const sub = p.bot ? BOT_LABELS[p.bot] || 'Computer' : isMe ? (state.me ? state.me.nickname : '') : online ? 'online' : 'away';
+  const sub = p.bot ? botLabel(p.bot) : isMe ? (state.me ? state.me.nickname : '') : online ? 'online' : 'away';
   el.className = `plate ${isMe ? 'me' : 'opp'}`;
   el.innerHTML = `<div class="avatar">${esc(initial)}<span class="conn ${online ? 'on' : ''}"></span></div>` +
     `<div><div class="nm">${esc(name)}${v.dealer === seat ? '<span class="dealer" title="Dealer: the crib is theirs">DEALER</span>' : ''}</div>` +
@@ -2096,14 +2091,37 @@ $('logout').onclick = () => {
   setTimeout(reload, 1500);
 };
 
-for (const b of document.querySelectorAll('[data-create]')) {
-  b.onclick = () => conn.send({ createGame: { bot: b.dataset.create } });
-}
-// Show buttons only for bots this server offers (nn needs a model).
+// The server says which bots to offer and how to label every bot it has,
+// so the lobby follows the server rather than this file.
+const botInfo = new Map();
 function loadBots() {
-  fetch(serverURL('api/bots')).then(r => r.json()).then(names => {
-    for (const b of document.querySelectorAll('[data-create]')) b.hidden = !names.includes(b.dataset.create);
-  }).catch(() => { /* keep the defaults */ });
+  fetch(serverURL('api/lobby')).then(r => r.json()).then(l => {
+    botInfo.clear();
+    for (const b of l.bots || []) botInfo.set(b.name, b);
+    const picks = $('bot-picks');
+    picks.replaceChildren();
+    for (const name of l.offer || []) {
+      const b = botInfo.get(name);
+      if (!b) continue;
+      const btn = document.createElement('button');
+      btn.className = 'pick';
+      btn.onclick = () => conn.send({ createGame: { bot: name } });
+      const icon = document.createElement('span');
+      icon.className = 'pick-icon';
+      icon.textContent = b.icon || '●';
+      const text = document.createElement('span');
+      const label = document.createElement('b');
+      label.textContent = b.label;
+      const blurb = document.createElement('small');
+      blurb.textContent = b.blurb || '';
+      text.append(label, blurb);
+      btn.append(icon, text);
+      picks.append(btn);
+    }
+    // Labels may have changed under views drawn before the list came.
+    renderLobby();
+    if (state.pane === 'history') renderHistory(); else renderTable();
+  }).catch(() => { /* try again on the next connection */ });
 }
 $('create-open').onclick = () => conn.send({ createGame: { bot: '' } });
 $('invite-form').onsubmit = ev => {

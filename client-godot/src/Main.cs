@@ -22,7 +22,8 @@ public partial class Main : Control
     string? selected;
     readonly HashSet<uint> picked = new();
     bool awaiting; // an action was sent and its update has not come back
-    List<string> bots = new() { "heuristic", "random" };
+    // The bots the server offers in the lobby, hardest first, from /api/lobby.
+    List<LobbyBot> bots = new();
     string statusText = "";
     bool loginShown;
     // The server's message when it refused this client's protocol version;
@@ -82,7 +83,6 @@ public partial class Main : Control
         BuildUi();
         ShowLogin(false);
         Connect();
-        FetchBots();
         if (opts.Screenshot != "")
         {
             GetTree().CreateTimer(opts.After).Timeout += SaveScreenshot;
@@ -261,28 +261,54 @@ public partial class Main : Control
         }
     }
 
-    // FetchBots shows only the bots this server offers (nn and expert
-    // need files on the server).
+    record LobbyBot(string Name, string Label, string Blurb);
+
+    // FetchBots asks the server which bots to offer and how to label them,
+    // so the lobby follows the server rather than this build.
     void FetchBots()
     {
-        Fetch(HttpBase(settings.Server) + "/api/bots", body =>
+        var url = settings.Server;
+        Fetch(HttpBase(url) + "/api/lobby", body =>
         {
+            if (body == "" || url != settings.Server)
+            {
+                return;
+            }
             try
             {
-                var names = JsonSerializer.Deserialize<List<string>>(body);
-                if (names != null)
+                using var doc = JsonDocument.Parse(body);
+                var info = new Dictionary<string, LobbyBot>();
+                foreach (var b in doc.RootElement.GetProperty("bots").EnumerateArray())
                 {
-                    bots = names;
+                    var name = b.GetProperty("name").GetString() ?? "";
+                    var label = b.GetProperty("label").GetString() ?? name;
+                    var blurb = b.TryGetProperty("blurb", out var bl) ? bl.GetString() ?? "" : "";
+                    info[name] = new LobbyBot(name, label, blurb);
                 }
+                var offer = new List<LobbyBot>();
+                foreach (var n in doc.RootElement.GetProperty("offer").EnumerateArray())
+                {
+                    if (info.TryGetValue(n.GetString() ?? "", out var b))
+                    {
+                        offer.Add(b);
+                    }
+                }
+                bots = offer;
+                Text.BotLabels = info.ToDictionary(kv => kv.Key, kv => kv.Value.Label);
             }
-            catch (JsonException) { }
+            catch (System.Exception e) when (e is JsonException or System.InvalidOperationException or KeyNotFoundException)
+            {
+                return;
+            }
             RenderBotPicks();
+            RenderAll();
         });
     }
 
     void OnOpen()
     {
         SetStatus("online");
+        FetchBots(); // afresh on every connection: the server may have restarted with other bots
         me = null; // each connection authenticates afresh
         var token = settings.Token;
         if (token != "")
@@ -579,7 +605,6 @@ public partial class Main : Control
         }
         settings.Server = url;
         Connect();
-        FetchBots();
     }
 
     // LoginMessage shows text under the login form: an error, or (ok) news.
@@ -1025,12 +1050,8 @@ public partial class Main : Control
     void RenderBotPicks()
     {
         Clear(botPicks);
-        foreach (var (name, label, blurb) in Text.Bots)
+        foreach (var (name, label, blurb) in bots)
         {
-            if (!bots.Contains(name))
-            {
-                continue;
-            }
             var b = Style.Button(label, () => CreateGame(name));
             b.TooltipText = blurb;
             b.Alignment = HorizontalAlignment.Left;

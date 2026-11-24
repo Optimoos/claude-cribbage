@@ -28,5 +28,6 @@ func Register(path string) (nn.Meta, error) {
 		return meta, err
 	}
 	bots.Register(BotName, func(seed uint64) bots.Bot { return NewAgent(net, 0, seed) })
+	bots.Describe(BotName, bots.Info{Label: "Neural network", Blurb: "Learned by self-play", Icon: "◆"})
 	return meta, nil
 }

@@ -10,28 +10,10 @@ public static class Text
     static readonly string[] Ranks = { "A", "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K" };
     static readonly string[] Suits = { "♣", "♦", "♥", "♠" };
 
-    public static readonly (string Name, string Label, string Blurb)[] Bots =
-    {
-        ("expert", "Expert", "Searches and plays to win"),
-        ("expert-medium", "Expert (medium)", "A lighter search"),
-        ("heuristic2", "Heuristic bot (strong)", "Looks ahead and plays to win"),
-        ("expert-easy", "Expert (easy)", "A quick look ahead"),
-        ("nn", "Neural network", "Learned by self-play"),
-        ("heuristic", "Heuristic bot", "Plays the expected value"),
-        ("random", "Random bot", "For practice"),
-    };
+    // BotLabels names each bot the server has, from its /api/lobby.
+    public static Dictionary<string, string> BotLabels = new();
 
-    public static string BotLabel(string bot)
-    {
-        foreach (var b in Bots)
-        {
-            if (b.Name == bot)
-            {
-                return b.Label;
-            }
-        }
-        return "Computer";
-    }
+    public static string BotLabel(string bot) => BotLabels.TryGetValue(bot, out var l) ? l : "Computer";
 
     public static string Rank(uint c) => Ranks[c % 13];
     public static string Suit(uint c) => Suits[c / 13];

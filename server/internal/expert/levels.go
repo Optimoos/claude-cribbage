@@ -7,7 +7,7 @@ import "cribbage/internal/bots"
 // wider than effort alone would give. Every level is deterministic.
 type Level struct {
 	Name    string // bot name in the lobby and API
-	Label   string
+	Info    bots.Info
 	Options Options
 }
 
@@ -16,9 +16,9 @@ type Level struct {
 // bundle, paired against the heuristic: easy 51.0%, medium 54.8%, expert
 // 57.2%.
 var Levels = []Level{
-	{"expert-easy", "Expert (easy)", Options{Effort: 10, NoKeepModel: true, NoPegModel: true, HeuristicDiscard: true}},
-	{"expert-medium", "Expert (medium)", Options{Effort: 50, NoKeepModel: true, NoPegModel: true}},
-	{BotName, "Expert", Options{Effort: DefaultEffort}},
+	{"expert-easy", bots.Info{Label: "Expert (easy)", Blurb: "A quick look ahead", Icon: "♝"}, Options{Effort: 10, NoKeepModel: true, NoPegModel: true, HeuristicDiscard: true}},
+	{"expert-medium", bots.Info{Label: "Expert (medium)", Blurb: "A lighter search", Icon: "♜"}, Options{Effort: 50, NoKeepModel: true, NoPegModel: true}},
+	{BotName, bots.Info{Label: "Expert", Blurb: "Searches and plays to win", Icon: "♛"}, Options{Effort: DefaultEffort}},
 }
 
 // Register makes every level of the bundle available by name. Bots created
@@ -29,5 +29,6 @@ func Register(b *Bundle) {
 	for _, l := range Levels {
 		opt := l.Options
 		bots.Register(l.Name, func(uint64) bots.Bot { return NewBotWith(b, opt) })
+		bots.Describe(l.Name, l.Info)
 	}
 }

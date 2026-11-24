@@ -93,7 +93,9 @@ the player's own observation.
 
 **In the server.** `cribserver -model <file>` registers the network as the
 `nn` bot, which the web lobby then offers as "vs neural network bot".
-`GET /api/bots` lists the bots a server offers. Every game creates its own
+`GET /api/bots` lists the bots a server has, and `GET /api/lobby` tells the
+clients which to offer (the `-lobby` flag, hardest first) and how to label
+each, so the lineup changes without new client builds. Every game creates its own
 `Agent`, and all of them share one read-only copy of the weights. A move
 takes well under a millisecond. Saved games against `nn` resume after a
 restart only if the server is started with a model again. Otherwise they
