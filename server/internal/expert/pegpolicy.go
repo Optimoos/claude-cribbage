@@ -19,21 +19,21 @@ import (
 
 // Feature indices.
 const (
-	pfPoints     = iota // points the play scores at once
-	pfRisk              // expected points of the reply, over unseen ranks
-	pfCount5            // the play leaves the count at 5
-	pfCount10           // ... at 10
-	pfCount21           // ... at 21
-	pfHigh              // ... at 22 to 30
-	pfValue             // the card's value / 10
-	pfLead              // the play leads (the count was 0)
-	pfLeadValue         // lead × value / 10
-	pfLeadFive          // lead of a five
-	pfPairHeld          // another card of this rank is still held (private)
-	pfLeadPair          // lead × pair held (private)
-	pfFifteenHeld       // a held card makes 15 with this one (private)
-	pfPlayable          // share of the rest still playable on the new count (private)
-	pfLast              // the rest holds nothing playable on the new count (private)
+	pfPoints      = iota // points the play scores at once
+	pfRisk               // expected points of the reply, over unseen ranks
+	pfCount5             // the play leaves the count at 5
+	pfCount10            // ... at 10
+	pfCount21            // ... at 21
+	pfHigh               // ... at 22 to 30
+	pfValue              // the card's value / 10
+	pfLead               // the play leads (the count was 0)
+	pfLeadValue          // lead × value / 10
+	pfLeadFive           // lead of a five
+	pfPairHeld           // another card of this rank is still held (private)
+	pfLeadPair           // lead × pair held (private)
+	pfFifteenHeld        // a held card makes 15 with this one (private)
+	pfPlayable           // share of the rest still playable on the new count (private)
+	pfLast               // the rest holds nothing playable on the new count (private)
 	nPegFeat
 )
 
