@@ -37,6 +37,8 @@ func main() {
 		err = iterate(ctx, os.Args[2:])
 	case "eval":
 		err = eval(ctx, os.Args[2:])
+	case "rollout":
+		err = rollout(ctx, os.Args[2:])
 	default:
 		usage()
 	}
@@ -47,7 +49,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: expert build|inspect|eval|iterate [flags]")
+	fmt.Fprintln(os.Stderr, "usage: expert build|inspect|eval|iterate|rollout [flags]")
 	os.Exit(2)
 }
 

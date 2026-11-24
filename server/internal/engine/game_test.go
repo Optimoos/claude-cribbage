@@ -384,3 +384,27 @@ func BenchmarkScoreHand(b *testing.B) {
 		_ = ScoreHand(h, s, false)
 	}
 }
+
+func TestNewHand(t *testing.T) {
+	hands := [2][6]Card{
+		{NewCard(5, Clubs), NewCard(5, 1), NewCard(10, 2), NewCard(11, Clubs), NewCard(1, 3), NewCard(2, 3)},
+		{NewCard(3, 0), NewCard(4, 0), NewCard(6, 1), NewCard(7, 2), NewCard(8, 3), NewCard(9, 0)},
+	}
+	starter := NewCard(13, Clubs)
+	g := NewHand(1, 1, [2]int{100, 110}, hands, starter)
+	if g == nil || g.Phase() != PhaseDiscard || g.Dealer() != 1 || g.Scores() != [2]int{100, 110} {
+		t.Fatalf("bad hand %+v", g)
+	}
+	for p := 0; p < 2; p++ {
+		h := g.Hand(p)
+		if err := g.Apply(p, Discard(h[0], h[1])); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if g.Starter() != starter {
+		t.Errorf("starter %v, want %v", g.Starter(), starter)
+	}
+	if NewHand(1, 0, [2]int{}, hands, hands[0][0]) != nil {
+		t.Error("a repeated card was accepted")
+	}
+}

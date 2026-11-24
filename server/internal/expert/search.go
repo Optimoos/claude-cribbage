@@ -49,6 +49,12 @@ type searcher struct {
 	keepStamp [numShapes]uint32
 	keepVal   [numShapes]float64
 	ends      *endCache // borrowed from endCaches during choose
+
+	// A test oracle sees the game: oracle says what it may use of the
+	// opponent's hand.
+	oracle Oracle
+	game   *engine.Game
+	seat   int
 }
 
 // endCache holds end-of-hand values by (opponent show, my pegging, their
@@ -103,6 +109,9 @@ func (s *searcher) choose(o *engine.Observation, legal []engine.Action) engine.A
 	}
 	s.cribDistribution(o, &seen)
 	s.enumerate(o, &seen, oppPlayed)
+	if s.oracle != NoOracle && s.game != nil {
+		s.peek(o, oppPlayed)
+	}
 	if len(s.worlds) == 0 {
 		return legal[0] // inconsistent observation; should not happen
 	}
@@ -327,6 +336,93 @@ func (s *searcher) enumerate(o *engine.Observation, seen *[52]bool, oppPlayed []
 	rec(1, k, 1)
 }
 
+// peek narrows the worlds to what the oracle may see of the opponent's
+// hand. OracleHand keeps only the real hand. OracleSix keeps the hands
+// that four of their six dealt cards make, each weighted by the number of
+// ways to hold it and by the keep model's chance of keeping it from those
+// six; reweight then skips the keep model, which assumes unknown cards.
+func (s *searcher) peek(o *engine.Observation, oppPlayed []engine.Card) {
+	var opp engine.Observation
+	s.game.ObserveInto(1-s.seat, &opp)
+	var held [14]int // ranks of what the oracle shows
+	switch s.oracle {
+	case OracleHand:
+		for _, c := range opp.HandCards() {
+			held[c.Rank()]++
+		}
+	case OracleSix:
+		for _, c := range opp.Kept {
+			held[c.Rank()]++
+		}
+		for _, c := range opp.Discards {
+			held[c.Rank()]++
+		}
+		for _, c := range oppPlayed {
+			held[c.Rank()]--
+		}
+	}
+	oppSide := 1
+	if o.Dealer != o.Player {
+		oppSide = 0
+	}
+	var six [6]int8
+	if s.oracle == OracleSix {
+		n := 0
+		for _, c := range opp.Kept {
+			six[n] = int8(c.Rank())
+			n++
+		}
+		for _, c := range opp.Discards {
+			six[n] = int8(c.Rank())
+			n++
+		}
+		sort.Slice(six[:], func(i, j int) bool { return six[i] < six[j] })
+	}
+	out := s.worlds[:0]
+	for _, w := range s.worlds {
+		var need [14]int
+		for _, r := range w.ranks[:w.n] {
+			need[r]++
+		}
+		ways := 1
+		for r := 1; r <= 13; r++ {
+			ways *= choose(held[r], need[r])
+		}
+		if ways == 0 || (s.oracle == OracleHand && w.n != int8(o.OppHandN)) {
+			continue
+		}
+		if s.oracle == OracleHand {
+			for r := 1; r <= 13; r++ {
+				if need[r] != held[r] {
+					ways = 0
+				}
+			}
+			if ways == 0 {
+				continue
+			}
+		}
+		w.weight = float64(ways)
+		if s.oracle == OracleSix && s.keep != nil {
+			var k4 [4]int
+			n := 0
+			for _, c := range oppPlayed {
+				k4[n] = c.Rank()
+				n++
+			}
+			for _, r := range w.ranks[:w.n] {
+				k4[n] = int(r)
+				n++
+			}
+			sort.Ints(k4[:])
+			w.weight *= s.keep.prob(oppSide, six, shapeIdx[((k4[0]*14+k4[1])*14+k4[2])*14+k4[3]])
+		}
+		if w.weight > 0 {
+			out = append(out, w)
+		}
+	}
+	s.worlds = out
+}
+
 // keepCacheKey identifies a hand from one player's side: the keep weight
 // of an opponent shape depends only on the cards that player has seen
 // before the play, which stay fixed through the hand.
@@ -342,13 +438,14 @@ func (s *searcher) reweight(o *engine.Observation, oppPlayed []engine.Card, worl
 	if s.keep == nil && s.pegTemp <= 0 {
 		return worlds
 	}
+	useKeep := s.keep != nil && s.oracle == NoOracle // an oracle has weighted its worlds already
 	key := keepCacheKey{starter: o.Starter, oppSide: 1}
 	copy(key.my[:4], o.Kept[:])
 	copy(key.my[4:], o.Discards[:])
 	if o.Dealer != o.Player {
 		key.oppSide = 0
 	}
-	if s.keep != nil && (s.keepGen == 0 || key != s.keepKey) {
+	if useKeep && (s.keepGen == 0 || key != s.keepKey) {
 		s.keepKey = key
 		if s.keepGen++; s.keepGen == 0 { // wrapped: clear the stamps
 			clear(s.keepStamp[:])
@@ -357,7 +454,7 @@ func (s *searcher) reweight(o *engine.Observation, oppPlayed []engine.Card, worl
 	}
 	s.weighted = s.weighted[:0]
 	for _, w := range worlds {
-		if s.keep != nil {
+		if useKeep {
 			w.weight *= s.keepWeight(key, oppPlayed, w)
 		}
 		if s.pegTemp > 0 {

@@ -24,7 +24,19 @@ type Options struct {
 	NoKeepModel      bool    // do not weight opponent hands by how likely they were kept
 	NoPegModel       bool    // do not weight opponent hands by the plays made with them
 	HeuristicDiscard bool    // discard as the heuristic does, ignoring the discard tables
+	Oracle           Oracle  // test only: let pegging see some of the opponent's hidden cards
 }
+
+// Oracle is how much of the opponent's hand a test oracle lets the pegging
+// search see. Oracles bound what better inference could be worth; they
+// cheat, so they only play in tests and experiments.
+type Oracle int
+
+const (
+	NoOracle    Oracle = iota
+	OracleSix          // the six cards they were dealt, but not which four they kept
+	OracleHand         // the cards they hold (clairvoyant)
+)
 
 // Bot is the expert player. It pegs by searching the possible opponent
 // hands, and discards by valuing each option through the bundle's tables
@@ -44,6 +56,7 @@ func NewBot(b *Bundle, effort int) *Bot { return NewBotWith(b, Options{Effort: e
 // NewBotWith creates an expert bot with the given options.
 func NewBotWith(b *Bundle, opt Options) *Bot {
 	bot := &Bot{search: newSearcher(b.Win, opt.Effort)}
+	bot.search.oracle = opt.Oracle
 	if b.Discard != nil && !opt.HeuristicDiscard {
 		bot.discard = newDiscarder(b.Win, b.Discard)
 	}
@@ -60,6 +73,13 @@ func NewBotWith(b *Bundle, opt Options) *Bot {
 }
 
 func (b *Bot) Name() string { return BotName }
+
+// Watch lets an oracle see the game; other bots ignore it.
+func (b *Bot) Watch(g *engine.Game, seat int) {
+	if b.search.oracle != NoOracle {
+		b.search.game, b.search.seat = g, seat
+	}
+}
 
 func (b *Bot) Choose(o *engine.Observation, legal []engine.Action) engine.Action {
 	if len(legal) == 1 {

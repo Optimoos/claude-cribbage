@@ -118,6 +118,30 @@ func NewGame(seed uint64) *Game {
 	return g
 }
 
+// NewHand starts a game at the deal of a hand with the given cards, for
+// simulating single hands: dealer deals, the scores are as given, each
+// player holds their six cards and starter will be cut. Later hands are
+// dealt from seed. It returns nil if the cards are not 13 distinct cards.
+func NewHand(seed uint64, dealer int, scores [2]int, hands [2][6]Card, starter Card) *Game {
+	var seen [52]bool
+	for _, c := range append(append(hands[0][:], hands[1][:]...), starter) {
+		if c >= 52 || seen[c] {
+			return nil
+		}
+		seen[c] = true
+	}
+	g := &Game{rng: newPCG(seed), winner: -1, turn: -1, starter: NoCard}
+	g.quiet = true
+	g.dealer = dealer
+	g.scores = scores
+	g.deal() // fixes every per-hand field; the cards are replaced below
+	g.hands = hands
+	sortCards(g.hands[0][:])
+	sortCards(g.hands[1][:])
+	g.pending = starter
+	return g
+}
+
 // Clone returns an independent copy of the game. Events are not copied.
 func (g *Game) Clone() *Game {
 	c := *g
