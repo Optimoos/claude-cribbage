@@ -1733,8 +1733,9 @@ Guards, 20k games each, coupled against `runs/base-m14`:
   `lobby-bots` branch) to `expert,expert-medium,expert-easy,random`.
 - Speed on the t4g.micro for the stack: M39/M40 (pegging 12.4 ms mean,
   161 ms max; discard about 25 ms).
-- Not done: proposal 5 (deferred by its kill rule, since the gains it
-  needed from 1 and 2 are taken) and proposal 9 (last).
+- Not done: proposal 5 (deferred in M34: it could only add to what 4
+  leaves of the measured discard ceiling, at the cost of a Python step) and
+  proposal 9 (last).
 
 ---
 
