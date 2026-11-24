@@ -28,10 +28,21 @@ func rollcheck(args []string) error {
 	fs := flag.NewFlagSet("rollcheck", flag.ExitOnError)
 	in := fs.String("csv", "runs/e2-rollout.csv", "rollouts written by expert rollout -out")
 	pols := fs.String("policies", "models-expert/expert.bin@400", "player specs, separated by ';'; the first is the reference")
+	minScore := fs.Int("min-score", 0, "only decisions where either score is at least this")
 	fs.Parse(args)
 	decs, vals, err := readRollouts(*in)
 	if err != nil {
 		return err
+	}
+	if *minScore > 0 {
+		var d2 []discardDecision
+		var v2 []decisionValues
+		for i, d := range decs {
+			if max(d.scores[0], d.scores[1]) >= *minScore {
+				d2, v2 = append(d2, d), append(v2, vals[i])
+			}
+		}
+		decs, vals = d2, v2
 	}
 	specs := strings.Split(*pols, ";")
 	picks := make([][]int, len(specs))
