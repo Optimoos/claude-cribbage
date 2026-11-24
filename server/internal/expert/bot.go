@@ -16,6 +16,12 @@ const DefaultEffort = 400
 // opponent's pegging used to weight their possible hands.
 const DefaultPegTemp = 1.0
 
+// DefaultPegMix is the softmax on points' weight in the opponent pegging
+// model when the bundle has a fitted policy: it keeps the policy from
+// ruling out the real hand of an opponent unlike the bots it was fitted to
+// (PLAN M38).
+const DefaultPegMix = 0.2
+
 // Options configure a Bot. The zero value plus an Effort uses every
 // component the bundle has.
 type Options struct {
@@ -31,7 +37,8 @@ type Options struct {
 	NoSmallFixes     bool    // play as M14 did: no heels order, even odds when both peg out, no hidden suits, one crib
 	ISSearch         bool    // peg by information-set search rather than minimax per world (proposal 1)
 	NoPegPolicy      bool    // ignore the bundle's fitted pegging policy: the softmax on points at PegTemp
-	PegMix           float64 // mix the softmax on points into the policy's chance of each play at this weight
+	PegMix           float64 // mix the softmax on points into the policy's chance of each play at this weight, when PegMixSet
+	PegMixSet        bool    // otherwise DefaultPegMix
 	ISLambda         float64 // with ISSearch and a pegging policy: the weight of the opponent's best reply against the policy, when ISLambdaSet
 	ISLambdaSet      bool    // otherwise 1, best reply alone
 	CondDiscard      bool    // condition the opponent's show and the crib on their likely hands (proposal 4)
@@ -103,7 +110,10 @@ func NewBotWith(b *Bundle, opt Options) *Bot {
 		}
 		if b.PegPolicy != nil && !opt.NoPegPolicy && opt.PegTemp == 0 {
 			bot.search.pegPol = b.PegPolicy
-			bot.search.pegMix = opt.PegMix
+			bot.search.pegMix = DefaultPegMix
+			if opt.PegMixSet {
+				bot.search.pegMix = opt.PegMix
+			}
 		}
 	}
 	return bot

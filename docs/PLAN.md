@@ -1492,6 +1492,95 @@ Games (`@400` with the table v `@400` without, both `nofixes`):
 - Times: 8 minutes for the normal head to head, 40 seconds for the
   endgame one (games starting at 90+ last about a hand and a half).
 
+### M38: A fitted opponent pegging policy (proposal 2)
+
+**Built (2026-11-23):** a conditional logit on each play the opponent could
+make (`pegpolicy.go`), fitted by Newton's method to corpus plays (`expert
+pegfit`) and stored as the bundle's `pegpol` table. It replaces the softmax
+on immediate points in weighting worlds; `nopegpol` turns it off.
+- Features: points scored, the expected points of the reply (over unseen
+  ranks), the count left at 5, 10, 21 or 22-30, the card's value, leads
+  (value, fives), and from the rest of the hand: a pair held (and leading
+  from one), a card making 15 with it, the share of the rest still
+  playable, and holding nothing playable. Reply risk takes its belief from
+  the public cards only, in the fit and in play alike.
+- Public features are computed once per opponent play for all 13 ranks;
+  only the five hand features are worked out per world, so weighting costs
+  no measurable time (ARM: 1.9 ms per pegging decision with or without).
+- Fitted to 1.42M decisions from 30k games (expert self-play, expert v
+  `heuristic`, expert v `models-big`, `runs/p2/`, seeds 200001-220001).
+
+Held-out log-likelihood per decision (softmax at temperature 1 is the old
+model; the best temperature for it is 1):
+
+| Decisions | Fitted | Softmax |
+|---|---|---|
+| expert self-play (new seed) | -0.734 | -0.888 |
+| `heuristic2` (not in the fit) | -0.582 | -0.833 |
+
+The proposal's own test, the share of world weight on the opponent's real
+hand (mean log, `pegcheck_test.go`, 400 games of each bot):
+
+| Opponent | Gain | Positions where the share falls below 1/e of the old one |
+|---|---|---|
+| `heuristic2` (held out) | +0.204 | 0.7% |
+| `heuristic` | +0.135 | 2.8% |
+| `models-big` | +0.067 | 5.0% |
+| `random` | -0.317 | |
+
+Games, `@400` with the policy v `@400` (both with proposal 6's fixes):
+- Head to head: **50.71 ± 0.35**, margin +0.31 ± 0.09, pegging +0.037 ±
+  0.007; the sequential test accepted +0.3 after 8,918 pairs.
+- Coupled guards (`nofixes`, against `runs/base-m14`): `heuristic` -0.13 ±
+  0.26, `heuristic2` **+0.93 ± 0.27** (pegging +0.046), `models-big` -0.31 ±
+  0.29.
+- The gain is large where the policy models the opponent well (the expert
+  itself; `heuristic2`'s leads) and absent against `heuristic`, whose plays
+  the old points-only model already described. Against the network it may
+  cost a little: a sharper model is more confidently wrong about an
+  opponent it does not fit, which matters for humans.
+- `pegmix=X` mixes the old softmax into each play's chance at weight X. At
+  0.2 the bad tail against `models-big` falls from 5.0% to 1.8% and the mean
+  gain there rises to +0.078 (heuristic2 +0.179, heuristic +0.125).
+  PENDING: guards and head to head at 0.2.
+
+### M39: Information-set pegging search (proposal 1)
+
+**Built (2026-11-23):** `is` searches the worlds together (`issearch.go`):
+a node is the public play history and the worlds still consistent with it;
+at my nodes one card is chosen for all of them by the weighted sum; at the
+opponent's nodes each world's opponent plays the card worst for me.
+Worlds are regrouped after every play by the public state that follows.
+With `islambda=X` and a pegging policy, the opponent's nodes blend best
+reply (weight X) with the policy's expectation, and the worlds below an
+opponent play are weighted by the policy's chance of that play, so my
+later choices infer from it as the root does.
+- Checked: with one world it equals minimax exactly (3,000 positions); the
+  blend matches a brute-force reference over 2-4 worlds (1,600 root plays),
+  and that test fails if the inner reweighting is dropped.
+- Scratch comes from a pooled stack buffer sized per decision, so a
+  decision allocates nothing.
+
+Latency on the production t4g.micro, one game at a time, pegging decisions:
+
+| Bot | Mean | p99 | Max |
+|---|---|---|---|
+| `@400` | 1.9 ms | 17 ms | 22 ms |
+| `@400,is` | 6.8 ms | 67 ms | 91 ms |
+| `@400,islambda=0.5` (policy computed once per node) | 12.4 ms | 134 ms | 161 ms |
+
+Games:
+
+| Bot | Opponent | Games | Head to head | Margin | Pegging/hand |
+|---|---|---|---|---|---|
+| `@400,is` | `@400` | 32k (stopped, H0 v +0.5) | 50.12 ± 0.28 | +0.15 ± 0.07 | +0.015 ± 0.006 |
+| policy `@400,is` | policy `@400` | 12k (stopped, H1 +0.3) | **51.07 ± 0.45** | +0.53 ± 0.12 | +0.053 ± 0.010 |
+
+- Alone the search gains little; on top of proposal 2 it gains a point.
+  At my nodes the search averages over the worlds, so it is only as good
+  as their weights, and proposal 2 is what makes them good.
+- PENDING: the blend (islambda), and guards for the combination.
+
 ---
 
 # Roadmap: three-player games (not started)

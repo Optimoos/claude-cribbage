@@ -56,6 +56,7 @@ func Resolve(spec string) (func(worker int) bots.Bot, error) {
 				opt.NoPegPolicy = true
 			case strings.HasPrefix(o, "pegmix="):
 				opt.PegMix, err = strconv.ParseFloat(o[len("pegmix="):], 64)
+				opt.PegMixSet = true
 			case strings.HasPrefix(o, "islambda="):
 				opt.ISLambda, err = strconv.ParseFloat(o[len("islambda="):], 64)
 				opt.ISLambdaSet, opt.ISSearch = true, true
