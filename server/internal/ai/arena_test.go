@@ -76,3 +76,15 @@ func TestLatencyQuantiles(t *testing.T) {
 		}
 	}
 }
+
+// Both games of a pair start from the same hand with the seats swapped, so a deterministic
+// bot against itself still wins exactly one game of each.
+func TestArenaFromMirror(t *testing.T) {
+	r, err := ArenaFrom(context.Background(), heuristic, heuristic, 400, 4, 7, 100, 118, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.WinsA != 200 || r.Hands > 400*4 {
+		t.Errorf("wins %d of 400, %d hands", r.WinsA, r.Hands)
+	}
+}

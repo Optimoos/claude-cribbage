@@ -51,7 +51,14 @@ func main() {
 	flag.Float64Var(&c.alpha, "alpha", 0.005, "sequential test: chance of accepting HI when LO is true (0.05 over ten candidates)")
 	flag.Float64Var(&c.beta, "beta", 0.05, "sequential test: chance of accepting LO when HI is true")
 	flag.IntVar(&c.minPairs, "min-pairs", 2000, "sequential test: pairs before any decision")
+	start := flag.String("start", "", "LO,HI: start every game at a random hand with each score in [LO, HI], to test the endgame")
 	flag.Parse()
+	if *start != "" {
+		if _, err := fmt.Sscanf(*start, "%d,%d", &c.startMin, &c.startMax); err != nil || c.startMin < 0 || c.startMax > 120 || c.startMin > c.startMax || c.startMax == 0 {
+			fmt.Fprintln(os.Stderr, "gauntlet: -start wants LO,HI within 0..120")
+			os.Exit(2)
+		}
+	}
 	if *sprt != "" {
 		if _, err := fmt.Sscanf(*sprt, "%g,%g", &c.lo, &c.hi); err != nil || c.lo >= c.hi {
 			fmt.Fprintln(os.Stderr, "gauntlet: -sprt wants LO,HI with LO < HI")
@@ -75,6 +82,8 @@ type config struct {
 	lo, hi          float64 // percentage points
 	alpha, beta     float64
 	minPairs        int
+	startMin        int // with startMax > 0, games start at random scores in [startMin, startMax]
+	startMax        int
 }
 
 // pairPath names the file holding the deals against one opponent.
@@ -103,6 +112,9 @@ func run(ctx context.Context, bot string, opponents []string, n, workers int, se
 	var rows []row
 	var discard, play ai.Latency
 	fmt.Printf("%s: %d games per opponent, seed %d, %d workers\n", bot, n, seed, workers)
+	if c.startMax > 0 {
+		fmt.Printf("every game starts at a random hand with scores in [%d, %d]\n", c.startMin, c.startMax)
+	}
 	for _, name := range opponents {
 		name = strings.TrimSpace(name)
 		newB, err := players.Resolve(name)
@@ -160,9 +172,9 @@ func run(ctx context.Context, bot string, opponents []string, n, workers int, se
 		}
 		timed := make([]*ai.Timed, workers)
 		start := time.Now()
-		r, err := ai.ArenaPairs(mctx,
+		r, err := ai.ArenaFrom(mctx,
 			func(w int) bots.Bot { timed[w] = &ai.Timed{Bot: newA(w)}; return timed[w] },
-			newB, n, workers, seed, onPair)
+			newB, n, workers, seed, c.startMin, c.startMax, onPair)
 		cancel()
 		for _, t := range timed {
 			if t != nil {

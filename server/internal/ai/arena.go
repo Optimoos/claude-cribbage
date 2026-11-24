@@ -3,6 +3,7 @@ package ai
 import (
 	"context"
 	"math"
+	"math/rand/v2"
 	"sync"
 	"sync/atomic"
 
@@ -191,6 +192,15 @@ func Arena(ctx context.Context, newA, newB func(worker int) bots.Bot, games, wor
 // it finishes. Pairs finish out of order; onPair is never called
 // concurrently. Cancelling ctx stops the match after the pairs in play.
 func ArenaPairs(ctx context.Context, newA, newB func(worker int) bots.Bot, games, workers int, seed uint64, onPair func(Pair)) (ArenaResult, error) {
+	return ArenaFrom(ctx, newA, newB, games, workers, seed, 0, 0, onPair)
+}
+
+// ArenaFrom is ArenaPairs with every game starting at a random hand: each
+// score uniform in [startMin, startMax], a random dealer and deal, all
+// fixed by the deal seed and the same for the pair's two games. A
+// startMax of 0 starts every game from 0-0 as usual. It concentrates a
+// match on the endgame, where small changes to it show.
+func ArenaFrom(ctx context.Context, newA, newB func(worker int) bots.Bot, games, workers int, seed uint64, startMin, startMax int, onPair func(Pair)) (ArenaResult, error) {
 	if workers < 1 {
 		workers = 1
 	}
@@ -222,7 +232,13 @@ func ArenaPairs(ctx context.Context, newA, newB func(worker int) bots.Bot, games
 					if aSeat == 1 {
 						seats = [2]bots.Bot{b, a}
 					}
-					r, err := bots.PlayGame(s, seats, nil)
+					var r bots.Result
+					var err error
+					if startMax > 0 {
+						r, err = bots.PlayFrom(startHand(s, startMin, startMax), s, seats, nil)
+					} else {
+						r, err = bots.PlayGame(s, seats, nil)
+					}
 					if err != nil {
 						mu.Lock()
 						if firstErr == nil {
@@ -261,4 +277,22 @@ func ArenaPairs(ctx context.Context, newA, newB func(worker int) bots.Bot, games
 		firstErr = ctx.Err()
 	}
 	return total, firstErr
+}
+
+// startHand is the game a deal seed starts from in ArenaFrom. Both games
+// of a pair start from it; swapping the bots' seats gives each the other's
+// place.
+func startHand(seed uint64, lo, hi int) *engine.Game {
+	rng := rand.New(rand.NewPCG(seed, 0x57a7))
+	var deck [52]engine.Card
+	for i := range deck {
+		deck[i] = engine.Card(i)
+	}
+	rng.Shuffle(52, func(i, j int) { deck[i], deck[j] = deck[j], deck[i] })
+	var hands [2][6]engine.Card
+	copy(hands[0][:], deck[0:6])
+	copy(hands[1][:], deck[6:12])
+	scores := [2]int{lo + rng.IntN(hi-lo+1), lo + rng.IntN(hi-lo+1)}
+	dealer := rng.IntN(2)
+	return engine.NewHand(seed, dealer, scores, hands, deck[12])
 }

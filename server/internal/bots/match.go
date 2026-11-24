@@ -42,7 +42,12 @@ type Result struct {
 // engine directly. If trace is non-nil, a human-readable log including both
 // hands is written to it.
 func PlayGame(seed uint64, players [2]Bot, trace io.Writer) (Result, error) {
-	g := engine.NewGame(seed)
+	return PlayFrom(engine.NewGame(seed), seed, players, trace)
+}
+
+// PlayFrom plays game g, which may start part way (see engine.NewHand),
+// to the end; seed only labels errors.
+func PlayFrom(g *engine.Game, seed uint64, players [2]Bot, trace io.Writer) (Result, error) {
 	for p, b := range players {
 		if w := watcher(b); w != nil {
 			w.Watch(g, p)
