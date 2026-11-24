@@ -36,8 +36,8 @@ type searcher struct {
 	base     [2]int
 	iDeal    bool
 	myShow   int
-	crib     [maxShow]float64 // probability of each crib score
-	world    *world           // the world being searched
+	crib     [maxShow]float64   // probability of each crib score
+	world    *world             // the world being searched
 	cribs    [][maxShow]float64 // per searched world in the endgame: the crib given that world
 	worlds   []world
 	pool     []world
@@ -61,6 +61,10 @@ type searcher struct {
 	seat   int
 
 	noFixes bool // M14's search: no hidden suits in their show, one crib for every world
+
+	isSearch bool // information-set search (issearch.go) instead of minimax per world
+	isVals   []float64
+	isb      *isBuf // borrowed from isBufs during an information-set search
 }
 
 // endCache holds end-of-hand values by (opponent show, my pegging, their
@@ -174,6 +178,18 @@ func (s *searcher) choose(o *engine.Observation, legal []engine.Action) engine.A
 			idx++
 		}
 		var v, total float64
+		if s.isSearch {
+			s.isVals = append(s.isVals[:0], make([]float64, len(worlds))...)
+			s.isRoot(root, idx, worlds, worldCribs, s.isVals)
+			for i := range worlds {
+				v += worlds[i].weight * s.isVals[i]
+				total += worlds[i].weight
+			}
+			if v /= total; v > bestV {
+				best, bestV = a, v
+			}
+			continue
+		}
 		for i := range worlds {
 			w := &worlds[i]
 			n := root

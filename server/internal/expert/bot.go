@@ -29,6 +29,7 @@ type Options struct {
 	KeepEps          float64 // the softmax's weight against the exact keep table, when KeepEpsSet
 	KeepEpsSet       bool    // otherwise DefaultKeepEps
 	NoSmallFixes     bool    // play as M14 did: no heels order, even odds when both peg out, no hidden suits, one crib
+	ISSearch         bool    // peg by information-set search rather than minimax per world (proposal 1)
 }
 
 // Oracle is how much of the opponent's hand a test oracle lets the pegging
@@ -37,9 +38,9 @@ type Options struct {
 type Oracle int
 
 const (
-	NoOracle    Oracle = iota
-	OracleSix          // the six cards they were dealt, but not which four they kept
-	OracleHand         // the cards they hold (clairvoyant)
+	NoOracle   Oracle = iota
+	OracleSix         // the six cards they were dealt, but not which four they kept
+	OracleHand        // the cards they hold (clairvoyant)
 )
 
 // Bot is the expert player. It pegs by searching the possible opponent
@@ -62,6 +63,7 @@ func NewBotWith(b *Bundle, opt Options) *Bot {
 	bot := &Bot{search: newSearcher(b.Win, opt.Effort)}
 	bot.search.oracle = opt.Oracle
 	bot.search.noFixes = opt.NoSmallFixes
+	bot.search.isSearch = opt.ISSearch
 	if b.Discard != nil && !opt.HeuristicDiscard {
 		bot.discard = newDiscarder(b.Win, b.Discard)
 		bot.discard.noFixes = opt.NoSmallFixes
