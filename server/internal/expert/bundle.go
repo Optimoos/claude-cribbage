@@ -293,3 +293,16 @@ func LoadBundle(path string) (*Bundle, error) {
 	defer f.Close()
 	return ReadBundle(f)
 }
+
+// Check reports whether the bundle has what opt asks for: the shape-pair
+// table for CondPeg, and the pegging policy for an IS search with λ below
+// 1 (without it the search would quietly run with λ 1).
+func (b *Bundle) Check(opt Options) error {
+	if opt.CondPeg && b.PegPair == nil {
+		return fmt.Errorf("condpeg needs a bundle with a shape-pair pegging table")
+	}
+	if opt.ISLambdaSet && opt.ISLambda < 1 && (b.PegPolicy == nil || opt.NoPegPolicy || opt.PegTemp != 0) {
+		return fmt.Errorf("islambda below 1 needs the bundle's pegging policy")
+	}
+	return nil
+}

@@ -114,6 +114,11 @@ func main() {
 		if err != nil {
 			fail("load expert bundle", err)
 		}
+		for _, l := range expert.Levels {
+			if err := b.Check(l.Options); err != nil {
+				fail("expert bundle "+*expertPath+" cannot play level "+l.Name, err)
+			}
+		}
 		expert.Register(b)
 		names := make([]string, len(expert.Levels))
 		for i, l := range expert.Levels {

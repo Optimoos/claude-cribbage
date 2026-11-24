@@ -15,8 +15,8 @@ type Level struct {
 // full-strength bot, registered under BotName. Measured with the bundle of
 // PLAN M41 (M14's tables, the exact keep table and the pegging policy),
 // paired against the heuristic: medium 50.5%, hard 54.4%, very hard 58.6%
-// (random, the easy level, wins 0.6%). With a bundle lacking the policy
-// the very hard level searches with λ 1.
+// (random, the easy level, wins 0.6%). The very hard level needs the
+// pegging policy: check a bundle with Bundle.Check before registering it.
 var Levels = []Level{
 	{"expert-easy", "Medium", Options{Effort: 10, NoKeepModel: true, NoPegModel: true, HeuristicDiscard: true}},
 	{"expert-medium", "Hard", Options{Effort: 50, NoKeepModel: true, NoPegModel: true}},

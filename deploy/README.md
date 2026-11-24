@@ -45,7 +45,8 @@ a copy of the web client too, for testing on a LAN):
 ```sh
 cd server
 CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o cribserver ./cmd/cribserver
-scp cribserver models-expert/expert.bin root@SERVER:/tmp/
+scp cribserver root@SERVER:/tmp/
+scp models-expert/expert-v1.bin root@SERVER:/tmp/expert.bin
 ```
 
 On the server (Debian/Ubuntu shown):
@@ -292,6 +293,13 @@ git push origin main:pages      # then the web page (Pages builds it in a minute
 
 Pages deploys only what is pushed to `pages`, so commits on `main` reach
 players when you deploy, not before.
+
+When the expert bundle changes, copy it with the binary
+(`scp models-expert/expert-v1.bin root@SERVER:/tmp/expert.bin`, then
+`install -m 0644 /tmp/expert.bin /opt/cribbage/` before the restart). The
+server refuses to start with a bundle that lacks what a level needs: from
+PLAN M43 on, the very hard level needs the pegging policy in
+`expert-v1.bin`, which the old `expert.bin` does not have.
 
 Pages left open notice a new page (each build writes its commit to
 `version.json`; open pages check it every 10 minutes, when shown again,

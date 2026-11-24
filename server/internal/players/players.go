@@ -33,59 +33,14 @@ func Resolve(spec string) (func(worker int) bots.Bot, error) {
 	path, opt := spec, expert.Options{Effort: expert.DefaultEffort}
 	if i := strings.LastIndexByte(spec, '@'); i >= 0 {
 		path = spec[:i]
-		for _, o := range strings.Split(spec[i+1:], ",") {
-			var err error
-			switch {
-			case o == "nokeep":
-				opt.NoKeepModel = true
-			case o == "nopeg":
-				opt.NoPegModel = true
-			case o == "heurdiscard":
-				opt.HeuristicDiscard = true
-			case o == "is":
-				opt.ISSearch = true
-			case o == "nofixes":
-				opt.NoSmallFixes = true
-			case o == "noexact":
-				opt.NoExactKeep = true
-			case o == "cond":
-				opt.CondDiscard = true
-			case o == "condpeg":
-				opt.CondDiscard, opt.CondPeg = true, true
-			case o == "nopegpol":
-				opt.NoPegPolicy = true
-			case strings.HasPrefix(o, "pegmix="):
-				opt.PegMix, err = strconv.ParseFloat(o[len("pegmix="):], 64)
-				opt.PegMixSet = true
-			case strings.HasPrefix(o, "islambda="):
-				opt.ISLambda, err = strconv.ParseFloat(o[len("islambda="):], 64)
-				opt.ISLambdaSet, opt.ISSearch = true, true
-			case strings.HasPrefix(o, "keepeps="):
-				opt.KeepEps, err = strconv.ParseFloat(o[len("keepeps="):], 64)
-				opt.KeepEpsSet = true
-			case o == "oracle=six":
-				opt.Oracle = expert.OracleSix
-			case o == "oracle=hand":
-				opt.Oracle = expert.OracleHand
-			case strings.HasPrefix(o, "pegtemp="):
-				opt.PegTemp, err = strconv.ParseFloat(o[len("pegtemp="):], 64)
-			default:
-				opt.Effort, err = strconv.Atoi(o)
-				if opt.Effort < 0 {
-					err = fmt.Errorf("negative effort")
-				}
-			}
-			if err != nil {
-				return nil, fmt.Errorf("%q: bad option %q: %v", spec, o, err)
-			}
+		var err error
+		if opt, err = ParseOptions(spec[i+1:]); err != nil {
+			return nil, fmt.Errorf("%q: %v", spec, err)
 		}
 	}
 	if b, err := expert.LoadBundle(path); err == nil {
-		if opt.CondPeg && b.PegPair == nil {
-			return nil, fmt.Errorf("%q: condpeg needs a bundle with a shape-pair pegging table", spec)
-		}
-		if opt.ISLambdaSet && opt.ISLambda < 1 && (b.PegPolicy == nil || opt.NoPegPolicy || opt.PegTemp != 0) {
-			return nil, fmt.Errorf("%q: islambda below 1 needs the bundle's pegging policy", spec)
+		if err := b.Check(opt); err != nil {
+			return nil, fmt.Errorf("%q: %v", spec, err)
 		}
 		return func(int) bots.Bot { return expert.NewBotWith(b, opt) }, nil
 	} else if path != spec {
@@ -96,4 +51,57 @@ func Resolve(spec string) (func(worker int) bots.Bot, error) {
 		return nil, fmt.Errorf("%q is neither a bot (%v), a bundle nor a loadable model: %w", spec, bots.Names(), err)
 	}
 	return func(w int) bots.Bot { return ai.NewAgent(net, 0, uint64(w)) }, nil
+}
+
+// ParseOptions reads the comma-separated options after a bundle's @ (see
+// Resolve) on top of the default effort.
+func ParseOptions(s string) (expert.Options, error) {
+	opt := expert.Options{Effort: expert.DefaultEffort}
+	for _, o := range strings.Split(s, ",") {
+		var err error
+		switch {
+		case o == "nokeep":
+			opt.NoKeepModel = true
+		case o == "nopeg":
+			opt.NoPegModel = true
+		case o == "heurdiscard":
+			opt.HeuristicDiscard = true
+		case o == "is":
+			opt.ISSearch = true
+		case o == "nofixes":
+			opt.NoSmallFixes = true
+		case o == "noexact":
+			opt.NoExactKeep = true
+		case o == "cond":
+			opt.CondDiscard = true
+		case o == "condpeg":
+			opt.CondDiscard, opt.CondPeg = true, true
+		case o == "nopegpol":
+			opt.NoPegPolicy = true
+		case strings.HasPrefix(o, "pegmix="):
+			opt.PegMix, err = strconv.ParseFloat(o[len("pegmix="):], 64)
+			opt.PegMixSet = true
+		case strings.HasPrefix(o, "islambda="):
+			opt.ISLambda, err = strconv.ParseFloat(o[len("islambda="):], 64)
+			opt.ISLambdaSet, opt.ISSearch = true, true
+		case strings.HasPrefix(o, "keepeps="):
+			opt.KeepEps, err = strconv.ParseFloat(o[len("keepeps="):], 64)
+			opt.KeepEpsSet = true
+		case o == "oracle=six":
+			opt.Oracle = expert.OracleSix
+		case o == "oracle=hand":
+			opt.Oracle = expert.OracleHand
+		case strings.HasPrefix(o, "pegtemp="):
+			opt.PegTemp, err = strconv.ParseFloat(o[len("pegtemp="):], 64)
+		default:
+			opt.Effort, err = strconv.Atoi(o)
+			if opt.Effort < 0 {
+				err = fmt.Errorf("negative effort")
+			}
+		}
+		if err != nil {
+			return opt, fmt.Errorf("bad option %q: %v", o, err)
+		}
+	}
+	return opt, nil
 }
