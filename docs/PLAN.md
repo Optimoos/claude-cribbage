@@ -1308,6 +1308,35 @@ runs/base-m14` (seed 900001, 24 workers at nice 19, other jobs running):
   expert against expert and 25 at effort 0; the whole run 83.5 minutes.
   Games average 9.05 hands.
 
+### M33: Speed (E3, first part)
+
+**Built (2026-11-23):** `internal/expert` (`keep.go`, `search.go`).
+- The keep model is a dense table: six sorted ranks are numbered by the
+  combinatorial number system (`rank6`, 18,564 slots) instead of a map
+  key. A second layout, by kept shape and thrown pair (1.3 MB), serves the
+  search's opponent weights directly. The per-hand cache of those weights
+  is an array with generation stamps.
+- Opponent shows are scored only for the worlds searched, not for every
+  world enumerated.
+- Search nodes pass by value: a pointer to a copied node escaped to the
+  heap through the recursion, one allocation per node (15% of the time).
+- The benchmark game went from 109 to 61 ms (one thread, loaded machine).
+- Identical play: coupled against the saved M14 baseline, 5000 deals with
+  `heuristic`, none deviated.
+- The double-dummy pegging database is left for proposals 1 and 4, whose
+  needs decide its shape. Discards (2.5 ms) were not touched.
+
+Latency on the production t4g.micro (Graviton, one worker, nice 19, 200
+games against `heuristic`, `GOARCH=arm64`):
+
+| Build | Pegging mean / p99 | Discard mean / p99 |
+|---|---|---|
+| M14 | 4.4 / 33.6 ms | 2.5 / 5.9 ms |
+| M33 | 1.6 / 14.1 ms | 2.5 / 5.9 ms |
+
+Map access was dearer on ARM than on x86, so the gain there is 2.7x. The
+working budget is about 200 ms per decision on one core.
+
 ---
 
 # Roadmap: three-player games (not started)
