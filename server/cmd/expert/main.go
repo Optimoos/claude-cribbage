@@ -41,6 +41,8 @@ func main() {
 		err = keepx(ctx, os.Args[2:])
 	case "keepcheck":
 		err = keepcheck(ctx, os.Args[2:])
+	case "wintable":
+		err = wintable(os.Args[2:])
 	case "pegpair":
 		err = pegpair(ctx, os.Args[2:])
 	case "rollpair":
@@ -63,7 +65,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: expert build|inspect|eval|iterate|rollout|corpus|keepx|keepcheck|pegfit|rollcheck|rollpair|pegpair [flags]")
+	fmt.Fprintln(os.Stderr, "usage: expert build|inspect|eval|iterate|rollout|corpus|keepx|keepcheck|pegfit|rollcheck|rollpair|pegpair|wintable [flags]")
 	os.Exit(2)
 }
 
