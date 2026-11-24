@@ -1409,6 +1409,89 @@ Kill rules, applied:
   at the cost of a Python step.
 - Proposal 9: unchanged, last.
 
+### M35: A persistent corpus (E4)
+
+**Built (2026-11-23):** `expert corpus` plays games between any two player
+specs and saves every hand in full: both deals, discards, starter, plays
+in order, every scoring step, shows, crib, pegging and the winner (a
+64-byte `HandRecord`, file magic `CRIBCORP1`).
+- Game i deals from `ai.DealSeed(seed, i)`, so a corpus does not depend on
+  the number of workers. `-explore` makes a seat discard at random on a
+  share of hands (flagged), and `-start LO,HI` starts games at random
+  scores to cover the endgame (flagged synthetic).
+- `CorpusSelfPlay` turns a corpus into the `SelfPlay` the table builders
+  take, so tables can be rebuilt without replaying games; the test checks
+  it matches `Collect` exactly.
+- Size and speed: 10k games are about 90k hands and 5.8 MB, 1.5 to 3
+  minutes at `@400` on 24 workers under load.
+
+### M36: The exact keep table (proposal 3)
+
+**Built (2026-11-23):** `expert keepx` runs the bundle's own discarder on
+every six-card hand, on both sides, at 30-30, and stores the share of
+each rank shape's hands that keep each option (the `keepx` table, 3.4
+minutes on 24 workers: 18,395 rank shapes, 962,988 suit classes). The
+opponent model becomes (1-eps)·exact + eps·softmax; `noexact` and
+`keepeps=X` are the options.
+
+Probability of the real keep in held-out games (`runs/p3-keepcheck.txt`,
+mean probability and mean log probability):
+
+| Opponent | Softmax | eps 0.2 | eps 0.3 | eps 0.5 |
+|---|---|---|---|---|
+| self (expert) | 0.644 (-0.926) | 0.765 (-0.753) | 0.750 (-0.743) | 0.720 (-0.752) |
+| `heuristic` | 0.635 (-0.866) | 0.712 (-0.880) | 0.702 (-0.835) | 0.683 (-0.796) |
+| `heuristic2` | 0.634 (-0.854) | 0.705 (-0.889) | 0.696 (-0.841) | 0.678 (-0.796) |
+| `models-big` | 0.607 (-1.034) | 0.658 (-1.163) | 0.651 (-1.096) | 0.639 (-1.024) |
+
+- The pure table (eps 0) is sharpest but fatal on log-likelihood when an
+  opponent keeps something the expert would not. At eps 0.5 it beats the
+  softmax for every opponent, including bots it was not built from.
+
+Games (`@400` with the table v `@400` without, both `nofixes`):
+
+| eps | Games | Head to head | Pegging/hand |
+|---|---|---|---|
+| 0.3 | 40k | 50.11 ± 0.17 | |
+| 0.5 | 40k | 50.15 ± 0.16 | +0.004 ± 0.003 |
+| 0.5, sequential test 0 v +0.3 | 71k (stopped) | 50.11 ± 0.12 | +0.004 ± 0.002 |
+
+- The sequential test accepted +0 after 35,656 pairs. Coupled guards
+  against `runs/base-m14` were flat at both eps (eps 0.5: heuristic -0.03,
+  heuristic2 +0.12, models-big -0.04, each ± 0.17).
+- **Decision:** `DefaultKeepEps` is 0.5. The table passes its own test,
+  costs nothing at run time, and gives a small real pegging gain, but no
+  win-rate gain this size of test can see. It also feeds proposals 2 and
+  4.
+
+### M37: Proposal 6's small fixes, and endgame starts
+
+**Built (2026-11-23):**
+- Heels are scored before pegging in discard values from 90 up (a jack
+  starter can win the game for the dealer at the cut).
+- When both players can peg out in the hand, the discard values who gets
+  there first (`pegOutFirst`) instead of calling it even.
+- The pegging search's terminals add the opponent's expected nobs and
+  flushes from hidden cards (`hiddenSuits`).
+- From 90 up, the crib at pegging terminals depends on the world
+  (`worldCribs`): what they kept says what they threw.
+- `nofixes` restores M14's play exactly (0 deviations against
+  `runs/base-m14`), so a same-binary opponent can play without the fixes.
+- `gauntlet -start LO,HI` (`ai.ArenaFrom`) starts every pair at a random
+  hand with both scores in [LO, HI]; both games of a pair start from it
+  with the seats swapped.
+
+| `@400` v `@400,nofixes` | Games | Head to head | Pegging/hand |
+|---|---|---|---|
+| Normal starts | 40k | 50.15 ± 0.10 | +0.000 ± 0.002 |
+| Starts at 90-120 | 40k | 50.09 ± 0.09 | +0.003 ± 0.009 |
+
+- Coupled guards against `runs/base-m14`: heuristic -0.00, heuristic2
+  +0.02, models-big -0.08 (each ± 0.10; 42% of pairs deviated).
+- About +0.1, inside the proposal's +0.05 to +0.15. The fixes stay on.
+- Times: 8 minutes for the normal head to head, 40 seconds for the
+  endgame one (games starting at 90+ last about a hand and a half).
+
 ---
 
 # Roadmap: three-player games (not started)
