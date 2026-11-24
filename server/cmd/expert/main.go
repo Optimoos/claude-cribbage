@@ -83,6 +83,28 @@ func selfPlay(ctx context.Context, bot string, games, workers int, seed uint64) 
 	return sp, nil
 }
 
+// corpusSelfPlay loads corpus files (comma-separated) as one SelfPlay,
+// leaving out hands with exploring discards.
+func corpusSelfPlay(files string) (*expert.SelfPlay, error) {
+	var all []expert.HandRecord
+	var games uint32
+	for _, f := range strings.Split(files, ",") {
+		meta, recs, err := expert.LoadCorpus(f)
+		if err != nil {
+			return nil, err
+		}
+		for i := range recs {
+			recs[i].Game += games // keep games distinct across files
+		}
+		games += uint32(meta.Games)
+		all = append(all, recs...)
+		fmt.Printf("corpus %s: %d hands of %d games (%s v %s)\n", f, len(recs), meta.Games, meta.Bots[0], meta.Bots[1])
+	}
+	sp := expert.CorpusSelfPlay(all, expert.CorpusFilter{NoExplore: true})
+	fmt.Printf("  %d games, %d hands\n", sp.Games, sp.Hands.Len())
+	return sp, nil
+}
+
 func build(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("build", flag.ExitOnError)
 	var spec buildSpec
@@ -94,6 +116,7 @@ func build(ctx context.Context, args []string) error {
 	fs.Uint64Var(&spec.seed, "seed", 1, "base seed")
 	out := fs.String("out", "models-expert/expert.bin", "bundle file to write")
 	fs.IntVar(&spec.window, "window", expert.DefaultWindowHands, "hands used to value each score (fewer: more local, noisier)")
+	fs.StringVar(&spec.corpus, "corpus", "", "build from these corpus files (comma-separated) instead of new self-play; -bot only names the source")
 	fs.Parse(args)
 
 	spec.want = map[string]bool{}
@@ -123,6 +146,7 @@ type buildSpec struct {
 	workers int
 	seed    uint64
 	window  int
+	corpus  string // corpus files to build from instead of self-play
 }
 
 func makeBundle(ctx context.Context, spec buildSpec) (*expert.Bundle, error) {
@@ -148,7 +172,13 @@ func makeBundle(ctx context.Context, spec buildSpec) (*expert.Bundle, error) {
 		return nil, fmt.Errorf("no win table: build it or give -base")
 	}
 
-	sp, err := selfPlay(ctx, *bot, spec.games, spec.workers, spec.seed)
+	var sp *expert.SelfPlay
+	var err error
+	if spec.corpus != "" {
+		sp, err = corpusSelfPlay(spec.corpus)
+	} else {
+		sp, err = selfPlay(ctx, *bot, spec.games, spec.workers, spec.seed)
+	}
 	if err != nil {
 		return nil, err
 	}
