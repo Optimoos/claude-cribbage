@@ -70,6 +70,9 @@ type Timed struct {
 	Discard, Play Latency
 }
 
+// Unwrap returns the timed bot.
+func (t *Timed) Unwrap() bots.Bot { return t.Bot }
+
 func (t *Timed) Choose(o *engine.Observation, legal []engine.Action) engine.Action {
 	start := now()
 	a := t.Bot.Choose(o, legal)

@@ -56,6 +56,13 @@ func NewRandom(seed uint64) *Random {
 
 func (r *Random) Name() string { return "random" }
 
+// Reseed restarts the bot's random choices from seed, so a match can give
+// each deal its own stream and replay it exactly.
+func (r *Random) Reseed(seed uint64) { r.rng = rand.New(rand.NewPCG(seed, 0x5eed)) }
+
+// Reseeder is a bot with random choices that can be restarted from a seed.
+type Reseeder interface{ Reseed(seed uint64) }
+
 func (r *Random) Choose(_ *engine.Observation, legal []engine.Action) engine.Action {
 	return legal[r.rng.IntN(len(legal))]
 }
