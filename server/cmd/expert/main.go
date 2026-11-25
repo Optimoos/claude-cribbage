@@ -55,6 +55,8 @@ func main() {
 		err = corpus(ctx, os.Args[2:])
 	case "rollout":
 		err = rollout(ctx, os.Args[2:])
+	case "exploit":
+		err = exploit(ctx, os.Args[2:])
 	default:
 		usage()
 	}
@@ -65,7 +67,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: expert build|inspect|eval|iterate|rollout|corpus|keepx|keepcheck|pegfit|rollcheck|rollpair|pegpair|wintable [flags]")
+	fmt.Fprintln(os.Stderr, "usage: expert build|inspect|eval|iterate|rollout|exploit|corpus|keepx|keepcheck|pegfit|rollcheck|rollpair|pegpair|wintable [flags]")
 	os.Exit(2)
 }
 
