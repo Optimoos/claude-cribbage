@@ -1747,6 +1747,18 @@ Guards, 20k games each, coupled against `runs/base-m14`:
   Proposal 9 passes M34's kill rule (clairvoyant pegging +0.99 a hand, over
   the 0.5 threshold) and is next: first its exploitability measurement.
 
+### M44: How exploitable the bot is (proposal 9, first step)
+
+Rule set before measuring (2026-11-25): an exploiter that knows the
+bot's strategy exactly, but not its cards, plays the pegging against the
+very hard bot (`@400,islambda=0.5,cond`). If it gains under **0.1 pegging
+points a hand** over the bot's own play in its seat on the same deals,
+proposal 9 is dropped: a blueprint can only remove what such an opponent
+gains, and none of the acceptance tests (the current expert and the
+guards) exploits anything. Above 0.1, the next step is to find whether the
+gap comes from the discard (which a pegging blueprint cannot change) or
+the play.
+
 ---
 
 # Roadmap: three-player games (not started)
