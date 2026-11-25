@@ -1759,6 +1759,24 @@ guards) exploits anything. Above 0.1, the next step is to find whether the
 gap comes from the discard (which a pegging blueprint cannot change) or
 the play.
 
+`expert exploit` (500 deals, seed 900001, scores from 0 to 80 so pegging
+cannot end the game, 50 bot hands kept per exploiter decision; results in
+`runs/p9/`):
+
+| Exploiter infers the bot's hand from | Gain, pegging points a hand |
+|---|---|
+| its discard and its plays (`full`) | **+0.296 ± 0.097** (dealing +0.32, pone +0.27) |
+| nothing (`none`, a control) | -0.196 ± 0.109 |
+
+- The control loses: searching for points against a bot that plays for
+  wins is not where the gain comes from. Reading the bot is.
+- The bot's real hand passed the filter at all 1382 decisions: the bot
+  depends only on what it sees, and the exploiter never had to fall back.
+- Above the rule's 0.1, so proposal 9 goes on to the next step.
+- Time: 2 h 16 min on 12 cores at nice 19 (the control took 2 min), against
+  an estimate of 1¼ to 1¾ hours: the costly run never had more than half
+  the machine.
+
 ---
 
 # Roadmap: three-player games (not started)
