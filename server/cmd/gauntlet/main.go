@@ -67,12 +67,37 @@ func main() {
 		c.sprt = true
 	}
 
+	opponents := splitSpecs(*vs)
+	warning := oracleWarning(append([]string{*bot}, opponents...))
+	if warning != "" {
+		fmt.Fprint(os.Stderr, warning)
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
-	if err := run(ctx, *bot, splitSpecs(*vs), *n, *workers, *seed, c); err != nil {
+	err := run(ctx, *bot, opponents, *n, *workers, *seed, c)
+	if warning != "" {
+		fmt.Print("\n" + warning) // again beside the results, so a saved log keeps it
+	}
+	if err != nil {
 		fmt.Fprintln(os.Stderr, "gauntlet:", err)
 		os.Exit(1)
 	}
+}
+
+// oracleWarning, when any spec sees the opponent's hidden cards, says why
+// the run's results do not measure real play; otherwise it is empty.
+func oracleWarning(specs []string) string {
+	var cheats []string
+	for _, s := range specs {
+		if players.SeesHidden(s) {
+			cheats = append(cheats, s)
+		}
+	}
+	if len(cheats) == 0 {
+		return ""
+	}
+	return "WARNING: " + strings.Join(cheats, ", ") + " can see the opponent's hidden cards (oracle=).\n" +
+		"         Results involving it are a test bound, NOT valid as a measure of real play.\n"
 }
 
 // config holds the options for coupled and sequential testing.

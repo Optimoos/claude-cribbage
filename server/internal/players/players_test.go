@@ -30,3 +30,16 @@ func TestLevelsMatchMeasuredSpecs(t *testing.T) {
 		}
 	}
 }
+
+func TestSeesHidden(t *testing.T) {
+	for spec, want := range map[string]bool{
+		"heuristic":                          false,
+		"runs/x.bin@400,cond":                false,
+		"runs/x.bin@400,oracle=hand":         true,
+		"runs/x.bin@oracle=six,islambda=0.5": true,
+	} {
+		if got := SeesHidden(spec); got != want {
+			t.Errorf("SeesHidden(%q) = %v, want %v", spec, got, want)
+		}
+	}
+}

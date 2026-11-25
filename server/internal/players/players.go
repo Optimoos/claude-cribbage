@@ -105,3 +105,15 @@ func ParseOptions(s string) (expert.Options, error) {
 	}
 	return opt, nil
 }
+
+// SeesHidden reports whether spec is a test oracle that sees some of the
+// opponent's hidden cards (oracle=hand or oracle=six). Its results bound
+// what better inference could be worth; they are not a measure of play.
+func SeesHidden(spec string) bool {
+	i := strings.LastIndexByte(spec, '@')
+	if i < 0 {
+		return false
+	}
+	opt, err := ParseOptions(spec[i+1:])
+	return err == nil && opt.Oracle != expert.NoOracle
+}
