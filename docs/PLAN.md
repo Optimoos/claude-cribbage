@@ -1773,6 +1773,28 @@ cannot end the game, 50 bot hands kept per exploiter decision; results in
 - The bot's real hand passed the filter at all 1382 decisions: the bot
   depends only on what it sees, and the exploiter never had to fall back.
 - Above the rule's 0.1, so proposal 9 goes on to the next step.
+
+Where the gain comes from, the same 500 deals (differences paired by deal;
+the baselines matched on every deal):
+
+| Exploiter reads | Gain | Run |
+|---|---|---|
+| nothing (`none`) | -0.196 ± 0.109 | 2 min |
+| the discard (`discard`) | +0.062 ± 0.094 | 46 min on 24 cores |
+| the discard and the first play (`first`) | +0.236 ± 0.101 | 1 h 40 min on 24 cores |
+| the discard and every play (`full`) | +0.296 ± 0.097 | 2 h 16 min on 12 cores |
+
+- The plays give away **+0.234 ± 0.075** (full less discard); the bot's
+  first play of the hand (its lead, or its first reply) **+0.174 ± 0.072**
+  of it (first less discard), and the later plays +0.060 ± 0.034.
+- So the leak is mostly where proposal 9's two-ply blueprint acts: the bot
+  is deterministic, and its first card says a lot about the rest.
+- The discard alone gives the exploiter about +0.26 over no inference, but
+  most of that only pays back what its points-chasing search costs it.
+- Estimates: 1 to 1½ h for `discard` (took 46 min) and about 1 h for
+  `first` (took 1 h 40 min; the machine had other load).
+- This is a bound against a perfect exploiter. No acceptance test exploits
+  anything, so a blueprint that removes the leak need not win more of them.
 - Time: 2 h 16 min on 12 cores at nice 19 (the control took 2 min), against
   an estimate of 1¼ to 1¾ hours: the costly run never had more than half
   the machine.
