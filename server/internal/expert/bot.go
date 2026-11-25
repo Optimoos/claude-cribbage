@@ -31,6 +31,7 @@ type Options struct {
 	NoPegModel       bool    // do not weight opponent hands by the plays made with them
 	HeuristicDiscard bool    // discard as the heuristic does, ignoring the discard tables
 	Oracle           Oracle  // test only: let pegging see some of the opponent's hidden cards
+	MixFirst         float64 // proposal 9: mix the first play of a hand among plays within this much win probability of the best
 	NoExactKeep      bool    // ignore the bundle's exact keep table: the softmax model alone
 	KeepEps          float64 // the softmax's weight against the exact keep table, when KeepEpsSet
 	KeepEpsSet       bool    // otherwise DefaultKeepEps
@@ -75,6 +76,7 @@ func NewBot(b *Bundle, effort int) *Bot { return NewBotWith(b, Options{Effort: e
 func NewBotWith(b *Bundle, opt Options) *Bot {
 	bot := &Bot{search: newSearcher(b.Win, opt.Effort)}
 	bot.search.oracle = opt.Oracle
+	bot.search.mixFirst = opt.MixFirst
 	bot.search.noFixes = opt.NoSmallFixes
 	bot.search.isSearch = opt.ISSearch
 	bot.search.isLambda = 1
@@ -120,6 +122,18 @@ func NewBotWith(b *Bundle, opt Options) *Bot {
 }
 
 func (b *Bot) Name() string { return BotName }
+
+// SetSeed sets the seed that draws mixed plays (see Options.MixFirst).
+func (b *Bot) SetSeed(seed uint64) { b.search.seed = seed }
+
+// PlayDist returns the pegging plays the bot may make in o and their
+// chances; without mixing, one play with chance 1.
+func (b *Bot) PlayDist(o *engine.Observation, legal []engine.Action) ([]engine.Action, []float64) {
+	if len(legal) == 1 {
+		return legal, []float64{1}
+	}
+	return b.search.dist(o, legal)
+}
 
 // Watch lets an oracle see the game; other bots ignore it.
 func (b *Bot) Watch(g *engine.Game, seat int) {

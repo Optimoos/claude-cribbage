@@ -30,6 +30,10 @@ func Register(b *Bundle) {
 	b.keepModel() // build shared state now rather than in the first game
 	for _, l := range Levels {
 		opt := l.Options
-		bots.Register(l.Name, func(uint64) bots.Bot { return NewBotWith(b, opt) })
+		bots.Register(l.Name, func(seed uint64) bots.Bot {
+			nb := NewBotWith(b, opt)
+			nb.SetSeed(seed)
+			return nb
+		})
 	}
 }

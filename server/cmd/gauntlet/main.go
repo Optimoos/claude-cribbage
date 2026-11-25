@@ -281,7 +281,7 @@ func splitSpecs(list string) []string {
 	for _, p := range strings.Split(list, ",") {
 		p = strings.TrimSpace(p)
 		_, numErr := strconv.Atoi(p)
-		isOpt := numErr == nil || p == "nokeep" || p == "nopeg" || p == "heurdiscard" || strings.HasPrefix(p, "pegtemp=") || strings.HasPrefix(p, "oracle=") || p == "noexact" || p == "nofixes" || p == "is" || p == "nopegpol" || strings.HasPrefix(p, "pegmix=") || p == "cond" || p == "condpeg" || strings.HasPrefix(p, "islambda=") || strings.HasPrefix(p, "keepeps=")
+		isOpt := numErr == nil || p == "nokeep" || p == "nopeg" || p == "heurdiscard" || strings.HasPrefix(p, "pegtemp=") || strings.HasPrefix(p, "oracle=") || p == "noexact" || p == "nofixes" || p == "is" || p == "nopegpol" || strings.HasPrefix(p, "pegmix=") || p == "cond" || p == "condpeg" || strings.HasPrefix(p, "islambda=") || strings.HasPrefix(p, "keepeps=") || strings.HasPrefix(p, "mixfirst=")
 		if isOpt && len(out) > 0 && strings.Contains(out[len(out)-1], "@") {
 			out[len(out)-1] += "," + p
 			continue

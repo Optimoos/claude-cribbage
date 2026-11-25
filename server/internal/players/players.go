@@ -22,7 +22,8 @@ import (
 // pegging policy), pegmix=X (mix the softmax on points into it at weight
 // X), cond (discards conditioned on the opponent's likely
 // hands), condpeg (and their pegging, with a shape-pair table), islambda=X (information-set search, the opponent's best
-// reply at weight X against the policy), and the test oracles oracle=six
+// reply at weight X against the policy), mixfirst=X (mix the first play of
+// a hand among plays within X win probability of the best), and the test oracles oracle=six
 // and oracle=hand (see expert.Oracle).
 //
 //	models-expert/expert.bin@100,nokeep
@@ -42,7 +43,11 @@ func Resolve(spec string) (func(worker int) bots.Bot, error) {
 		if err := b.Check(opt); err != nil {
 			return nil, fmt.Errorf("%q: %v", spec, err)
 		}
-		return func(int) bots.Bot { return expert.NewBotWith(b, opt) }, nil
+		return func(w int) bots.Bot {
+			nb := expert.NewBotWith(b, opt)
+			nb.SetSeed(uint64(w))
+			return nb
+		}, nil
 	} else if path != spec {
 		return nil, err
 	}
@@ -84,6 +89,8 @@ func ParseOptions(s string) (expert.Options, error) {
 		case strings.HasPrefix(o, "islambda="):
 			opt.ISLambda, err = strconv.ParseFloat(o[len("islambda="):], 64)
 			opt.ISLambdaSet, opt.ISSearch = true, true
+		case strings.HasPrefix(o, "mixfirst="):
+			opt.MixFirst, err = strconv.ParseFloat(o[len("mixfirst="):], 64)
 		case strings.HasPrefix(o, "keepeps="):
 			opt.KeepEps, err = strconv.ParseFloat(o[len("keepeps="):], 64)
 			opt.KeepEpsSet = true

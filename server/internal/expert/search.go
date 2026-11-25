@@ -60,8 +60,11 @@ type searcher struct {
 	// A test oracle sees the game: oracle says what it may use of the
 	// opponent's hand.
 	oracle Oracle
-	game   *engine.Game
-	seat   int
+
+	mixFirst float64 // proposal 9: mix my first play among plays this close to the best
+	seed     uint64  // draws the mixed plays
+	game     *engine.Game
+	seat     int
 
 	noFixes bool // M14's search: no hidden suits in their show, one crib for every world
 
@@ -94,6 +97,80 @@ func newSearcher(win *WinTable, effort int) *searcher {
 // choose returns the pegging play in legal with the highest expected win
 // probability; ties go to the earliest.
 func (s *searcher) choose(o *engine.Observation, legal []engine.Action) engine.Action {
+	cands, probs := s.dist(o, legal)
+	if len(cands) == 1 {
+		return cands[0]
+	}
+	u := float64(mixHash(s.seed, o)>>11) / (1 << 53)
+	for i, p := range probs {
+		if u -= p; u < 0 {
+			return cands[i]
+		}
+	}
+	return cands[len(cands)-1]
+}
+
+// dist is the pegging policy: the plays it may make and their chances.
+// Without mixing it is the best play (ties to the earliest) with chance 1.
+// With mixFirst > 0, on my first play of a hand with both scores below
+// mixBelow, it is uniform over the plays whose value is within mixFirst
+// of the best (proposal 9: a deterministic first card tells an opponent
+// who knows the strategy much about the rest of the hand).
+func (s *searcher) dist(o *engine.Observation, legal []engine.Action) ([]engine.Action, []float64) {
+	cands, vals := s.values(o, legal)
+	best := 0
+	for i := range vals {
+		if vals[i] > vals[best] {
+			best = i
+		}
+	}
+	first := true
+	for _, pc := range o.Played[:o.PlayedN] {
+		if pc.Player == o.Player {
+			first = false
+		}
+	}
+	if s.mixFirst <= 0 || !first || max(o.Scores[0], o.Scores[1]) >= mixBelow || len(cands) < 2 {
+		return cands[best : best+1], []float64{1}
+	}
+	var mc []engine.Action
+	for i := range vals {
+		if vals[i] >= vals[best]-s.mixFirst {
+			mc = append(mc, cands[i])
+		}
+	}
+	probs := make([]float64, len(mc))
+	for i := range probs {
+		probs[i] = 1 / float64(len(mc))
+	}
+	return mc, probs
+}
+
+// mixBelow: the first play is mixed only while both scores are below it.
+const mixBelow = 90
+
+// mixHash draws a mixed play from the bot's seed and what it sees, so a
+// game replays exactly given the seed.
+func mixHash(seed uint64, o *engine.Observation) uint64 {
+	h := seed ^ 0x9e3779b97f4a7c15
+	mix := func(x uint64) {
+		h ^= x
+		h *= 0xbf58476d1ce4e5b9
+		h ^= h >> 31
+	}
+	mix(uint64(o.HandNum)<<32 | uint64(o.Scores[0])<<16 | uint64(o.Scores[1]))
+	for _, c := range o.Kept {
+		mix(uint64(c))
+	}
+	mix(uint64(o.Starter))
+	for _, pc := range o.Played[:o.PlayedN] {
+		mix(uint64(pc.Card)<<1 | uint64(pc.Player))
+	}
+	return h
+}
+
+// values returns each distinct play (one card per rank) and its value.
+func (s *searcher) values(o *engine.Observation, legal []engine.Action) ([]engine.Action, []float64) {
 	me := o.Player
 	s.base = [2]int{o.Scores[me], o.Scores[1-me]}
 	s.iDeal = o.Dealer == me
@@ -126,7 +203,7 @@ func (s *searcher) choose(o *engine.Observation, legal []engine.Action) engine.A
 		s.peek(o, oppPlayed)
 	}
 	if len(s.worlds) == 0 {
-		return legal[0] // inconsistent observation; should not happen
+		return legal[:1], []float64{0} // inconsistent observation; should not happen
 	}
 	// Draw a pool by card counts, weight it by the opponent model, then
 	// draw the worlds to search by those weights. The model's cost is spent
@@ -172,7 +249,8 @@ func (s *searcher) choose(o *engine.Observation, legal []engine.Action) engine.A
 	if worldCribs {
 		s.worldCribs(o, oppPlayed, &seen, worlds)
 	}
-	best, bestV := legal[0], -1.0
+	var cands []engine.Action
+	var vals []float64
 	var tried uint16
 	for _, a := range legal {
 		r := int8(a.Cards[0].Rank())
@@ -193,9 +271,7 @@ func (s *searcher) choose(o *engine.Observation, legal []engine.Action) engine.A
 				v += worlds[i].weight * s.isVals[i]
 				total += worlds[i].weight
 			}
-			if v /= total; v > bestV {
-				best, bestV = a, v
-			}
+			cands, vals = append(cands, a), append(vals, v/total)
 			continue
 		}
 		for i := range worlds {
@@ -211,11 +287,9 @@ func (s *searcher) choose(o *engine.Observation, legal []engine.Action) engine.A
 			v += w.weight * s.after(n, idx, -1, 2)
 			total += w.weight
 		}
-		if v /= total; v > bestV {
-			best, bestV = a, v
-		}
+		cands, vals = append(cands, a), append(vals, v/total)
 	}
-	return best
+	return cands, vals
 }
 
 // value is the minimax value of a node for player 0, who maximizes their
