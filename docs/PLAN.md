@@ -1799,6 +1799,39 @@ the baselines matched on every deal):
   an estimate of 1¼ to 1¾ hours: the costly run never had more than half
   the machine.
 
+### M45: Mixing the first play among near-best plays (proposal 9, cheap form)
+
+Chosen with the owner (2026-11-25) ahead of the CFR blueprint: since
+M44 found the bot's first card the main leak, mix it.
+- `mixfirst=X`: on the bot's first play of a hand, both scores below 90,
+  play uniformly among the plays within X win probability of the best.
+  The draw hashes the bot's seed and its observation, so games replay
+  given the seed. Off, the bot plays exactly as before (`expert exploit`
+  reproduced an earlier run to the digit). `Bot.PlayDist` gives the
+  policy; the exploit tool weights worlds by it and branches on mixed
+  replies.
+- Gaps between the best and second-best first play (400 decisions of the
+  stack's own games): median 0.6% win probability; X = 0.5% mixes about
+  47% of first plays, X = 0.2% about 26%.
+
+| | X = 0.5% | X = 0.2% |
+|---|---|---|
+| Head to head against the deterministic stack, 20k games | 49.69 ± 0.32 (margin -0.23, pegging -0.027) | 49.80 ± 0.25 (margin -0.10, pegging -0.008) |
+| Exploiter's pegging difference against it, less against the deterministic bot (paired by deal) | +0.028 ± 0.098 (500 deals) | +0.060 ± 0.109 (352 deals; stopped) |
+
+- **Mixing near-best plays hides nothing measurable**: the exploiter does
+  as well against the mixed bot as against the deterministic one. Which
+  plays are near-best depends on the hand, so the mixed card still
+  reveals it. The gain over the bot's own play in that seat rose
+  (+0.36, against M44's +0.30) only because the baseline, the mixed bot
+  in that seat, is slightly weaker.
+- The interval does not rule out a reduction up to about 0.17 (the whole
+  first-play leak), but the estimate is none, at a small cost.
+- `mixfirst` stays in the code, off by default; no level uses it.
+- Times: head to head 36 and 35 minutes (estimates 45 to 60 and 35);
+  exploit at 0.5% 3 h 6 min in two parts (estimate 2½ to 3 h; background
+  commands stop at 2 hours, so `expert exploit -out` now resumes).
+
 ---
 
 # Roadmap: three-player games (not started)
