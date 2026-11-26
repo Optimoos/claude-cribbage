@@ -256,7 +256,7 @@ func (d *discarder) condOption(kept [4]engine.Card, disc [2]engine.Card, held *[
 		if d.iDeal {
 			for c, x := range cmix[sr-1] {
 				if x != 0 {
-					d.hand[min(h+heels+c+nobs, maxShow-1)] += ws * x
+					d.hand[min(h+heels+c+nobs, 2*maxShow-1)] += ws * x
 				}
 			}
 			continue
