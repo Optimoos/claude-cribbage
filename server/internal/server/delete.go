@@ -119,10 +119,12 @@ func (s *Server) deleteUser(ctx context.Context, userID int64, keep *Conn) error
 		}
 	}
 	s.dropInvites(userID)
-	if err := s.auth.Store.DeleteUser(ctx, userID); err != nil {
+	// The games first: if the second step fails, the account is still
+	// there to try again with.
+	if err := s.gameStore.ForgetUser(ctx, userID); err != nil {
 		return err
 	}
-	if err := s.gameStore.ForgetUser(ctx, userID); err != nil {
+	if err := s.auth.Store.DeleteUser(ctx, userID); err != nil {
 		return err
 	}
 	s.dropInvites(userID) // any sent while this ran

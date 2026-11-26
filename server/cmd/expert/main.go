@@ -162,6 +162,9 @@ func makeBundle(ctx context.Context, spec buildSpec) (*expert.Bundle, error) {
 			return nil, err
 		}
 		b.Win, b.Discard, b.KeepTemp = base.Win, base.Discard, base.KeepTemp
+		// Everything the build does not replace carries over, or the new
+		// bundle would quietly play without it.
+		b.KeepExact, b.PegPolicy, b.PegPair, b.Meta.Notes = base.KeepExact, base.PegPolicy, base.PegPair, base.Meta.Notes
 		for k, v := range base.Meta.Metrics {
 			b.Meta.Metrics[k] = v
 		}
@@ -207,6 +210,9 @@ func makeBundle(ctx context.Context, spec buildSpec) (*expert.Bundle, error) {
 		b.Meta.Sources["discard"] = *bot
 		b.Meta.Metrics["discard_hands"] = float64(len(sp.Details))
 		fmt.Printf("discard tables built from %d hands\n", len(sp.Details))
+		if b.KeepExact != nil || b.PegPair != nil {
+			fmt.Println("note: the exact keep and shape-pair tables come from -base, fitted with its discard tables; rebuild them for the new ones")
+		}
 	}
 	if want["keep"] {
 		if b.Discard == nil {
