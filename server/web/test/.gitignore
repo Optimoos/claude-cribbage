@@ -1,0 +1,4 @@
+node_modules/
+cribserver.test-bin
+test-results/
+playwright-report/
