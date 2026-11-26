@@ -136,8 +136,8 @@ type Server struct {
 	quitOnce sync.Once
 	actors   sync.WaitGroup
 
-	// Lock order: gmu, then game.smu, then cmu. Never hold any of these
-	// while submitting to a game inbox.
+	// Lock order: imu, then gmu, then game.smu, then cmu. Never hold any
+	// of these while submitting to a game inbox.
 	gmu       sync.RWMutex
 	games     map[string]*game
 	userGames map[int64]map[string]*game

@@ -98,6 +98,21 @@ func (s *Server) deleteUser(ctx context.Context, userID int64, keep *Conn) error
 	s.gmu.Unlock()
 	s.closeUserConns(userID, keep)
 	s.cancelMatch(userID)
+	// Games being created for the user reserved before the mark: wait for
+	// them to be registered, so the loop below ends them too.
+	for {
+		s.gmu.RLock()
+		_, busy := s.reserved[userID]
+		s.gmu.RUnlock()
+		if !busy {
+			break
+		}
+		select {
+		case <-time.After(10 * time.Millisecond):
+		case <-ctx.Done():
+			return fmt.Errorf("waiting for games being created: %w", ctx.Err())
+		}
+	}
 
 	for _, g := range s.gamesOf(userID) {
 		done := make(chan struct{})
@@ -130,6 +145,13 @@ func (s *Server) deleteUser(ctx context.Context, userID int64, keep *Conn) error
 	s.dropInvites(userID) // any sent while this ran
 	s.closeUserConns(userID, keep)
 	return nil
+}
+
+// isDeleted reports whether userID's account is being or has been deleted.
+func (s *Server) isDeleted(userID int64) bool {
+	s.gmu.RLock()
+	defer s.gmu.RUnlock()
+	return s.deleted[userID]
 }
 
 // leave ends the game for a player whose account is being deleted: an
