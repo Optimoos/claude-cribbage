@@ -43,6 +43,10 @@ type Passkey struct {
 	Data     []byte // the credential, as the auth package encodes it
 	Created  time.Time
 	LastUsed time.Time // zero if never
+	// Session is the token of the session that added it. If set, adding
+	// fails (ErrNotFound) unless that session is live, and ending the
+	// session with DeleteSessions removes the passkey.
+	Session string
 }
 
 // AccountToken is a single-use secret sent in a link by email. Only a hash
@@ -75,7 +79,9 @@ type Store interface {
 	// DeleteSession ends a session; deleting an unknown token is not an
 	// error.
 	DeleteSession(ctx context.Context, token string) error
-	// DeleteSessions ends every session of a user but keep ("" for none).
+	// DeleteSessions ends every session of a user but keep ("" for none),
+	// and removes the passkeys those sessions added: whoever held one may
+	// have added a passkey to keep their way in.
 	DeleteSessions(ctx context.Context, userID int64, keep string) error
 	// DeleteExpiredSessions removes sessions and account tokens that
 	// expired before t and reports how many sessions.

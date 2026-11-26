@@ -171,8 +171,9 @@ func (s *Service) BeginAddPasskey(ctx context.Context, u *store.User) (string, *
 	return string(b), sd, err
 }
 
-// FinishAddPasskey checks the browser's new credential and saves it.
-func (s *Service) FinishAddPasskey(ctx context.Context, u *store.User, sd *webauthn.SessionData, credJSON, name string) error {
+// FinishAddPasskey checks the browser's new credential and saves it as
+// added by session (see store.Passkey), then tells the account's address.
+func (s *Service) FinishAddPasskey(ctx context.Context, u *store.User, session string, sd *webauthn.SessionData, credJSON, name string) error {
 	if s.WebAuthn == nil {
 		return ErrPasskeysDisabled
 	}
@@ -202,7 +203,32 @@ func (s *Service) FinishAddPasskey(ctx context.Context, u *store.User, sd *webau
 	if err != nil {
 		return err
 	}
-	return s.Store.AddPasskey(ctx, &store.Passkey{ID: cred.ID, UserID: u.ID, Name: name, Data: data, Created: time.Now()})
+	err = s.Store.AddPasskey(ctx, &store.Passkey{ID: cred.ID, UserID: u.ID, Name: name, Data: data, Created: time.Now(), Session: session})
+	if errors.Is(err, store.ErrNotFound) {
+		return ErrBadToken // signed out (or deleted) meanwhile
+	}
+	if err != nil {
+		return err
+	}
+	s.notifyPasskey(ctx, u.ID, name)
+	return nil
+}
+
+// notifyPasskey tells an account's address that a passkey was added, so an
+// owner whose session was stolen finds out.
+func (s *Service) notifyPasskey(ctx context.Context, userID int64, name string) {
+	u, err := s.Store.UserByID(ctx, userID)
+	if err != nil || u.Email == "" || s.Mailer == nil || !s.mailAllowed(u.ID, u.Email) {
+		return
+	}
+	body := fmt.Sprintf(`Hello %s,
+
+A passkey named "%s" was added to your cribbage account "%s". It can sign in to the account.
+
+If you did not add it, open Account in the game, remove the passkey, then choose "Sign out other devices", which also removes passkeys added from those devices.
+`, u.Nickname, name, u.Username)
+	// Best effort: the passkey is added either way.
+	_ = s.send(ctx, "passkey added", u.Email, "A passkey was added to your Cribbage account", body)
 }
 
 // RemovePasskey removes one of a user's passkeys.

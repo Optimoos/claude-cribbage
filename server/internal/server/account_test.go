@@ -586,3 +586,34 @@ func TestDeviceSignInsPerAddress(t *testing.T) {
 		t.Fatal("another address was refused")
 	}
 }
+
+// Adding a passkey tells the account's address, and signing out other
+// devices removes the passkeys they added (a stolen session's way back in).
+func TestPasskeyAddedNoticeAndSignOut(t *testing.T) {
+	srv, addr, mails := startAccountServer(t, false)
+	a := signUp(t, addr, mails, "alice", "alice@example.com")
+	thief := signIn(t, addr, mails, "alice", "alice@example.com")
+	add := func(c *tclient, name string) {
+		t.Helper()
+		dev := &passkeytest.Authenticator{Origin: "https://crib.example"}
+		cred, err := dev.Create(c.call(t, msg(&pb.PasskeyAddBegin{})).GetPasskeyOptions().GetOptionsJson())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c.call(t, msg(&pb.PasskeyAddFinish{CredentialJson: cred, Name: name})).GetAccount() == nil {
+			t.Fatal("passkey not added")
+		}
+		if m := mails.mail(t, "alice@example.com"); !strings.Contains(m.body, `"`+name+`"`) {
+			t.Fatalf("notice: %+v", m)
+		}
+	}
+	add(a, "Mine")
+	add(thief, "Theirs")
+	if m := a.call(t, msg(&pb.SignOutOthers{})); m.GetAck() == nil {
+		t.Fatalf("sign out others: %v", m)
+	}
+	keys, err := srv.auth.Store.Passkeys(context.Background(), a.auth.UserId)
+	if err != nil || len(keys) != 1 || keys[0].Name != "Mine" {
+		t.Fatalf("passkeys left: %+v, %v", keys, err)
+	}
+}

@@ -294,7 +294,7 @@ func (s *Server) passkeyAddFinish(c *Conn, id uint32, m *pb.PasskeyAddFinish) {
 	c.passkey = nil
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if err := s.auth.FinishAddPasskey(ctx, c.user, sd, m.CredentialJson, m.Name); err != nil {
+	if err := s.auth.FinishAddPasskey(ctx, c.user, c.token, sd, m.CredentialJson, m.Name); err != nil {
 		s.sendAccountError(c, id, "add passkey", err)
 		return
 	}
