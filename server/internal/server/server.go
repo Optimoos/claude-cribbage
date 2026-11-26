@@ -506,7 +506,7 @@ func (s *Server) handle(c *Conn, m *pb.ClientMessage) {
 	case *pb.ClientMessage_JoinGame:
 		// Reserved on the actor: a join still queued when the actor exits
 		// is dropped, and must not take a reservation with it.
-		s.withGame(c, id, b.JoinGame.GameId, func(g *game) {
+		s.withGame(c, id, b.JoinGame.GameId, true, func(g *game) {
 			release, err := s.reserve(gameKind{}, reserveFor{id: c.user.ID, self: true})
 			if err != nil {
 				s.sendLimit(c, id, err)
@@ -523,9 +523,9 @@ func (s *Server) handle(c *Conn, m *pb.ClientMessage) {
 		s.cancelMatch(c.user.ID)
 		c.send(&pb.ServerMessage{RequestId: id, Body: &pb.ServerMessage_Ack{Ack: &pb.Ack{}}})
 	case *pb.ClientMessage_SyncGame:
-		s.withGame(c, id, b.SyncGame.GameId, func(g *game) { g.sync(c, id) })
+		s.withGame(c, id, b.SyncGame.GameId, false, func(g *game) { g.sync(c, id) })
 	case *pb.ClientMessage_Act:
-		s.withGame(c, id, b.Act.GameId, func(g *game) { g.act(c, id, b.Act.Action) })
+		s.withGame(c, id, b.Act.GameId, false, func(g *game) { g.act(c, id, b.Act.Action) })
 	case *pb.ClientMessage_Logout:
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		err := s.auth.Logout(ctx, c.token)
@@ -546,7 +546,7 @@ func (s *Server) handle(c *Conn, m *pb.ClientMessage) {
 	case *pb.ClientMessage_RedeemCode:
 		s.redeemCode(c, id, b.RedeemCode.Code)
 	case *pb.ClientMessage_Resign:
-		s.withGame(c, id, b.Resign.GameId, func(g *game) { g.resign(c, id) })
+		s.withGame(c, id, b.Resign.GameId, false, func(g *game) { g.resign(c, id) })
 	default:
 		c.sendError(id, pb.ErrorCode_ERROR_CODE_BAD_REQUEST, "", "unsupported message")
 	}
@@ -627,18 +627,26 @@ func (s *Server) authenticate(c *Conn, id uint32, fn func(context.Context) (*aut
 	}
 }
 
-// withGame runs fn on the game's actor and reports whether it was queued.
-func (s *Server) withGame(c *Conn, id uint32, gameID string, fn func(*game)) bool {
+// withGame runs fn on the actor of one of c's games, or of an open game
+// to join. Any other game is "not found", whether or not it exists, and is
+// not woken.
+func (s *Server) withGame(c *Conn, id uint32, gameID string, join bool, fn func(*game)) {
 	s.gmu.RLock()
-	g := s.games[gameID]
+	g := s.userGames[c.user.ID][gameID]
+	if join {
+		g = s.open[gameID]
+	}
 	s.gmu.RUnlock()
 	if g == nil || !g.submit(func() { fn(g) }) {
-		if !s.shuttingDown() { // else the connection is about to close and the client will resync
-			c.sendError(id, pb.ErrorCode_ERROR_CODE_NOT_FOUND, gameID, "no such active game")
+		if s.shuttingDown() {
+			return // the connection is about to close and the client will resync
 		}
-		return false
+		msg := "no such active game"
+		if join {
+			msg = "that game is no longer open"
+		}
+		c.sendError(id, pb.ErrorCode_ERROR_CODE_NOT_FOUND, gameID, msg)
 	}
-	return true
 }
 
 func (s *Server) createGame(c *Conn, id uint32, botName string) {

@@ -272,11 +272,12 @@ func TestHumanGameAndCheating(t *testing.T) {
 	}
 
 	id = eve.send(t, &pb.ClientMessage{Body: &pb.ClientMessage_JoinGame{JoinGame: &pb.JoinGame{GameId: gameID}}})
-	wantError(t, eve.next(t, replyTo(id)), pb.ErrorCode_ERROR_CODE_GAME_UNAVAILABLE)
+	wantError(t, eve.next(t, replyTo(id)), pb.ErrorCode_ERROR_CODE_NOT_FOUND)
+	// To an outsider, someone else's game is not found, as if it did not exist.
 	id = eve.send(t, act(gameID, ua.Legal[0]))
-	wantError(t, eve.next(t, replyTo(id)), pb.ErrorCode_ERROR_CODE_NOT_IN_GAME)
+	wantError(t, eve.next(t, replyTo(id)), pb.ErrorCode_ERROR_CODE_NOT_FOUND)
 	id = eve.send(t, &pb.ClientMessage{Body: &pb.ClientMessage_SyncGame{SyncGame: &pb.SyncGame{GameId: gameID}}})
-	wantError(t, eve.next(t, replyTo(id)), pb.ErrorCode_ERROR_CODE_NOT_IN_GAME)
+	wantError(t, eve.next(t, replyTo(id)), pb.ErrorCode_ERROR_CODE_NOT_FOUND)
 	// Bob tries to discard Alice's cards.
 	id = b.send(t, act(gameID, ua.Legal[0]))
 	wantError(t, b.next(t, replyTo(id)), pb.ErrorCode_ERROR_CODE_ILLEGAL_ACTION)
