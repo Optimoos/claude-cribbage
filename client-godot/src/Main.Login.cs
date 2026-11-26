@@ -155,7 +155,7 @@ public partial class Main
         box.AddChild(deviceStatus);
         deviceTimer = Style.Label("", 13, Style.P.Muted);
         box.AddChild(deviceTimer);
-        deviceOpen = Style.Primary("Open link", () => { if (device is { Url: not "" } d) OS.ShellOpen(d.Url); });
+        deviceOpen = Style.Primary("Open link", () => { if (device is { } d && IsWebUrl(d.Url)) OS.ShellOpen(d.Url); });
         deviceRestart = Style.Button("New code", StartDevice);
         Row(box, deviceOpen, deviceRestart, Style.Button("Back", () => SetLoginStage(LoginStage.Start)));
     }
@@ -441,7 +441,7 @@ public partial class Main
             deviceStatus.Text = "Waiting for approval…";
             RenderLogin();
             // Open the approval page, except when only taking screenshots.
-            if (device.Url != "" && opts.Show == "" && opts.Screenshot == "")
+            if (IsWebUrl(device.Url) && opts.Show == "" && opts.Screenshot == "")
             {
                 OS.ShellOpen(device.Url);
             }

@@ -206,20 +206,26 @@ func ReadBundle(r io.Reader) (*Bundle, error) {
 	d := new(DiscardTables)
 	nd := 0
 	buf := make([]byte, 4)
+	seen := map[string]bool{}
 	for _, t := range b.Meta.Tables {
-		vals := make([]float32, t.size())
-		for i := range vals {
-			if _, err := io.ReadFull(br, buf); err != nil {
-				return nil, fmt.Errorf("expert: table %s: %w", t.Name, err)
-			}
-			vals[i] = math.Float32frombits(binary.LittleEndian.Uint32(buf))
-		}
+		// Checked before allocating: the shape comes from the file.
 		shape, ok := want[t.Name]
 		if !ok {
 			return nil, fmt.Errorf("expert: unknown table %q", t.Name)
 		}
 		if !slices.Equal(t.Shape, shape) {
 			return nil, fmt.Errorf("expert: %s table shape %v, want %v", t.Name, t.Shape, shape)
+		}
+		if seen[t.Name] {
+			return nil, fmt.Errorf("expert: table %s is listed twice", t.Name)
+		}
+		seen[t.Name] = true
+		vals := make([]float32, t.size())
+		for i := range vals {
+			if _, err := io.ReadFull(br, buf); err != nil {
+				return nil, fmt.Errorf("expert: table %s: %w", t.Name, err)
+			}
+			vals[i] = math.Float32frombits(binary.LittleEndian.Uint32(buf))
 		}
 		switch t.Name {
 		case "win":

@@ -408,3 +408,85 @@ func TestNewHand(t *testing.T) {
 		t.Error("a repeated card was accepted")
 	}
 }
+
+// The game ends the moment a player reaches 121, whatever scored the point.
+
+func TestWinOnHeels(t *testing.T) {
+	g := NewGame(3)
+	g.pending = card("JD")
+	d := g.Dealer()
+	g.scores[d] = WinScore - 2
+	for p := 0; p < 2; p++ {
+		h := g.Hand(p)
+		if h[0] == g.pending || h[1] == g.pending {
+			t.Skip("seed dealt the jack")
+		}
+		mustApply(t, g, p, Discard(h[0], h[1]))
+	}
+	if !g.Over() || g.Winner() != d || len(g.Legal(0))+len(g.Legal(1)) != 0 {
+		t.Fatalf("dealer should win on his heels: over=%v winner=%d scores=%v", g.Over(), g.Winner(), g.Scores())
+	}
+}
+
+func TestWinOnGoPoint(t *testing.T) {
+	g := pegGame(0, "QH 5H 9H 8H", "KS JS TS 2S", "3C")
+	g.scores = [2]int{0, WinScore - 4} // the run K-Q-J makes 120, the go point 121
+	mustApply(t, g, 1, Play(card("KS")))
+	mustApply(t, g, 0, Play(card("QH")))
+	evs := mustApply(t, g, 1, Play(card("JS")))
+	if want := []EventKind{EvPlay, EvGo, EvGoPoint, EvGameOver}; !reflect.DeepEqual(kinds(evs), want) {
+		t.Fatalf("events %v, want %v", kinds(evs), want)
+	}
+	if g.Winner() != 1 || g.Scores()[1] != WinScore {
+		t.Fatalf("winner %d scores %v", g.Winner(), g.Scores())
+	}
+}
+
+func TestWinOnLastCard(t *testing.T) {
+	g := pegGame(0, "QH 5H 9H 8H", "KS JS TS 2S", "3C")
+	g.scores = [2]int{WinScore - 1, 0}
+	for _, s := range []struct {
+		p int
+		c string
+	}{{1, "KS"}, {0, "QH"}, {1, "JS"}, {0, "5H"}, {1, "TS"}, {0, "9H"}, {1, "2S"}} {
+		mustApply(t, g, s.p, Play(card(s.c)))
+	}
+	evs := mustApply(t, g, 0, Play(card("8H")))
+	if want := []EventKind{EvPlay, EvLastCard, EvGameOver}; !reflect.DeepEqual(kinds(evs), want) {
+		t.Fatalf("events %v, want %v: no hand is shown after the winning point", kinds(evs), want)
+	}
+	if g.Winner() != 0 {
+		t.Fatalf("winner %d scores %v", g.Winner(), g.Scores())
+	}
+}
+
+func TestWinAtShow(t *testing.T) {
+	// Dealer P0 holds 29; the crib (2D 3D 9D QC with the 5D) is worth 4.
+	show := func(dealerScore int) *Game {
+		g := pegGame(0, "5H 5C 5S JD", "AC 2D 3H 4S", "5D")
+		g.scores = [2]int{dealerScore, 0}
+		g.handN = [2]int{0, 0}
+		g.show()
+		return g
+	}
+	g := show(WinScore - 29)
+	if k := kinds(g.Events()); g.Winner() != 0 || k[len(k)-2] != EvShowHand {
+		t.Fatalf("dealer's hand should win before the crib is counted: winner %d events %v", g.Winner(), k)
+	}
+	g = show(WinScore - 29 - 4)
+	if k := kinds(g.Events()); g.Winner() != 0 || k[len(k)-2] != EvShowCrib {
+		t.Fatalf("the crib should win: winner %d scores %v events %v", g.Winner(), g.Scores(), k)
+	}
+	if g = show(WinScore - 29 - 5); g.Over() {
+		t.Fatalf("one short should play on: scores %v", g.Scores())
+	}
+}
+
+func TestDiscardCardNotInHand(t *testing.T) {
+	g := NewGame(1)
+	h := g.Hand(0)
+	other := g.Hand(1)[0]
+	if err := g.Apply(0, Discard(h[0], other)); err == nil {
+		t.Fatal("discarding a card from the other hand was accepted")
+	}
+}

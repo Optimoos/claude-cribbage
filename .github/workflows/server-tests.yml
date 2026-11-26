@@ -1,0 +1,27 @@
+# Runs the server's checks on every push and pull request, so a broken
+# rule or sign-in test is seen before anyone builds a server from it.
+name: Server tests
+
+on:
+  push:
+    paths: ["server/**", "proto/**", ".github/workflows/server-tests.yml"]
+  pull_request:
+    paths: ["server/**", "proto/**", ".github/workflows/server-tests.yml"]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: server
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: server/go.mod
+      - run: go vet ./...
+      - run: go test ./...

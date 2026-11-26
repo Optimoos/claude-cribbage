@@ -9,7 +9,6 @@ import (
 	"math/rand/v2"
 	"os"
 	"runtime"
-	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -345,22 +344,7 @@ func discardPolicy(b *expert.Bundle, name string) (func(discardDecision) engine.
 		bot = x
 	}
 	return func(d discardDecision) engine.Action {
-		// The other hand and the starter are never seen by a discard;
-		// any other cards will do.
-		var hands [2][6]engine.Card
-		hands[0] = d.six
-		var others []engine.Card
-		for c := engine.Card(0); c < 52; c++ {
-			if !slices.Contains(d.six[:], c) {
-				others = append(others, c)
-			}
-		}
-		copy(hands[1][:], others[:6])
-		starter := others[6]
-		g := engine.NewHand(1, d.dealer, d.scores, hands, starter)
-		var o engine.Observation
-		g.ObserveInto(0, &o)
-		return bot.Choose(&o, g.Legal(0))
+		return chooseDiscard(bot, d)
 	}, nil
 }
 
