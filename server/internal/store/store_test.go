@@ -818,8 +818,8 @@ func TestEmailStops(t *testing.T) {
 	})
 }
 
-// A passkey added from a session needs that session live, and goes when
-// signing out other devices ends it.
+// A passkey added from a session needs that session live, and signing out
+// other devices removes every passkey the kept session did not add.
 func TestPasskeysBoundToSession(t *testing.T) {
 	forEachStore(t, func(t *testing.T, s both) {
 		ctx := context.Background()
@@ -839,24 +839,41 @@ func TestPasskeysBoundToSession(t *testing.T) {
 		if err := add("gone", "no-such-session"); !errors.Is(err, ErrNotFound) {
 			t.Fatalf("added from a session that is not live: %v", err)
 		}
-		for id, session := range map[string]string{"k-mine": "mine", "k-thief": "thief", "k-old": ""} {
+		if err := s.CreateSession(ctx, "gone-now", u.ID, later); err != nil {
+			t.Fatal(err)
+		}
+		for id, session := range map[string]string{"k-mine": "mine", "k-thief": "thief", "k-old": "", "k-loggedout": "gone-now"} {
 			if err := add(id, session); err != nil {
 				t.Fatal(err)
 			}
 		}
+		// The session that added k-loggedout ends before signing out others.
+		if err := s.DeleteSession(ctx, "gone-now"); err != nil {
+			t.Fatal(err)
+		}
+		left := func() string {
+			t.Helper()
+			keys, err := s.Passkeys(ctx, u.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var names []string
+			for _, k := range keys {
+				names = append(names, string(k.ID))
+			}
+			return strings.Join(names, ",")
+		}
 		if err := s.DeleteSessions(ctx, u.ID, "mine"); err != nil {
 			t.Fatal(err)
 		}
-		keys, err := s.Passkeys(ctx, u.ID)
-		if err != nil {
+		if got := left(); got != "k-mine" {
+			t.Fatalf("passkeys left: %v", got)
+		}
+		if err := s.DeleteSessions(ctx, u.ID, ""); err != nil {
 			t.Fatal(err)
 		}
-		var names []string
-		for _, k := range keys {
-			names = append(names, string(k.ID))
-		}
-		if strings.Join(names, ",") != "k-mine,k-old" && strings.Join(names, ",") != "k-old,k-mine" {
-			t.Fatalf("passkeys left: %v", names)
+		if got := left(); got != "" {
+			t.Fatalf("passkeys left after signing out everywhere: %v", got)
 		}
 	})
 }

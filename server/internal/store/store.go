@@ -33,6 +33,7 @@ const (
 	TokenVerify = 2 // a link to a new email address, confirming it
 	TokenDelete = 3 // a link confirming that an account should be deleted
 	TokenChange = 4 // a link to the current address, confirming a change of address
+	TokenRevoke = 5 // a link in the "passkey added" notice: remove passkeys, sign out everywhere
 )
 
 // Passkey is a WebAuthn credential that signs a user in.
@@ -80,8 +81,8 @@ type Store interface {
 	// error.
 	DeleteSession(ctx context.Context, token string) error
 	// DeleteSessions ends every session of a user but keep ("" for none),
-	// and removes the passkeys those sessions added: whoever held one may
-	// have added a passkey to keep their way in.
+	// and removes every passkey but those keep added: whoever held another
+	// session may have added a passkey to keep their way in, then logged out.
 	DeleteSessions(ctx context.Context, userID int64, keep string) error
 	// DeleteExpiredSessions removes sessions and account tokens that
 	// expired before t and reports how many sessions.

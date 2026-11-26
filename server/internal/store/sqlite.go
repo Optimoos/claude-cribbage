@@ -594,8 +594,10 @@ func (s *SQLite) ExtendSession(ctx context.Context, token string, expires time.T
 
 func (s *SQLite) DeleteSessions(ctx context.Context, userID int64, keep string) error {
 	return s.write(ctx, func(tx *writeTx) error {
-		if _, err := tx.Exec(`DELETE FROM passkeys WHERE user_id = ? AND session IN
-			(SELECT token FROM sessions WHERE user_id = ? AND token != ?)`, userID, userID, keepKey(keep)); err != nil {
+		// Every passkey but the kept session's own: one added from a session
+		// that has since logged out could still be an intruder's.
+		if _, err := tx.Exec(`DELETE FROM passkeys WHERE user_id = ? AND (? = '' OR session != ?)`,
+			userID, keepKey(keep), keepKey(keep)); err != nil {
 			return err
 		}
 		_, err := tx.Exec(`DELETE FROM sessions WHERE user_id = ? AND token != ?`, userID, keepKey(keep))

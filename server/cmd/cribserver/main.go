@@ -11,6 +11,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"html"
 	"io"
 	stdlog "log"
 	"log/slog"
@@ -151,6 +152,7 @@ func main() {
 	authSvc := &auth.Service{Store: users, BaseURL: *publicURL, Log: log}
 	if *tlsDomain != "" {
 		authSvc.StopURL = "https://" + *tlsDomain + "/api/stop"
+		authSvc.RevokeURL = "https://" + *tlsDomain + "/api/revoke"
 	}
 	if authSvc.BaseURL == "" && *tlsDomain != "" {
 		authSvc.BaseURL = "https://" + *tlsDomain + "/"
@@ -337,6 +339,39 @@ func main() {
 			default:
 				w.Header().Set("Content-Type", "application/json")
 				w.Write([]byte(`{"ok":true}` + "\n"))
+			}
+		})
+		// The "Not you?" link in a passkey notice. Opening it only shows a
+		// button, since mail scanners open links; the button POSTs.
+		revokeLimit := ratelimit.New(10, 6*time.Second)
+		mux.HandleFunc("/api/revoke", func(w http.ResponseWriter, r *http.Request) {
+			h := w.Header()
+			h.Set("Content-Type", "text/html; charset=utf-8")
+			h.Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'")
+			h.Set("Cache-Control", "no-store")
+			h.Set("Referrer-Policy", "no-referrer")
+			token := r.FormValue("t")
+			if r.Method != http.MethodPost {
+				fmt.Fprintf(w, revokePage, fmt.Sprintf(`<p>This removes every passkey on your cribbage account and signs out all devices, yours too. Then sign in again with an emailed code.</p>
+<form method="post" action="/api/revoke"><input type="hidden" name="t" value="%s"><button>Remove passkeys and sign out everywhere</button></form>`, html.EscapeString(token)))
+				return
+			}
+			host, _, _ := net.SplitHostPort(r.RemoteAddr)
+			if !revokeLimit.Take(netkey.Of(host), time.Now()) {
+				w.WriteHeader(http.StatusTooManyRequests)
+				fmt.Fprintf(w, revokePage, "<p>Too many tries; wait a minute and try again.</p>")
+				return
+			}
+			switch err := srv.Revoke(r.Context(), token); {
+			case errors.Is(err, auth.ErrBadToken):
+				w.WriteHeader(http.StatusNotFound)
+				fmt.Fprintf(w, revokePage, `<p>This link has been used or has expired. To remove a passkey, open Account in the game, or choose "Sign out other devices".</p>`)
+			case err != nil:
+				log.Error("revoke passkeys", "err", err)
+				w.WriteHeader(http.StatusInternalServerError)
+				fmt.Fprintf(w, revokePage, "<p>Something went wrong; try again in a minute.</p>")
+			default:
+				fmt.Fprintf(w, revokePage, "<p>Done: the account has no passkeys and every device is signed out. Sign in again with an emailed code.</p>")
 			}
 		})
 		mux.Handle("/", web.Handler(*webDir))
@@ -609,3 +644,10 @@ func localEmailKey(path string) (string, error) {
 	}
 	return s, f.Close()
 }
+
+// revokePage wraps the /api/revoke replies.
+const revokePage = `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cribbage passkeys</title><style>body{font:16px/1.5 system-ui,sans-serif;max-width:32em;margin:2em auto;padding:0 16px}button{font:inherit;padding:.5em 1em}</style>
+<h1>Cribbage passkeys</h1>
+%s
+`

@@ -235,11 +235,11 @@ func (m *Memory) DeleteSessions(_ context.Context, userID int64, keep string) er
 	for k, s := range m.sessions {
 		if s.userID == userID && k != keep {
 			delete(m.sessions, k)
-			for id, p := range m.passkeys {
-				if p.Session == k {
-					delete(m.passkeys, id)
-				}
-			}
+		}
+	}
+	for id, p := range m.passkeys {
+		if p.UserID == userID && (keep == "" || p.Session != keep) {
+			delete(m.passkeys, id)
 		}
 	}
 	return nil
