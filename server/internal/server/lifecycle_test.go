@@ -272,3 +272,39 @@ func TestUnsavedStartIsCancelled(t *testing.T) {
 		t.Fatalf("unfinished games after a failed start: %v, %v", left, err)
 	}
 }
+
+// A join still queued when the game's actor ends (here the creator resigns
+// first) must not keep the joiner's reservation.
+func TestJoinQueuedBehindEndKeepsNoReservation(t *testing.T) {
+	srv, addr := startServer(t)
+	a := login(t, addr, "alice")
+	b := login(t, addr, "bob")
+	gid := a.next(t, replyTo(a.send(t, createGame("")))).GetGameUpdate().Game.GameId
+	g := gameByID(srv, gid)
+	gate := make(chan struct{})
+	if !g.submit(func() { <-gate }) {
+		t.Fatal("blocker refused")
+	}
+	pending := func() int { g.amu.Lock(); defer g.amu.Unlock(); return g.pending }
+	waitPending := func(n int) {
+		for deadline := time.Now().Add(5 * time.Second); pending() != n; time.Sleep(2 * time.Millisecond) {
+			if time.Now().After(deadline) {
+				t.Fatalf("pending %d, want %d", pending(), n)
+			}
+		}
+	}
+	waitPending(0)
+	resign := a.send(t, &pb.ClientMessage{Body: &pb.ClientMessage_Resign{Resign: &pb.Resign{GameId: gid}}})
+	waitPending(1)
+	b.send(t, joinGame(gid))
+	waitPending(2)
+	close(gate)
+	<-g.done
+	a.next(t, replyTo(resign))
+	srv.gmu.RLock()
+	r := srv.reserved[b.auth.UserId]
+	srv.gmu.RUnlock()
+	if r != (reservation{}) {
+		t.Fatalf("bob still has a reservation: %+v", r)
+	}
+}

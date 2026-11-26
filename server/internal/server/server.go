@@ -463,14 +463,17 @@ func (s *Server) handle(c *Conn, m *pb.ClientMessage) {
 	case *pb.ClientMessage_CreateGame:
 		s.createGame(c, id, b.CreateGame.Bot)
 	case *pb.ClientMessage_JoinGame:
-		release, err := s.reserve(gameKind{}, reserveFor{id: c.user.ID, self: true})
-		if err != nil {
-			s.sendLimit(c, id, err)
-			return
-		}
-		if !s.withGame(c, id, b.JoinGame.GameId, func(g *game) { defer release(); g.join(c, id) }) {
-			release()
-		}
+		// Reserved on the actor: a join still queued when the actor exits
+		// is dropped, and must not take a reservation with it.
+		s.withGame(c, id, b.JoinGame.GameId, func(g *game) {
+			release, err := s.reserve(gameKind{}, reserveFor{id: c.user.ID, self: true})
+			if err != nil {
+				s.sendLimit(c, id, err)
+				return
+			}
+			defer release()
+			g.join(c, id)
+		})
 	case *pb.ClientMessage_ListGames:
 		s.listGames(c, id)
 	case *pb.ClientMessage_FindMatch:
