@@ -35,6 +35,8 @@ type condPost struct {
 	wK [numShapes]float64
 }
 
+var condPosts = sync.Pool{New: func() any { return new(condPost) }}
+
 // cribRank[a][b][sr-1] is the crib's fifteens, pairs and runs when the two
 // discards make pairs a and b and the starter has rank sr.
 var cribRank = sync.OnceValue(func() *[numPairs][numPairs][13]int8 {

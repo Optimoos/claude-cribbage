@@ -169,6 +169,15 @@ func TestCondPegConstantTableIsIdentity(t *testing.T) {
 		legal := g.Legal(0)
 		plain.Choose(&o, legal)
 		paired.Choose(&o, legal)
+		// Choose returns its posterior to the pool; value needs one.
+		for _, d := range []*discarder{plain.discard, paired.discard} {
+			oside := 0
+			if d.iDeal {
+				oside = 1
+			}
+			d.post = new(condPost)
+			d.post.posterior(d.keep, oside, hands[0])
+		}
 		var held [52]bool
 		for _, c := range hands[0] {
 			held[c] = true
