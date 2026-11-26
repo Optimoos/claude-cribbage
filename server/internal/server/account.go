@@ -90,7 +90,7 @@ func (s *Server) sendAccountError(c *Conn, id uint32, what string, err error) {
 		c.sendError(id, pb.ErrorCode_ERROR_CODE_INVALID_CREDENTIALS, "", err.Error())
 	case errors.Is(err, auth.ErrBadToken), errors.Is(err, auth.ErrTooManyTries):
 		c.sendError(id, pb.ErrorCode_ERROR_CODE_NOT_FOUND, "", err.Error())
-	case errors.Is(err, auth.ErrMailLimit), errors.Is(err, auth.ErrTooManyAccounts):
+	case errors.Is(err, auth.ErrMailLimit):
 		c.sendError(id, pb.ErrorCode_ERROR_CODE_RATE_LIMITED, "", err.Error())
 	default:
 		s.log.Error(what, "err", err)
@@ -100,36 +100,6 @@ func (s *Server) sendAccountError(c *Conn, id uint32, what string, err error) {
 		}
 		c.sendError(id, pb.ErrorCode_ERROR_CODE_INTERNAL, "", msg)
 	}
-}
-
-// registerAccount mails a code that creates the account, off the reader.
-func (s *Server) registerAccount(c *Conn, id uint32, m *pb.Register) {
-	if c.user != nil {
-		c.sendError(id, pb.ErrorCode_ERROR_CODE_ALREADY_AUTHENTICATED, "", "already signed in")
-		return
-	}
-	if !s.auth.MailEnabled() {
-		c.sendError(id, pb.ErrorCode_ERROR_CODE_BAD_REQUEST, "", auth.ErrMailDisabled.Error())
-		return
-	}
-	if limited(c) {
-		now, ip := time.Now(), addrKey(remoteIP(c.t))
-		if !s.attempts.Take(ip, now) || !s.registers.Take(ip, now) {
-			c.sendError(id, pb.ErrorCode_ERROR_CODE_RATE_LIMITED, "", "too many attempts; try again later")
-			return
-		}
-	}
-	c.signingIn.Store(true)
-	s.background(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-		defer cancel()
-		challenge, err := s.auth.Register(ctx, m.Username, m.Nickname, m.Email)
-		if err != nil {
-			s.sendAccountError(c, id, "register", err)
-			return
-		}
-		c.send(signInStarted(id, challenge))
-	})
 }
 
 func signInStarted(id uint32, challenge string) *pb.ServerMessage {

@@ -11,7 +11,6 @@ import (
 func TestPreLoginMessagesLimited(t *testing.T) {
 	addr := startRemote(t, "203.0.113.32", AuthLimits{
 		AttemptsPerIP: 100, AttemptEvery: time.Hour,
-		RegistersPerIP: 10, RegisterEvery: time.Hour,
 	})
 	c := anon(t, addr)
 	ping := &pb.ClientMessage{Body: &pb.ClientMessage_Ping{Ping: &pb.Ping{}}}

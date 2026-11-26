@@ -129,8 +129,6 @@ func closed(t *testing.T, c *tclient) {
 func msg(body any) *pb.ClientMessage {
 	m := &pb.ClientMessage{}
 	switch b := body.(type) {
-	case *pb.Register:
-		m.Body = &pb.ClientMessage_Register{Register: b}
 	case *pb.RequestSignIn:
 		m.Body = &pb.ClientMessage_RequestSignIn{RequestSignIn: b}
 	case *pb.EnterCode:
@@ -175,19 +173,24 @@ func (c *tclient) call(t *testing.T, m *pb.ClientMessage) *pb.ServerMessage {
 	return c.next(t, replyTo(c.send(t, m)))
 }
 
-// signUp registers a person's account through the emailed code and
+// signUp creates a person's account through the new-account code emailed
+// to the address (the last code, after any for its other accounts) and
 // returns a connection signed in to it.
 func signUp(t *testing.T, addr string, mails fakeMailer, user, email string) *tclient {
 	t.Helper()
 	c := anon(t, addr)
-	st := c.call(t, msg(&pb.Register{Username: user, Email: email})).GetSignInStarted()
+	st := c.call(t, msg(&pb.RequestSignIn{Name: email})).GetSignInStarted()
 	if st == nil || st.CodeLength != auth.CodeLength {
-		t.Fatalf("register: %v", st)
+		t.Fatalf("sign up: %v", st)
 	}
-	code, _ := mails.code(t, email)
-	a := c.call(t, msg(&pb.EnterCode{Challenge: st.Challenge, Code: code})).GetAuthOk()
+	cs := codeRE.FindAllStringSubmatch(mails.mail(t, email).body, -1)
+	if cs == nil {
+		t.Fatal("sign up: no code")
+	}
+	code := cs[len(cs)-1][1] + cs[len(cs)-1][2]
+	a := c.call(t, msg(&pb.EnterCode{Challenge: st.Challenge, Code: code, Username: user})).GetAuthOk()
 	if a == nil {
-		t.Fatal("register: no AuthOk")
+		t.Fatal("sign up: no AuthOk")
 	}
 	c.auth = a
 	return c
@@ -207,14 +210,12 @@ func signIn(t *testing.T, addr string, mails fakeMailer, user, email string) *tc
 	return c
 }
 
-func TestRegisterAndSignIn(t *testing.T) {
+func TestSignUpAndSignIn(t *testing.T) {
 	_, addr, mails := startAccountServer(t, false)
 	a := signUp(t, addr, mails, "alice", "alice@example.com")
 	if a.auth.Username != "alice" || a.auth.Account.GetEmail() != "alice@example.com" || !a.auth.Account.GetPasskeysEnabled() {
 		t.Fatalf("auth: %v", a.auth)
 	}
-	wantError(t, anon(t, addr).call(t, msg(&pb.Register{Username: "Alice", Email: "x@example.com"})), pb.ErrorCode_ERROR_CODE_USERNAME_TAKEN)
-	wantError(t, anon(t, addr).call(t, msg(&pb.Register{Username: "bob", Email: "nope"})), pb.ErrorCode_ERROR_CODE_BAD_REQUEST)
 
 	// By code, by email address.
 	b := signIn(t, addr, mails, "ALICE@example.com", "alice@example.com")
@@ -281,7 +282,6 @@ func TestNoMail(t *testing.T) {
 	_, addr, _ := startAccountServer(t, true)
 	c := anon(t, addr)
 	wantError(t, c.call(t, msg(&pb.RequestSignIn{Name: "alice"})), pb.ErrorCode_ERROR_CODE_BAD_REQUEST)
-	wantError(t, c.call(t, msg(&pb.Register{Username: "alice", Email: "a@example.com"})), pb.ErrorCode_ERROR_CODE_BAD_REQUEST)
 }
 
 func TestMailLimitPerAccount(t *testing.T) {

@@ -35,7 +35,6 @@ var (
 	ErrTooManyCodes       = errors.New("too many wrong codes for this account; try again later, or use the link in the email")
 	ErrPasskeysDisabled   = errors.New("this server does not offer passkeys")
 	ErrEmailStopped       = errors.New("this address asked not to get email from this server; ask whoever runs it")
-	ErrTooManyAccounts    = errors.New("too many new accounts lately; try again later")
 )
 
 // credError is an ErrInvalidCredentials with its own message.
@@ -86,7 +85,7 @@ type Service struct {
 	initOnce  sync.Once
 	mailLimit *ratelimit.Limiter // emails per user
 	rcptLimit *ratelimit.Limiter // emails per mailbox (mail.Mailbox)
-	regLimit  *ratelimit.Limiter // registration emails, from everyone
+	regLimit  *ratelimit.Limiter // new-account emails, from everyone
 	badCodes  *ratelimit.Limiter // wrong codes per account
 
 	mu         sync.Mutex
@@ -105,9 +104,10 @@ func (s *Service) init() {
 		// address, but nobody can use the server to flood an inbox.
 		s.mailLimit = ratelimit.New(10, 5*time.Minute)
 		s.rcptLimit = ratelimit.New(20, 5*time.Minute)
-		// Registering mails an address nobody has shown is theirs, so it is
-		// how a stranger could use the server to send email. However many
-		// addresses they come from, it sends 20, then one every 15 minutes.
+		// A new-account code mails an address nobody has shown is theirs, so
+		// it is how a stranger could use the server to send email. However
+		// many addresses they come from, it sends 20, then one every 15
+		// minutes.
 		s.regLimit = ratelimit.New(20, 15*time.Minute)
 		// Ten wrong codes per account, then one an hour: with 8-digit codes,
 		// guessing one would take about 10^8 / 2 / 24 / 365 = 5000 years.

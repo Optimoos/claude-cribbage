@@ -29,7 +29,6 @@ message ClientMessage {
   // as a number).
   uint32 protocol_version = 2;
   oneof body {
-    Register register = 10;
     RequestSignIn request_sign_in = 11;
     Resume resume = 12;
     Logout logout = 13;
@@ -63,6 +62,7 @@ message ClientMessage {
     PasskeyAddFinish passkey_add_finish = 60;
     PasskeyRemove passkey_remove = 61;
   }
+  reserved 10; // Register: no client sent it; RequestSignIn creates accounts
   reserved 50, 52, 53; // password messages, removed
 }
 
@@ -72,20 +72,6 @@ message ClientMessage {
 // a passkey (PasskeySignIn...), or by approving a new device from one that
 // is signed in (StartDeviceSignIn, ApproveDevice). Each ends in AuthOk,
 // whose token signs the device in again later (Resume).
-
-// Register starts creating an account with a username chosen up front: it
-// mails a code (and link) to email, and the reply is SignInStarted. Newer
-// clients use RequestSignIn with the address instead, and choose the
-// username once the code is in (NeedsUsername). The account is created, signed in, when
-// the code is entered (EnterCode) or the link opened (UseSignInLink).
-// USERNAME_TAKEN if the username is in use, BAD_REQUEST if a field is
-// invalid. Several accounts may share an address.
-message Register {
-  string username = 1;
-  string nickname = 3;
-  string email = 4;
-  reserved 2;
-}
 
 // RequestSignIn mails a sign-in code and link to the account with this
 // username, or to every account with this email address. Given an
@@ -106,7 +92,7 @@ message SignInStarted {
   uint32 expires_in = 3; // seconds
 }
 
-// EnterCode finishes signing in (or registering) with the code from the
+// EnterCode finishes signing in (or creating an account) with the code from the
 // email. The reply is AuthOk; INVALID_CREDENTIALS for a wrong code;
 // NOT_FOUND once the challenge has expired or had too many wrong codes, or
 // RATE_LIMITED after too many wrong codes for the account. If an address
