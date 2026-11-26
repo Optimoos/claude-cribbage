@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"crypto/rand"
+	"errors"
 	"strings"
 	"sync"
 	"time"
@@ -23,6 +24,9 @@ import (
 const (
 	deviceLifetime = 10 * time.Minute
 	maxDevices     = 10000
+	// maxDevicesPerAddr bounds one address's share of the waiting
+	// sign-ins, so a few cannot fill the table for everyone.
+	maxDevicesPerAddr = 5
 	// deviceAlphabet has no vowels (no words) or easily confused letters.
 	deviceAlphabet = "BCDFGHJKLMNPQRSTVWXZ"
 )
@@ -33,26 +37,56 @@ type deviceReq struct {
 	// waiter is the connection told when the code is approved.
 	waiter   *Conn
 	approved *store.User
+	// session is the approver's session token: the approval stands only
+	// while that session does, so signing it out withdraws the approval.
+	session string
+	addr    string // limiter key of the address that asked ("" if unlimited)
 }
 
 type devices struct {
 	mu     sync.Mutex
 	byID   map[string]*deviceReq // by challenge
 	byCode map[string]string     // code -> challenge
+	byAddr map[string]int        // requests waiting, by addr
 }
 
 func newDevices() devices {
-	return devices{byID: map[string]*deviceReq{}, byCode: map[string]string{}}
+	return devices{byID: map[string]*deviceReq{}, byCode: map[string]string{}, byAddr: map[string]int{}}
+}
+
+// remove forgets a request. Callers hold mu.
+func (d *devices) remove(id string) {
+	r := d.byID[id]
+	if r == nil {
+		return
+	}
+	delete(d.byID, id)
+	if d.byCode[r.code] == id {
+		delete(d.byCode, r.code)
+	}
+	if r.addr != "" {
+		if d.byAddr[r.addr]--; d.byAddr[r.addr] <= 0 {
+			delete(d.byAddr, r.addr)
+		}
+	}
 }
 
 // sweep forgets expired requests. Callers hold mu.
 func (d *devices) sweep(now time.Time) {
 	for id, r := range d.byID {
 		if now.After(r.expires) {
-			delete(d.byID, id)
-			if d.byCode[r.code] == id {
-				delete(d.byCode, r.code)
-			}
+			d.remove(id)
+		}
+	}
+}
+
+// dropApprovals withdraws every approval userID has given.
+func (d *devices) dropApprovals(userID int64) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	for id, r := range d.byID {
+		if r.approved != nil && r.approved.ID == userID {
+			d.remove(id)
 		}
 	}
 }
@@ -92,10 +126,13 @@ func (s *Server) startDeviceSignIn(c *Conn, id uint32) {
 	now := time.Now()
 	d := &s.devices
 	d.mu.Lock()
-	if len(d.byID) >= maxDevices {
+	full := func() bool {
+		return len(d.byID) >= maxDevices || (c.addr != "" && d.byAddr[c.addr] >= maxDevicesPerAddr)
+	}
+	if full() {
 		d.sweep(now)
 	}
-	if len(d.byID) >= maxDevices {
+	if full() {
 		d.mu.Unlock()
 		c.sendError(id, pb.ErrorCode_ERROR_CODE_RATE_LIMITED, "", "too many sign-ins waiting; try again later")
 		return
@@ -105,8 +142,11 @@ func (s *Server) startDeviceSignIn(c *Conn, id uint32) {
 	for d.byCode[code] != "" {
 		code = newDeviceCode()
 	}
-	d.byID[challenge] = &deviceReq{code: code, expires: now.Add(deviceLifetime)}
+	d.byID[challenge] = &deviceReq{code: code, expires: now.Add(deviceLifetime), addr: c.addr}
 	d.byCode[code] = challenge
+	if c.addr != "" {
+		d.byAddr[c.addr]++
+	}
 	d.mu.Unlock()
 	c.signingIn.Store(true)
 	url := ""
@@ -136,7 +176,7 @@ func (s *Server) claimDeviceSignIn(c *Conn, id uint32, challenge string) {
 		c.sendError(id, pb.ErrorCode_ERROR_CODE_NOT_FOUND, "", "this code has expired; start again")
 		return
 	}
-	u := r.approved
+	u, session := r.approved, r.session
 	if u == nil {
 		r.waiter = c
 		d.mu.Unlock()
@@ -144,10 +184,30 @@ func (s *Server) claimDeviceSignIn(c *Conn, id uint32, challenge string) {
 		c.send(&pb.ServerMessage{RequestId: id, Body: &pb.ServerMessage_Ack{Ack: &pb.Ack{}}})
 		return
 	}
-	delete(d.byID, challenge)
+	d.remove(challenge)
 	d.mu.Unlock()
 	s.authenticate(c, id, func(ctx context.Context) (*auth.Result, error) {
-		return s.auth.SignIn(ctx, u)
+		fresh, err := s.auth.Store.UserByID(ctx, u.ID)
+		if errors.Is(err, store.ErrNotFound) {
+			return nil, auth.ErrBadToken
+		}
+		if err != nil {
+			return nil, err
+		}
+		res, err := s.auth.SignIn(ctx, fresh)
+		if err != nil {
+			return nil, err
+		}
+		// Checked after the new session exists, so a sign-out that ends
+		// the approver's session either sees the new one or is seen here.
+		if uid, _, err := s.auth.Store.SessionUser(ctx, session); err != nil || uid != u.ID {
+			_ = s.auth.Logout(ctx, res.Token)
+			if err != nil && !errors.Is(err, store.ErrNotFound) {
+				return nil, err
+			}
+			return nil, auth.ErrBadToken
+		}
+		return res, nil
 	})
 }
 
@@ -168,7 +228,7 @@ func (s *Server) approveDevice(c *Conn, id uint32, code string) {
 		return
 	}
 	delete(d.byCode, code) // one approval per code
-	r.approved = c.user
+	r.approved, r.session = c.user, c.token
 	waiter := r.waiter
 	d.mu.Unlock()
 	s.log.Info("device approved", "user", c.user.ID)

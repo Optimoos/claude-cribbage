@@ -8,6 +8,7 @@ import (
 	"net"
 	"regexp"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -514,5 +515,74 @@ func TestHistory(t *testing.T) {
 	hb := b.next(t, replyTo(b.send(t, &pb.ClientMessage{Body: &pb.ClientMessage_GetHistory{GetHistory: &pb.GetHistory{}}}))).GetHistory()
 	if hb == nil || len(hb.Games) != 0 || hb.Total.GetGames() != 0 {
 		t.Fatalf("empty history: %v", hb)
+	}
+}
+
+// An approval is withdrawn by anything that ends the approving session, and
+// by signing out other devices or the admin recovering the account.
+func TestDeviceApprovalRevoked(t *testing.T) {
+	srv, addr, mails := startAccountServer(t, false)
+	signUp(t, addr, mails, "alice", "alice@example.com")
+	approved := func(approver *tclient) string {
+		t.Helper()
+		dc := anon(t, addr).call(t, msg(&pb.StartDeviceSignIn{})).GetDeviceCode()
+		if m := approver.call(t, msg(&pb.ApproveDevice{Code: dc.Code})); m.GetAck() == nil {
+			t.Fatalf("approve: %v", m)
+		}
+		return dc.Challenge
+	}
+	refused := func(what, challenge string) {
+		t.Helper()
+		m := anon(t, addr).call(t, msg(&pb.ClaimDeviceSignIn{Challenge: challenge}))
+		if m.GetAuthOk() != nil {
+			t.Fatalf("%s: approval still signs in", what)
+		}
+		wantError(t, m, pb.ErrorCode_ERROR_CODE_NOT_FOUND)
+	}
+
+	// The approving session logs out.
+	a := signIn(t, addr, mails, "alice", "alice@example.com")
+	ch := approved(a)
+	a.call(t, &pb.ClientMessage{Body: &pb.ClientMessage_Logout{Logout: &pb.Logout{}}})
+	refused("logout", ch)
+
+	// Another session signs the approver out.
+	a = signIn(t, addr, mails, "alice", "alice@example.com")
+	b := signIn(t, addr, mails, "alice", "alice@example.com")
+	ch = approved(a)
+	b.call(t, msg(&pb.SignOutOthers{}))
+	refused("signed out by another session", ch)
+
+	// The approver signs out other devices: the device it let in is one.
+	ch = approved(b)
+	b.call(t, msg(&pb.SignOutOthers{}))
+	refused("approver signed out others", ch)
+
+	// The admin recovers the account.
+	ch = approved(b)
+	if _, err := srv.AdminSetEmail(context.Background(), "alice", "owner@example.com"); err != nil {
+		t.Fatal(err)
+	}
+	refused("admin recovery", ch)
+}
+
+// One address cannot fill the table of sign-ins waiting for approval.
+func TestDeviceSignInsPerAddress(t *testing.T) {
+	var ip atomic.Value
+	ip.Store("203.0.113.30")
+	addr := startRemoteFrom(t, &ip, AuthLimits{
+		AttemptsPerIP: 100, AttemptEvery: time.Hour,
+		ConnsPerAddr: 100, Conns: 100, LoginWithin: time.Minute,
+	})
+	c := anon(t, addr)
+	for i := 0; i < maxDevicesPerAddr; i++ {
+		if c.call(t, msg(&pb.StartDeviceSignIn{})).GetDeviceCode() == nil {
+			t.Fatalf("request %d refused", i)
+		}
+	}
+	wantError(t, c.call(t, msg(&pb.StartDeviceSignIn{})), pb.ErrorCode_ERROR_CODE_RATE_LIMITED)
+	ip.Store("203.0.113.31")
+	if anon(t, addr).call(t, msg(&pb.StartDeviceSignIn{})).GetDeviceCode() == nil {
+		t.Fatal("another address was refused")
 	}
 }

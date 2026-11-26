@@ -203,6 +203,7 @@ func (s *Server) signOutOthers(c *Conn, id uint32) {
 		return
 	}
 	s.log.Info("signed out other devices", "user", c.user.ID)
+	s.devices.dropApprovals(c.user.ID) // even this session's: it may have approved the intruder
 	s.closeUserConns(c.user.ID, c)
 	c.send(&pb.ServerMessage{RequestId: id, Body: &pb.ServerMessage_Ack{Ack: &pb.Ack{}}})
 }
@@ -251,6 +252,7 @@ func (s *Server) AdminSetEmail(ctx context.Context, username, email string) (old
 		return "", err
 	}
 	s.log.Info("email set by admin", "user", u.ID, "username", u.Username)
+	s.devices.dropApprovals(u.ID)
 	s.closeUserConns(u.ID, nil)
 	return u.Email, nil
 }
