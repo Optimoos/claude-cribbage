@@ -203,18 +203,28 @@ func (s *Server) signOutOthers(c *Conn, id uint32) {
 		return
 	}
 	s.log.Info("signed out other devices", "user", c.user.ID)
+	s.devices.dropApprovals(c.user.ID) // even this session's: it may have approved the intruder
 	s.closeUserConns(c.user.ID, c)
 	c.send(&pb.ServerMessage{RequestId: id, Body: &pb.ServerMessage_Ack{Ack: &pb.Ack{}}})
+	// Passkeys the ended sessions added are gone: show the list without them.
+	if err := s.pushAccount(ctx, c.user.ID, reply{}); err != nil {
+		s.log.Error("account", "user", c.user.ID, "err", err)
+	}
 }
 
 // closeUserConns closes every connection signed in as userID except keep,
 // after their sessions have ended. Their clients reconnect, cannot resume,
 // and ask the player to sign in.
 func (s *Server) closeUserConns(userID int64, keep *Conn) {
+	s.closeConnsWhere(userID, func(c *Conn) bool { return c != keep })
+}
+
+// closeConnsWhere closes the connections signed in as userID that match.
+func (s *Server) closeConnsWhere(userID int64, match func(*Conn) bool) {
 	s.cmu.RLock()
 	var cs []*Conn
 	for c := range s.conns[userID] {
-		if c != keep {
+		if match(c) {
 			cs = append(cs, c)
 		}
 	}
@@ -246,6 +256,7 @@ func (s *Server) AdminSetEmail(ctx context.Context, username, email string) (old
 		return "", err
 	}
 	s.log.Info("email set by admin", "user", u.ID, "username", u.Username)
+	s.devices.dropApprovals(u.ID)
 	s.closeUserConns(u.ID, nil)
 	return u.Email, nil
 }
@@ -287,7 +298,7 @@ func (s *Server) passkeyAddFinish(c *Conn, id uint32, m *pb.PasskeyAddFinish) {
 	c.passkey = nil
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if err := s.auth.FinishAddPasskey(ctx, c.user, sd, m.CredentialJson, m.Name); err != nil {
+	if err := s.auth.FinishAddPasskey(ctx, c.user, c.token, sd, m.CredentialJson, m.Name); err != nil {
 		s.sendAccountError(c, id, "add passkey", err)
 		return
 	}
@@ -323,6 +334,10 @@ func (s *Server) getHistory(c *Conn, id uint32, m *pb.GetHistory) {
 		limit = historyPage
 	}
 	limit = min(limit, historyPageMax)
+	if m.After == "" && limited(c) && !s.records.Take(c.userKey, time.Now()) {
+		c.sendError(id, pb.ErrorCode_ERROR_CODE_RATE_LIMITED, "", "too many requests; slow down")
+		return
+	}
 	var before store.Cursor
 	if m.After != "" {
 		var ok bool

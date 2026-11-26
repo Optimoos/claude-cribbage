@@ -85,7 +85,8 @@ CREATE TABLE IF NOT EXISTS passkeys (
 	name      TEXT NOT NULL,
 	data      BLOB NOT NULL,
 	created   INTEGER NOT NULL,
-	last_used INTEGER NOT NULL DEFAULT 0
+	last_used INTEGER NOT NULL DEFAULT 0,
+	session   TEXT NOT NULL DEFAULT '' -- key of the session that added it, like sessions.token
 );
 CREATE INDEX IF NOT EXISTS passkeys_user ON passkeys(user_id);
 CREATE TABLE IF NOT EXISTS email_stops (
@@ -186,6 +187,10 @@ func OpenSQLite(path string) (*SQLite, error) {
 		db.Close()
 		return nil, fmt.Errorf("create schema: %w", err)
 	}
+	if err := migrate(db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate schema: %w", err)
+	}
 	ins, err := db.Prepare(`INSERT INTO action_log (game_id, seq, seat, kind, card0, card1) VALUES (?,?,?,?,?,?)`)
 	if err != nil {
 		db.Close()
@@ -197,6 +202,19 @@ func OpenSQLite(path string) (*SQLite, error) {
 	}
 	go s.writer()
 	return s, nil
+}
+
+// migrate adds columns that databases made before them lack.
+func migrate(db *sql.DB) error {
+	var n int
+	if err := db.QueryRow(`SELECT count(*) FROM pragma_table_info('passkeys') WHERE name = 'session'`).Scan(&n); err != nil {
+		return err
+	}
+	if n == 0 {
+		_, err := db.Exec(`ALTER TABLE passkeys ADD COLUMN session TEXT NOT NULL DEFAULT ''`)
+		return err
+	}
+	return nil
 }
 
 // Close flushes pending writes and closes the database. No other methods
@@ -576,6 +594,10 @@ func (s *SQLite) ExtendSession(ctx context.Context, token string, expires time.T
 
 func (s *SQLite) DeleteSessions(ctx context.Context, userID int64, keep string) error {
 	return s.write(ctx, func(tx *writeTx) error {
+		if _, err := tx.Exec(`DELETE FROM passkeys WHERE user_id = ? AND session IN
+			(SELECT token FROM sessions WHERE user_id = ? AND token != ?)`, userID, userID, keepKey(keep)); err != nil {
+			return err
+		}
 		_, err := tx.Exec(`DELETE FROM sessions WHERE user_id = ? AND token != ?`, userID, keepKey(keep))
 		return err
 	}, nil)
@@ -780,13 +802,21 @@ func (s *SQLite) PendingEmail(ctx context.Context, userID int64, kind int) (stri
 
 func (s *SQLite) AddPasskey(ctx context.Context, p *Passkey) error {
 	return s.write(ctx, func(tx *writeTx) error {
-		r, err := tx.Exec(`INSERT INTO passkeys (id, user_id, name, data, created) SELECT ?, id, ?, ?, ? FROM users WHERE id = ?`,
-			p.ID, p.Name, p.Data, p.Created.UnixMilli(), p.UserID)
+		var r sql.Result
+		var err error
+		if p.Session == "" {
+			r, err = tx.Exec(`INSERT INTO passkeys (id, user_id, name, data, created) SELECT ?, id, ?, ?, ? FROM users WHERE id = ?`,
+				p.ID, p.Name, p.Data, p.Created.UnixMilli(), p.UserID)
+		} else {
+			r, err = tx.Exec(`INSERT INTO passkeys (id, user_id, name, data, created, session)
+				SELECT ?, user_id, ?, ?, ?, token FROM sessions WHERE token = ? AND user_id = ? AND expires > ?`,
+				p.ID, p.Name, p.Data, p.Created.UnixMilli(), tokenKey(p.Session), p.UserID, time.Now().UnixMilli())
+		}
 		if err != nil {
 			return err
 		}
 		if n, _ := r.RowsAffected(); n == 0 {
-			return ErrNotFound // the account was deleted meanwhile
+			return ErrNotFound // the account was deleted, or the session ended, meanwhile
 		}
 		return nil
 	}, nil)

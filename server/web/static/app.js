@@ -1096,7 +1096,7 @@ function effects(v, fx) {
   if (fx.sound) sfx[fx.sound]();
   for (const s of fx.scored) {
     const who = s.seat === v.g.seat ? 'me' : 'opp';
-    floatAt(fx.at, s.seat, `+${s.pts}${fx.label ? `<small>${esc(fx.label)}</small>` : ''}`, who);
+    floatAt(fx.at, s.seat, `+${esc(s.pts)}${fx.label ? `<small>${esc(fx.label)}</small>` : ''}`, who);
   }
   if (fx.scored.length) setTimeout(sfx.score, 120);
   if (fx.note) floatAt(fx.note.at, null, esc(fx.note.text), 'neutral');
@@ -1197,7 +1197,7 @@ function renderLog() {
   const animate = !prefs.rapid && log.childElementCount > 0;
   for (const l of lines.slice(shown.n)) {
     const li = document.createElement('li');
-    li.innerHTML = esc(l.text) + (l.points ? ` <span class="pts">+${l.points}</span>` : '');
+    li.innerHTML = esc(l.text) + (l.points ? ` <span class="pts">+${esc(l.points)}</span>` : '');
     li.className = (l.cls || '') + (animate ? ' enter' : '');
     log.appendChild(li);
   }
@@ -1230,7 +1230,7 @@ function opponent(g) {
 function gameItem(g, onClick, tag, tagCls) {
   const li = document.createElement('li');
   const score = g.scores && g.status !== 'GAME_STATUS_WAITING' ? `${g.scores[g.seat]}–${g.scores[1 - g.seat]}` : '';
-  li.innerHTML = `<span class="name">vs ${esc(opponent(g))}</span><span class="score">${score}</span>` +
+  li.innerHTML = `<span class="name">vs ${esc(opponent(g))}</span><span class="score">${esc(score)}</span>` +
     (tag ? `<span class="tag ${tagCls || ''}">${esc(tag)}</span>` : '');
   clickable(li, onClick);
   if (g.gameId === state.selected) li.classList.add('selected');
@@ -1356,15 +1356,15 @@ function renderHistory() {
   if (!t.games) {
     total.textContent = 'No finished games yet.';
   } else {
-    const parts = [`<b>${t.games}</b> ${t.games === 1 ? 'game' : 'games'}`, `<b>${t.wins || 0}</b> won`, `<b>${t.losses || 0}</b> lost`];
-    if (t.unfinished) parts.push(`<b>${t.unfinished}</b> unfinished`);
-    total.innerHTML = parts.join(' · ') + ` · win rate <b>${winRate(t)}</b>`;
+    const parts = [`<b>${esc(t.games)}</b> ${t.games === 1 ? 'game' : 'games'}`, `<b>${esc(t.wins || 0)}</b> won`, `<b>${esc(t.losses || 0)}</b> lost`];
+    if (t.unfinished) parts.push(`<b>${esc(t.unfinished)}</b> unfinished`);
+    total.innerHTML = parts.join(' · ') + ` · win rate <b>${esc(winRate(t))}</b>`;
   }
   $('records').hidden = !h.records.length;
   tbody.replaceChildren(...h.records.map(r => {
     const tr = document.createElement('tr');
-    tr.innerHTML = `<td>${esc(playerLabel(r.opponent))}</td><td>${r.games || 0}</td><td>${r.wins || 0}</td>` +
-      `<td>${r.losses || 0}</td><td>${winRate(r)}</td>`;
+    tr.innerHTML = `<td>${esc(playerLabel(r.opponent))}</td><td>${esc(r.games || 0)}</td><td>${esc(r.wins || 0)}</td>` +
+      `<td>${esc(r.losses || 0)}</td><td>${esc(winRate(r))}</td>`;
     if (r.unfinished) tr.title = `${r.unfinished} unfinished (expired or cancelled)`;
     return tr;
   }));
@@ -1375,8 +1375,8 @@ function renderHistory() {
     const opp = (g.players || [])[1 - g.seat] || {};
     li.innerHTML = `<span class="when">${esc(shortDate(g.updated))}</span>` +
       `<span class="name">vs ${esc(playerLabel(opp))}</span>` +
-      `<span class="score">${g.scores[g.seat] || 0}–${g.scores[1 - g.seat] || 0}</span>` +
-      `<span class="tag ${res}">${tag}</span>`;
+      `<span class="score">${esc(g.scores[g.seat] || 0)}–${esc(g.scores[1 - g.seat] || 0)}</span>` +
+      `<span class="tag ${res}">${esc(tag)}</span>`;
     return li;
   }), 'None yet');
   $('history-more').hidden = !h.next;
@@ -1928,7 +1928,7 @@ function plate(el, v, seat, isMe) {
   el.className = `plate ${isMe ? 'me' : 'opp'}`;
   el.innerHTML = `<div class="avatar">${esc(initial)}<span class="conn ${online ? 'on' : ''}"></span></div>` +
     `<div><div class="nm">${esc(name)}${v.dealer === seat ? '<span class="dealer" title="Dealer: the crib is theirs">DEALER</span>' : ''}</div>` +
-    `<div class="sub">${esc(sub)}</div></div><div class="pts${v.bump.has(seat) ? ' bump' : ''}">${v.scores[seat]}</div>`;
+    `<div class="sub">${esc(sub)}</div></div><div class="pts${v.bump.has(seat) ? ' bump' : ''}">${esc(v.scores[seat])}</div>`;
 }
 
 function renderTable(animate = false) {
@@ -2065,7 +2065,7 @@ function renderShow(v, me, oppName, animate) {
     const row = document.createElement('div');
     row.className = `show-row ${mine ? 'me' : 'opp'}${animate && s.fresh ? ' enter' : ''}`;
     const who = `${mine ? 'Your' : `${esc(oppName)}'s`} ${s.crib ? 'crib' : 'hand'}`;
-    row.innerHTML = `<div class="who">${who}</div><div class="tot">${s.points}</div><div class="mini"></div><div class="why">${esc(breakdown(s.show))}</div>`;
+    row.innerHTML = `<div class="who">${who}</div><div class="tot">${esc(s.points)}</div><div class="mini"></div><div class="why">${esc(breakdown(s.show))}</div>`;
     const mini = row.querySelector('.mini');
     s.cards.forEach(c => mini.appendChild(cardEl(c)));
     const plus = document.createElement('span');
@@ -2089,7 +2089,7 @@ function renderBanner(v, g, animate) {
   const skunk = v.gameOver.resigned ? 0 : loser < 61 ? 2 : loser < 91 ? 1 : 0;
   const bot = ((g.players || [])[1 - me] || {}).bot;
   b.innerHTML = `<div class="banner-card"><h3>${won ? 'You win!' : 'You lose'}</h3>` +
-    `<div class="final">${v.scores[me]} – ${v.scores[1 - me]}</div>` +
+    `<div class="final">${esc(v.scores[me])} – ${esc(v.scores[1 - me])}</div>` +
     (skunk ? `<div class="skunk-note">${skunk === 2 ? 'Double skunk!' : 'Skunk!'}</div>` : '') +
     (v.gameOver.resigned ? `<div class="muted">${won ? 'Your opponent resigned.' : 'You resigned.'}</div>` : '') +
     `<div class="row">${bot ? '<button class="btn btn-primary" data-act="rematch">Play again</button>' : ''}<button class="btn" data-act="close">View table</button></div></div>`;

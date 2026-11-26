@@ -96,9 +96,10 @@ type AuthLimits struct {
 	CodesPerIP    int // sign-in codes asked for from one address
 	CodeEvery     time.Duration
 	// Connections: at most ConnsPerAddr from one address (as limited
-	// above) and Conns in all; one that has not signed in after
-	// LoginWithin is closed, or after SignInWithin if it started signing
-	// in (asked for a code, say).
+	// above) and Conns in all (when full, a new one displaces one that
+	// has not signed in); one that has not signed in after LoginWithin is
+	// closed, or after SignInWithin if it started signing in (asked for a
+	// code, say).
 	ConnsPerAddr int
 	Conns        int
 	LoginWithin  time.Duration
@@ -135,8 +136,8 @@ type Server struct {
 	quitOnce sync.Once
 	actors   sync.WaitGroup
 
-	// Lock order: gmu, then game.smu, then cmu. Never hold any of these
-	// while submitting to a game inbox.
+	// Lock order: imu, then gmu, then game.smu, then cmu. Never hold any
+	// of these while submitting to a game inbox.
 	gmu       sync.RWMutex
 	games     map[string]*game
 	userGames map[int64]map[string]*game
@@ -168,6 +169,7 @@ type Server struct {
 	imu                    sync.Mutex
 	inv                    invites
 	invitesSent, codeTries *ratelimit.Limiter
+	records                *ratelimit.Limiter // GetHistory first pages, which total every finished game
 
 	devices devices // sign-ins waiting for approval from another device
 
@@ -229,17 +231,19 @@ func New(cfg Config) *Server {
 		// one a minute.
 		invitesSent: ratelimit.New(10, 6*time.Minute),
 		codeTries:   ratelimit.New(10, time.Minute),
-		devices:     newDevices(),
-		auth:        cfg.Auth,
-		gameStore:   cfg.Games,
-		log:         cfg.Logger,
-		outbox:      cfg.OutboxSize,
-		quit:        make(chan struct{}),
-		allConns:    map[*Conn]struct{}{},
-		games:       map[string]*game{},
-		userGames:   map[int64]map[string]*game{},
-		open:        map[string]*game{},
-		conns:       map[int64]map[*Conn]struct{}{},
+		// Five history first pages, then one every ten seconds.
+		records:   ratelimit.New(5, 10*time.Second),
+		devices:   newDevices(),
+		auth:      cfg.Auth,
+		gameStore: cfg.Games,
+		log:       cfg.Logger,
+		outbox:    cfg.OutboxSize,
+		quit:      make(chan struct{}),
+		allConns:  map[*Conn]struct{}{},
+		games:     map[string]*game{},
+		userGames: map[int64]map[string]*game{},
+		open:      map[string]*game{},
+		conns:     map[int64]map[*Conn]struct{}{},
 	}
 	go s.sweep()
 	return s
@@ -288,11 +292,21 @@ func (s *Server) ServeConn(t Transport) {
 		c.addr = addrKey(remoteIP(t))
 	}
 	s.cmu.Lock()
-	if s.shuttingDown() || len(s.allConns) >= s.authLim.Conns ||
-		(c.addr != "" && s.connsByAddr[c.addr] >= s.authLim.ConnsPerAddr) {
+	if s.shuttingDown() || (c.addr != "" && s.connsByAddr[c.addr] >= s.authLim.ConnsPerAddr) {
 		s.cmu.Unlock()
 		t.Close()
 		return
+	}
+	// A full server makes room by closing a connection that has not signed
+	// in, so connections that never sign in cannot lock everyone else out.
+	// The evicted one leaves allConns when its reader ends.
+	var evict *Conn
+	if len(s.allConns) >= s.authLim.Conns {
+		if evict = s.evictAnon(); evict == nil {
+			s.cmu.Unlock()
+			t.Close()
+			return
+		}
 	}
 	s.allConns[c] = struct{}{}
 	if c.addr != "" {
@@ -300,16 +314,22 @@ func (s *Server) ServeConn(t Transport) {
 	}
 	s.readers.Add(1)
 	s.cmu.Unlock()
+	if evict != nil {
+		evict.close()
+	}
 	defer s.readers.Done()
 	if c.addr != "" {
-		// Remote connections must sign in promptly, or soon after they
-		// start to (asking for a code, say).
+		// Remote connections must sign in promptly, or by SignInWithin if
+		// they start to (asking for a code, say). Only once: renewing it
+		// would let a connection that never signs in stay for ever.
 		var t *time.Timer
+		extended := false // only the timer's func uses it, one call at a time
 		t = time.AfterFunc(s.authLim.LoginWithin, func() {
 			if c.authed.Load() {
 				return
 			}
-			if c.signingIn.CompareAndSwap(true, false) {
+			if !extended && c.signingIn.Load() {
+				extended = true
 				t.Reset(s.authLim.SignInWithin - s.authLim.LoginWithin)
 				return
 			}
@@ -344,6 +364,30 @@ func (s *Server) ServeConn(t Transport) {
 		}
 		s.handle(c, m)
 	}
+}
+
+// evictAnon marks and returns a remote connection that has not signed in,
+// from the address holding the most such connections, so that a flood
+// from a few addresses displaces itself rather than people waiting for an
+// emailed code; nil if there is none. Callers hold cmu.
+func (s *Server) evictAnon() *Conn {
+	// shortcut: scans every connection, only when the server is full; keep
+	// per-address counts of anonymous connections if that ever shows up.
+	count := map[string]int{}
+	var best *Conn
+	for o := range s.allConns {
+		if o.addr == "" || o.authed.Load() || o.evicted.Load() || o.closed() {
+			continue
+		}
+		count[o.addr]++
+		if best == nil || count[o.addr] > count[best.addr] {
+			best = o
+		}
+	}
+	if best != nil {
+		best.evicted.Store(true)
+	}
+	return best
 }
 
 const protocolVersion = uint32(pb.ProtocolVersion_PROTOCOL_VERSION_CURRENT)
@@ -463,14 +507,17 @@ func (s *Server) handle(c *Conn, m *pb.ClientMessage) {
 	case *pb.ClientMessage_CreateGame:
 		s.createGame(c, id, b.CreateGame.Bot)
 	case *pb.ClientMessage_JoinGame:
-		release, err := s.reserve(gameKind{}, reserveFor{id: c.user.ID, self: true})
-		if err != nil {
-			s.sendLimit(c, id, err)
-			return
-		}
-		if !s.withGame(c, id, b.JoinGame.GameId, func(g *game) { defer release(); g.join(c, id) }) {
-			release()
-		}
+		// Reserved on the actor: a join still queued when the actor exits
+		// is dropped, and must not take a reservation with it.
+		s.withGame(c, id, b.JoinGame.GameId, true, func(g *game) {
+			release, err := s.reserve(gameKind{}, reserveFor{id: c.user.ID, self: true})
+			if err != nil {
+				s.sendLimit(c, id, err)
+				return
+			}
+			defer release()
+			g.join(c, id)
+		})
 	case *pb.ClientMessage_ListGames:
 		s.listGames(c, id)
 	case *pb.ClientMessage_FindMatch:
@@ -479,9 +526,9 @@ func (s *Server) handle(c *Conn, m *pb.ClientMessage) {
 		s.cancelMatch(c.user.ID)
 		c.send(&pb.ServerMessage{RequestId: id, Body: &pb.ServerMessage_Ack{Ack: &pb.Ack{}}})
 	case *pb.ClientMessage_SyncGame:
-		s.withGame(c, id, b.SyncGame.GameId, func(g *game) { g.sync(c, id) })
+		s.withGame(c, id, b.SyncGame.GameId, false, func(g *game) { g.sync(c, id) })
 	case *pb.ClientMessage_Act:
-		s.withGame(c, id, b.Act.GameId, func(g *game) { g.act(c, id, b.Act.Action) })
+		s.withGame(c, id, b.Act.GameId, false, func(g *game) { g.act(c, id, b.Act.Action) })
 	case *pb.ClientMessage_Logout:
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		err := s.auth.Logout(ctx, c.token)
@@ -493,6 +540,8 @@ func (s *Server) handle(c *Conn, m *pb.ClientMessage) {
 		}
 		c.send(&pb.ServerMessage{RequestId: id, Body: &pb.ServerMessage_Ack{Ack: &pb.Ack{}}})
 		c.drainAndClose()
+		// Other connections resumed with the same token end with it.
+		s.closeConnsWhere(c.user.ID, func(o *Conn) bool { return o != c && o.token == c.token })
 	case *pb.ClientMessage_SendInvite:
 		s.sendInvite(c, id, b.SendInvite.Username)
 	case *pb.ClientMessage_RespondInvite:
@@ -500,7 +549,7 @@ func (s *Server) handle(c *Conn, m *pb.ClientMessage) {
 	case *pb.ClientMessage_RedeemCode:
 		s.redeemCode(c, id, b.RedeemCode.Code)
 	case *pb.ClientMessage_Resign:
-		s.withGame(c, id, b.Resign.GameId, func(g *game) { g.resign(c, id) })
+		s.withGame(c, id, b.Resign.GameId, false, func(g *game) { g.resign(c, id) })
 	default:
 		c.sendError(id, pb.ErrorCode_ERROR_CODE_BAD_REQUEST, "", "unsupported message")
 	}
@@ -581,18 +630,26 @@ func (s *Server) authenticate(c *Conn, id uint32, fn func(context.Context) (*aut
 	}
 }
 
-// withGame runs fn on the game's actor and reports whether it was queued.
-func (s *Server) withGame(c *Conn, id uint32, gameID string, fn func(*game)) bool {
+// withGame runs fn on the actor of one of c's games, or of an open game
+// to join. Any other game is "not found", whether or not it exists, and is
+// not woken.
+func (s *Server) withGame(c *Conn, id uint32, gameID string, join bool, fn func(*game)) {
 	s.gmu.RLock()
-	g := s.games[gameID]
+	g := s.userGames[c.user.ID][gameID]
+	if join {
+		g = s.open[gameID]
+	}
 	s.gmu.RUnlock()
 	if g == nil || !g.submit(func() { fn(g) }) {
-		if !s.shuttingDown() { // else the connection is about to close and the client will resync
-			c.sendError(id, pb.ErrorCode_ERROR_CODE_NOT_FOUND, gameID, "no such active game")
+		if s.shuttingDown() {
+			return // the connection is about to close and the client will resync
 		}
-		return false
+		msg := "no such active game"
+		if join {
+			msg = "that game is no longer open"
+		}
+		c.sendError(id, pb.ErrorCode_ERROR_CODE_NOT_FOUND, gameID, msg)
 	}
-	return true
 }
 
 func (s *Server) createGame(c *Conn, id uint32, botName string) {

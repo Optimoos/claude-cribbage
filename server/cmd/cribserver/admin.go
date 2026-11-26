@@ -44,7 +44,7 @@ func serveAdmin(log *slog.Logger, path string, srv *server.Server) (net.Listener
 	if fi, err := os.Lstat(path); err == nil && fi.Mode()&fs.ModeSocket != 0 {
 		os.Remove(path)
 	}
-	ln, err := net.Listen("unix", path)
+	ln, err := listenPrivate(path)
 	if err != nil {
 		return nil, err
 	}

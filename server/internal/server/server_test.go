@@ -272,11 +272,12 @@ func TestHumanGameAndCheating(t *testing.T) {
 	}
 
 	id = eve.send(t, &pb.ClientMessage{Body: &pb.ClientMessage_JoinGame{JoinGame: &pb.JoinGame{GameId: gameID}}})
-	wantError(t, eve.next(t, replyTo(id)), pb.ErrorCode_ERROR_CODE_GAME_UNAVAILABLE)
+	wantError(t, eve.next(t, replyTo(id)), pb.ErrorCode_ERROR_CODE_NOT_FOUND)
+	// To an outsider, someone else's game is not found, as if it did not exist.
 	id = eve.send(t, act(gameID, ua.Legal[0]))
-	wantError(t, eve.next(t, replyTo(id)), pb.ErrorCode_ERROR_CODE_NOT_IN_GAME)
+	wantError(t, eve.next(t, replyTo(id)), pb.ErrorCode_ERROR_CODE_NOT_FOUND)
 	id = eve.send(t, &pb.ClientMessage{Body: &pb.ClientMessage_SyncGame{SyncGame: &pb.SyncGame{GameId: gameID}}})
-	wantError(t, eve.next(t, replyTo(id)), pb.ErrorCode_ERROR_CODE_NOT_IN_GAME)
+	wantError(t, eve.next(t, replyTo(id)), pb.ErrorCode_ERROR_CODE_NOT_FOUND)
 	// Bob tries to discard Alice's cards.
 	id = b.send(t, act(gameID, ua.Legal[0]))
 	wantError(t, b.next(t, replyTo(id)), pb.ErrorCode_ERROR_CODE_ILLEGAL_ACTION)
@@ -420,6 +421,11 @@ func TestResumeOnNewConnection(t *testing.T) {
 func TestLogout(t *testing.T) {
 	_, addr := startServer(t)
 	a := login(t, addr, "alice")
+	// A second connection on the same token, which logging out must end.
+	twin := connect(t, addr)
+	if _, err := twin.Resume(a.auth.Token); err != nil {
+		t.Fatal(err)
+	}
 	if a.next(t, replyTo(a.send(t, &pb.ClientMessage{Body: &pb.ClientMessage_Logout{Logout: &pb.Logout{}}}))).GetAck() == nil {
 		t.Fatal("logout not acknowledged")
 	}
@@ -430,6 +436,15 @@ func TestLogout(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("connection kept open after logout")
+	}
+	twin.startReading()
+	select {
+	case _, ok := <-twin.msgs:
+		for ok {
+			_, ok = <-twin.msgs
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("same-token connection kept open after logout")
 	}
 	var se client.ServerError
 	if _, err := connect(t, addr).Resume(a.auth.Token); !errors.As(err, &se) {

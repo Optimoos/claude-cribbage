@@ -16,6 +16,7 @@ import (
 
 	"github.com/coder/websocket"
 	"github.com/pion/ice/v4"
+	"github.com/pion/sdp/v3"
 	"github.com/pion/webrtc/v4"
 
 	"cribbage/internal/netkey"
@@ -125,15 +126,16 @@ func (r *remoteCandidates) described(pc *webrtc.PeerConnection) error {
 	return nil
 }
 
-// candidateAddress is the connection address of an ICE candidate line
+// candidateAddress is the connection address of an ICE candidate
 // ("candidate:foundation component protocol priority address port typ
-// ..."), or "" if it has none.
-func candidateAddress(line string) string {
-	line = strings.TrimPrefix(strings.TrimPrefix(line, "a="), "candidate:")
-	if f := strings.Fields(line); len(f) >= 6 {
-		return f[4]
+// ..."), or "" if it has none. It parses with pion's own parser, as
+// AddICECandidate does, so the address checked is the one pion would use.
+func candidateAddress(cand string) string {
+	c, err := ice.UnmarshalCandidate(strings.TrimPrefix(cand, "candidate:"))
+	if err != nil {
+		return ""
 	}
-	return ""
+	return c.Address()
 }
 
 // publicAddress reports whether a candidate's address is a public IP. It
@@ -144,24 +146,36 @@ func publicAddress(addr string) bool {
 	return netkey.Public(net.ParseIP(addr))
 }
 
-// filterSDP drops the candidate lines of sdp whose address keep refuses,
-// and fails if there are more than maxCandidates.
-func filterSDP(sdp string, keep func(string) bool) (string, int, error) {
-	lines := strings.SplitAfter(sdp, "\n")
-	out := lines[:0]
-	n := 0
-	for _, l := range lines {
-		if strings.HasPrefix(l, "a=candidate:") {
-			if n++; n > maxCandidates {
-				return "", n, errTooManyCandidates
-			}
-			if keep != nil && !keep(candidateAddress(strings.TrimSpace(l))) {
-				continue
-			}
-		}
-		out = append(out, l)
+// filterSDP drops the candidates in raw whose address keep refuses, and
+// fails if there are more than maxCandidates. It parses raw as pion does
+// (candidates are taken from media sections), so no line can be read one
+// way here and another way there.
+func filterSDP(raw string, keep func(string) bool) (string, int, error) {
+	var d sdp.SessionDescription
+	if err := d.UnmarshalString(raw); err != nil {
+		return "", 0, err
 	}
-	return strings.Join(out, ""), n, nil
+	n := 0
+	for _, m := range d.MediaDescriptions {
+		kept := m.Attributes[:0]
+		for _, a := range m.Attributes {
+			if a.IsICECandidate() {
+				if n++; n > maxCandidates {
+					return "", n, errTooManyCandidates
+				}
+				if keep != nil && !keep(candidateAddress(a.Value)) {
+					continue
+				}
+			}
+			kept = append(kept, a)
+		}
+		m.Attributes = kept
+	}
+	if keep == nil {
+		return raw, n, nil
+	}
+	b, err := d.Marshal()
+	return string(b), n, err
 }
 
 func readSignal(ctx context.Context, ws *websocket.Conn) (signal, error) {
@@ -198,7 +212,13 @@ type Options struct {
 	// X-Forwarded-For entry.
 	MaxSessions        int
 	MaxSessionsPerAddr int
-	Logger             *slog.Logger
+	// Origins, if any, are the hosts ("cribbage.example.com") whose web
+	// pages may open signaling, besides the server's own; requests
+	// without an Origin (apps, not browsers) are always allowed. Empty
+	// allows any page, which lets a third-party page spend its visitors'
+	// signaling slots.
+	Origins []string
+	Logger  *slog.Logger
 }
 
 // API holds WebRTC settings shared by all connections.
@@ -208,6 +228,7 @@ type API struct {
 	log    *slog.Logger
 	mux    *ice.MultiUDPMuxDefault
 	keep   func(addr string) bool // remote candidates to use; nil for all
+	accept websocket.AcceptOptions
 
 	smu         sync.Mutex
 	sessions    int
@@ -241,6 +262,7 @@ func NewAPI(o Options) (*API, error) {
 		byAddr:      map[string]int{},
 		maxSessions: cmp.Or(o.MaxSessions, 200),
 		maxPerAddr:  cmp.Or(o.MaxSessionsPerAddr, 10),
+		accept:      websocket.AcceptOptions{OriginPatterns: o.Origins, InsecureSkipVerify: len(o.Origins) == 0},
 	}
 	if o.PublicOnly {
 		a.keep = publicAddress
@@ -313,9 +335,10 @@ func (a *API) Handler(onConn func(*Conn)) http.Handler {
 			return
 		}
 		defer a.endSession(key)
-		// Any origin may connect: signaling grants nothing by itself, and
-		// clients still authenticate over the data channel.
-		ws, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
+		// Signaling grants nothing by itself (clients still authenticate
+		// over the data channel), but each one spends a slot of the
+		// visitor's address: see Options.Origins.
+		ws, err := websocket.Accept(w, r, &a.accept)
 		if err != nil {
 			return
 		}

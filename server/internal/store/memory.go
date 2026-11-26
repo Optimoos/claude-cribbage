@@ -235,6 +235,11 @@ func (m *Memory) DeleteSessions(_ context.Context, userID int64, keep string) er
 	for k, s := range m.sessions {
 		if s.userID == userID && k != keep {
 			delete(m.sessions, k)
+			for id, p := range m.passkeys {
+				if p.Session == k {
+					delete(m.passkeys, id)
+				}
+			}
 		}
 	}
 	return nil
@@ -344,6 +349,9 @@ func (m *Memory) AddPasskey(_ context.Context, p *Passkey) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if _, ok := m.byID[p.UserID]; !ok {
+		return ErrNotFound
+	}
+	if s, ok := m.sessions[p.Session]; p.Session != "" && (!ok || s.userID != p.UserID || time.Now().After(s.expires)) {
 		return ErrNotFound
 	}
 	if _, ok := m.passkeys[string(p.ID)]; ok {

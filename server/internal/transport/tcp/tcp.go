@@ -4,6 +4,7 @@ package tcp
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -53,7 +54,14 @@ func (c *Conn) Read(m proto.Message) error {
 		return fmt.Errorf("frame too large: %d bytes", n)
 	}
 	if cap(c.rbuf) < int(n) {
-		c.rbuf = make([]byte, n)
+		// Grow as the payload arrives, not to what the header claims, so
+		// a peer cannot make us allocate MaxFrame by sending 4 bytes.
+		b := bytes.NewBuffer(c.rbuf[:0])
+		if _, err := io.CopyN(b, c.r, int64(n)); err != nil {
+			return err
+		}
+		c.rbuf = b.Bytes()
+		return proto.Unmarshal(c.rbuf, m)
 	}
 	buf := c.rbuf[:n]
 	if _, err := io.ReadFull(c.r, buf); err != nil {

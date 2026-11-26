@@ -252,3 +252,110 @@ func TestBotMovesCapped(t *testing.T) {
 		t.Fatalf("peak concurrent bot moves %d, want 2", p)
 	}
 }
+
+// A connection that keeps starting to sign in still has only SignInWithin.
+func TestSignInExtendedOnce(t *testing.T) {
+	addr := startRemote(t, "203.0.113.10", AuthLimits{
+		AttemptsPerIP: 1000, AttemptEvery: time.Hour,
+		CodesPerIP: 10, CodeEvery: time.Hour,
+		ConnsPerAddr: 10, Conns: 100, LoginWithin: 100 * time.Millisecond, SignInWithin: 400 * time.Millisecond,
+	})
+	c := anon(t, addr)
+	start := time.Now()
+	stop := make(chan struct{})
+	defer close(stop)
+	go func() {
+		for {
+			select {
+			case <-stop:
+				return
+			case <-time.After(50 * time.Millisecond):
+				c.send(t, &pb.ClientMessage{Body: &pb.ClientMessage_StartDeviceSignIn{StartDeviceSignIn: &pb.StartDeviceSignIn{}}})
+			}
+		}
+	}()
+	for {
+		select {
+		case _, ok := <-c.msgs:
+			if ok {
+				continue
+			}
+			if d := time.Since(start); d > time.Second {
+				t.Fatalf("closed after %v, want about SignInWithin", d)
+			}
+			return
+		case <-time.After(2 * time.Second):
+			t.Fatal("connection that never signed in was kept past SignInWithin")
+		}
+	}
+}
+
+// When the server is full, a new connection displaces one that has not
+// signed in, taken from the address with the most of them, so it can
+// still sign in or resume.
+func TestFullServerEvictsAnonymous(t *testing.T) {
+	var ip atomic.Value
+	ip.Store("198.51.100.1")
+	addr := startRemoteFrom(t, &ip, AuthLimits{
+		AttemptsPerIP: 100, AttemptEvery: time.Hour,
+		ConnsPerAddr: 10, Conns: 4, LoginWithin: time.Minute,
+	})
+	open := func() *tclient {
+		c := connect(t, addr)
+		c.startReading()
+		time.Sleep(20 * time.Millisecond) // let the server count it
+		return c
+	}
+	user := open()
+	if user.next(t, replyTo(user.send(t, botLogin("alice")))).GetAuthOk() == nil {
+		t.Fatal("login failed")
+	}
+	quiet := open() // one anonymous connection beside alice's
+	ip.Store("198.51.100.2")
+	flood := []*tclient{open(), open()}
+	ip.Store("198.51.100.3")
+	victim := open() // the server is now over its 4 connections
+	if victim.next(t, replyTo(victim.send(t, botLogin("bob")))).GetAuthOk() == nil {
+		t.Fatal("new connection on a full server could not sign in")
+	}
+	isClosed := func(c *tclient) bool {
+		select {
+		case _, ok := <-c.msgs:
+			return !ok
+		case <-time.After(300 * time.Millisecond):
+			return false
+		}
+	}
+	if !isClosed(flood[0]) && !isClosed(flood[1]) {
+		t.Fatal("no connection from the flooding address was closed")
+	}
+	if isClosed(user) || isClosed(quiet) {
+		t.Fatal("evicted a connection from an address with fewer anonymous ones")
+	}
+}
+
+// History's first page (with the records over every finished game) is
+// limited per player; later pages are not.
+func TestHistoryRecordsLimited(t *testing.T) {
+	addr := startRemote(t, "203.0.113.40", AuthLimits{
+		AttemptsPerIP: 100, AttemptEvery: time.Hour,
+		ConnsPerAddr: 10, Conns: 100, LoginWithin: time.Minute,
+	})
+	c := connect(t, addr)
+	c.startReading()
+	if c.next(t, replyTo(c.send(t, botLogin("alice")))).GetAuthOk() == nil {
+		t.Fatal("login failed")
+	}
+	history := func(after string) *pb.ServerMessage {
+		return c.next(t, replyTo(c.send(t, &pb.ClientMessage{Body: &pb.ClientMessage_GetHistory{GetHistory: &pb.GetHistory{After: after}}})))
+	}
+	for i := 0; i < 5; i++ {
+		if history("").GetHistory() == nil {
+			t.Fatalf("first page %d refused", i)
+		}
+	}
+	wantError(t, history(""), pb.ErrorCode_ERROR_CODE_RATE_LIMITED)
+	if history("1:x").GetHistory() == nil {
+		t.Fatal("a later page was refused")
+	}
+}

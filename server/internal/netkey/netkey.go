@@ -7,7 +7,7 @@ import "net"
 // IPv6 by their /64, since one household or server usually has a whole
 // /64. Anything that is not an IP address is "unknown".
 func Of(addr string) string {
-	ip := net.ParseIP(addr)
+	ip := unNAT64(net.ParseIP(addr))
 	switch {
 	case ip == nil:
 		return "unknown"
@@ -22,7 +22,20 @@ func Of(addr string) string {
 // private, loopback, link-local and other special ranges: somewhere on the
 // internet.
 func Public(ip net.IP) bool {
+	ip = unNAT64(ip)
 	return ip != nil && ip.IsGlobalUnicast() && !ip.IsPrivate() && !special(ip)
+}
+
+// nat64 is the well-known NAT64 prefix (RFC 6052), whose addresses stand
+// for the IPv4 address in their last 4 bytes.
+var _, nat64, _ = net.ParseCIDR("64:ff9b::/96")
+
+// unNAT64 is the IPv4 address a NAT64 address stands for, else ip.
+func unNAT64(ip net.IP) net.IP {
+	if ip.To4() == nil && nat64.Contains(ip) {
+		return ip[12:16]
+	}
+	return ip
 }
 
 var specialNets = func() []*net.IPNet {

@@ -1236,8 +1236,11 @@ the key cannot open a person's account. Protocol version 2.
   live in memory only. Emails: 10 per account and 20 per address, then 1
   every 5 minutes; 10 code requests per IP, then 1 a minute.
 - **Sessions** last 90 days from last use (renewed at most daily).
-  "Sign out other devices" ends the rest. A connection that has started
-  signing in may stay 20 minutes instead of 30 seconds.
+  "Sign out other devices" ends the rest, and removes the passkeys they
+  added; adding a passkey emails the account's address. A connection that
+  has started signing in may stay 20 minutes instead of 30 seconds (once:
+  it cannot renew that), and a full server makes room for a new
+  connection by closing one that has not signed in.
 - **Address changes** need a link to the current address, then one to the
   new address, so a device left signed in cannot take the account; the old
   address is told. `cribserver admin set-email` recovers an account: new

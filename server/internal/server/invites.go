@@ -104,7 +104,11 @@ func (s *Server) loadInvites(ctx context.Context) error {
 	defer s.imu.Unlock()
 	for i := range all {
 		inv := &all[i]
-		if now.After(inv.Expires) {
+		gone, err := s.partyGone(ctx, inv)
+		if err != nil {
+			return err
+		}
+		if gone || now.After(inv.Expires) {
 			if err := s.gameStore.DeleteInvite(ctx, inv.ID); err != nil {
 				return err
 			}
@@ -113,6 +117,22 @@ func (s *Server) loadInvites(ctx context.Context) error {
 		s.inv.add(inv)
 	}
 	return nil
+}
+
+// partyGone reports whether an invite's sender or recipient no longer has
+// an account.
+func (s *Server) partyGone(ctx context.Context, inv *store.Invite) (bool, error) {
+	for _, id := range []int64{inv.From, inv.To} {
+		if id == 0 {
+			continue
+		}
+		if _, err := s.auth.Store.UserByID(ctx, id); errors.Is(err, store.ErrNotFound) {
+			return true, nil
+		} else if err != nil {
+			return false, err
+		}
+	}
+	return false, nil
 }
 
 func (s *Server) sendInvite(c *Conn, id uint32, username string) {
@@ -156,6 +176,13 @@ func (s *Server) sendInvite(c *Conn, id uint32, username string) {
 	// requests; invites are rare enough that holding it across the write
 	// costs nothing.
 	s.imu.Lock()
+	// Under imu, so an account being deleted either sees this invite in
+	// its last sweep or is seen here.
+	if s.isDeleted(c.user.ID) || (inv.To != 0 && s.isDeleted(inv.To)) {
+		s.imu.Unlock()
+		c.sendError(id, pb.ErrorCode_ERROR_CODE_NOT_FOUND, "", "that account has been deleted")
+		return
+	}
 	out, in := 0, 0
 	for _, o := range s.inv.byUser[c.user.ID] {
 		if o.From == c.user.ID {

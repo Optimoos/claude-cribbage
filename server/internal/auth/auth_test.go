@@ -527,7 +527,7 @@ func TestPasskeys(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		return s.FinishAddPasskey(ctx, u, sd, cred, name)
+		return s.FinishAddPasskey(ctx, u, "", sd, cred, name)
 	}
 	if err := add(alice, "Phone"); err != nil {
 		t.Fatal(err)
@@ -582,7 +582,7 @@ func TestPasskeys(t *testing.T) {
 	other := &passkeytest.Authenticator{Origin: "https://evil.example"}
 	opts, sd, _ = s.BeginAddPasskey(ctx, alice)
 	if c, err := other.Create(opts); err == nil {
-		if err := s.FinishAddPasskey(ctx, alice, sd, c, "x"); !errors.Is(err, ErrInvalidInput) {
+		if err := s.FinishAddPasskey(ctx, alice, "", sd, c, "x"); !errors.Is(err, ErrInvalidInput) {
 			t.Fatalf("passkey from another origin: %v", err)
 		}
 	}

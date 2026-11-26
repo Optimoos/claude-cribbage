@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -815,4 +816,77 @@ func TestEmailStops(t *testing.T) {
 			t.Error("AllowEmail reported a stop that was undone")
 		}
 	})
+}
+
+// A passkey added from a session needs that session live, and goes when
+// signing out other devices ends it.
+func TestPasskeysBoundToSession(t *testing.T) {
+	forEachStore(t, func(t *testing.T, s both) {
+		ctx := context.Background()
+		u := &User{Username: "alice", Nickname: "A", Created: time.Now(), Email: "a@example.com"}
+		if err := s.CreateUser(ctx, u); err != nil {
+			t.Fatal(err)
+		}
+		later := time.Now().Add(time.Hour)
+		for _, tok := range []string{"mine", "thief"} {
+			if err := s.CreateSession(ctx, tok, u.ID, later); err != nil {
+				t.Fatal(err)
+			}
+		}
+		add := func(id, session string) error {
+			return s.AddPasskey(ctx, &Passkey{ID: []byte(id), UserID: u.ID, Data: []byte("d"), Created: time.Now(), Session: session})
+		}
+		if err := add("gone", "no-such-session"); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("added from a session that is not live: %v", err)
+		}
+		for id, session := range map[string]string{"k-mine": "mine", "k-thief": "thief", "k-old": ""} {
+			if err := add(id, session); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := s.DeleteSessions(ctx, u.ID, "mine"); err != nil {
+			t.Fatal(err)
+		}
+		keys, err := s.Passkeys(ctx, u.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var names []string
+		for _, k := range keys {
+			names = append(names, string(k.ID))
+		}
+		if strings.Join(names, ",") != "k-mine,k-old" && strings.Join(names, ",") != "k-old,k-mine" {
+			t.Fatalf("passkeys left: %v", names)
+		}
+	})
+}
+
+// A database made before passkeys recorded their session gains the column.
+func TestMigratePasskeySession(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "old.db")
+	db, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TABLE passkeys (id BLOB PRIMARY KEY, user_id INTEGER NOT NULL, name TEXT NOT NULL,
+		data BLOB NOT NULL, created INTEGER NOT NULL, last_used INTEGER NOT NULL DEFAULT 0)`); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+	s, err := OpenSQLite(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	ctx := context.Background()
+	u := &User{Username: "alice", Nickname: "A", Created: time.Now()}
+	if err := s.CreateUser(ctx, u); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreateSession(ctx, "tok", u.ID, time.Now().Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AddPasskey(ctx, &Passkey{ID: []byte("k"), UserID: u.ID, Data: []byte("d"), Created: time.Now(), Session: "tok"}); err != nil {
+		t.Fatal(err)
+	}
 }

@@ -32,6 +32,7 @@ type Conn struct {
 	// signingIn: the client has started signing in (waiting for an
 	// emailed code, say), so it gets longer than LoginWithin.
 	signingIn atomic.Bool
+	evicted   atomic.Bool // chosen to make room for a new connection
 	// passkey is the state of a passkey ceremony in progress; only the
 	// reader uses it.
 	passkey *webauthn.SessionData

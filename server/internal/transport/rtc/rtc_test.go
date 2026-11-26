@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -132,7 +133,8 @@ func TestDialRejectsAuto(t *testing.T) {
 func TestCandidateFilter(t *testing.T) {
 	for cand, want := range map[string]bool{
 		"candidate:1 1 udp 2122260223 8.8.8.8 54321 typ host":                                    true,
-		"a=candidate:1 1 udp 2122260223 2a00:1450:4001::1 54321 typ host":                        true,
+		"candidate:1 1 udp 2122260223 2a00:1450:4001::1 54321 typ host":                          true,
+		"a=candidate:1 1 udp 2122260223 8.8.8.8 54321 typ host":                                  false, // pion cannot parse it either
 		"candidate:2 1 udp 1686052607 1.1.1.1 61000 typ srflx raddr 192.168.1.5 rport 54321":     true,
 		"candidate:1 1 udp 2122260223 192.168.1.5 54321 typ host":                                false,
 		"candidate:1 1 udp 2122260223 10.0.0.7 54321 typ host":                                   false,
@@ -151,7 +153,10 @@ func TestCandidateFilter(t *testing.T) {
 		}
 	}
 
-	sdp := "v=0\r\n" +
+	media := "v=0\r\no=- 1 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\n" +
+		"m=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\nc=IN IP4 0.0.0.0\r\n" +
+		"a=ice-ufrag:abcd\r\na=ice-pwd:abcdefghijklmnopqrstuvwx\r\n"
+	sdp := media +
 		"a=candidate:1 1 udp 2122260223 192.168.1.5 54321 typ host\r\n" +
 		"a=candidate:2 1 udp 1686052607 8.8.8.8 61000 typ srflx raddr 192.168.1.5 rport 54321\r\n" +
 		"a=end-of-candidates\r\n"
@@ -163,8 +168,25 @@ func TestCandidateFilter(t *testing.T) {
 	if got, _, _ := filterSDP(sdp, nil); got != sdp {
 		t.Fatalf("SDP changed without a filter: %q", got)
 	}
-	if _, _, err := filterSDP(strings.Repeat("a=candidate:1 1 udp 1 8.8.8.8 1 typ host\r\n", maxCandidates+1), nil); err == nil {
+	if _, _, err := filterSDP(media+strings.Repeat("a=candidate:1 1 udp 1 8.8.8.8 1 typ host\r\n", maxCandidates+1), nil); err == nil {
 		t.Fatal("accepted too many SDP candidates")
+	}
+	// Lines pion reads as candidates although they are not spelled as
+	// plainly (audit run-1, 4.2): a leading CR, tabs inside.
+	for _, line := range []string{
+		"\ra=candidate:1 1 udp 2122260223 10.9.8.7 9999 typ host\r\n",
+		"a=candidate:1 1 udp\tx\t8.8.8.8 2122260223 10.9.8.7 9999 typ host\r\n",
+	} {
+		got, _, err := filterSDP(media+line, publicAddress)
+		if err == nil && strings.Contains(got, "10.9.8.7") {
+			t.Errorf("%q: kept a private address: %q", line, got)
+		}
+	}
+	if _, _, err := filterSDP(media+strings.Repeat("\ra=candidate:1 1 udp 1 8.8.8.8 1 typ host\r\n", maxCandidates+1), nil); err == nil {
+		t.Fatal("accepted too many CR-prefixed SDP candidates")
+	}
+	if got := candidateAddress("candidate:1 1 udp\tx\t8.8.8.8 2122260223 10.9.8.7 9999 typ host"); publicAddress(got) {
+		t.Errorf("tabbed trickle candidate read as public %q", got)
 	}
 
 	r := remoteCandidates{keep: publicAddress}
@@ -374,5 +396,33 @@ func TestPublicIPOnSharedPort(t *testing.T) {
 	}
 	if !public {
 		t.Errorf("no candidate for the public IP in:\n%s", pc.LocalDescription().SDP)
+	}
+}
+
+// With Origins set, only those pages (and apps, which send no Origin) may
+// open signaling.
+func TestOrigins(t *testing.T) {
+	a, err := NewAPI(Options{Origins: []string{"crib.example"}, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts := httptest.NewServer(a.Handler(func(c *Conn) { c.Close() }))
+	defer ts.Close()
+	url := "ws" + strings.TrimPrefix(ts.URL, "http")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	for origin, ok := range map[string]bool{"": true, "https://crib.example": true, "https://evil.example": false} {
+		h := http.Header{}
+		if origin != "" {
+			h.Set("Origin", origin)
+		}
+		c, _, err := websocket.Dial(ctx, url, &websocket.DialOptions{HTTPHeader: h})
+		if (err == nil) != ok {
+			t.Errorf("origin %q: %v", origin, err)
+		}
+		if c != nil {
+			c.CloseNow()
+		}
+		time.Sleep(20 * time.Millisecond) // let the session slot free up
 	}
 }
