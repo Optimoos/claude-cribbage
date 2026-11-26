@@ -96,9 +96,10 @@ type AuthLimits struct {
 	CodesPerIP    int // sign-in codes asked for from one address
 	CodeEvery     time.Duration
 	// Connections: at most ConnsPerAddr from one address (as limited
-	// above) and Conns in all; one that has not signed in after
-	// LoginWithin is closed, or after SignInWithin if it started signing
-	// in (asked for a code, say).
+	// above) and Conns in all (when full, a new one displaces one that
+	// has not signed in); one that has not signed in after LoginWithin is
+	// closed, or after SignInWithin if it started signing in (asked for a
+	// code, say).
 	ConnsPerAddr int
 	Conns        int
 	LoginWithin  time.Duration
@@ -288,11 +289,21 @@ func (s *Server) ServeConn(t Transport) {
 		c.addr = addrKey(remoteIP(t))
 	}
 	s.cmu.Lock()
-	if s.shuttingDown() || len(s.allConns) >= s.authLim.Conns ||
-		(c.addr != "" && s.connsByAddr[c.addr] >= s.authLim.ConnsPerAddr) {
+	if s.shuttingDown() || (c.addr != "" && s.connsByAddr[c.addr] >= s.authLim.ConnsPerAddr) {
 		s.cmu.Unlock()
 		t.Close()
 		return
+	}
+	// A full server makes room by closing a connection that has not signed
+	// in, so connections that never sign in cannot lock everyone else out.
+	// The evicted one leaves allConns when its reader ends.
+	var evict *Conn
+	if len(s.allConns) >= s.authLim.Conns {
+		if evict = s.evictAnon(); evict == nil {
+			s.cmu.Unlock()
+			t.Close()
+			return
+		}
 	}
 	s.allConns[c] = struct{}{}
 	if c.addr != "" {
@@ -300,16 +311,22 @@ func (s *Server) ServeConn(t Transport) {
 	}
 	s.readers.Add(1)
 	s.cmu.Unlock()
+	if evict != nil {
+		evict.close()
+	}
 	defer s.readers.Done()
 	if c.addr != "" {
-		// Remote connections must sign in promptly, or soon after they
-		// start to (asking for a code, say).
+		// Remote connections must sign in promptly, or by SignInWithin if
+		// they start to (asking for a code, say). Only once: renewing it
+		// would let a connection that never signs in stay for ever.
 		var t *time.Timer
+		extended := false // only the timer's func uses it, one call at a time
 		t = time.AfterFunc(s.authLim.LoginWithin, func() {
 			if c.authed.Load() {
 				return
 			}
-			if c.signingIn.CompareAndSwap(true, false) {
+			if !extended && c.signingIn.Load() {
+				extended = true
 				t.Reset(s.authLim.SignInWithin - s.authLim.LoginWithin)
 				return
 			}
@@ -344,6 +361,30 @@ func (s *Server) ServeConn(t Transport) {
 		}
 		s.handle(c, m)
 	}
+}
+
+// evictAnon marks and returns a remote connection that has not signed in,
+// from the address holding the most such connections, so that a flood
+// from a few addresses displaces itself rather than people waiting for an
+// emailed code; nil if there is none. Callers hold cmu.
+func (s *Server) evictAnon() *Conn {
+	// shortcut: scans every connection, only when the server is full; keep
+	// per-address counts of anonymous connections if that ever shows up.
+	count := map[string]int{}
+	var best *Conn
+	for o := range s.allConns {
+		if o.addr == "" || o.authed.Load() || o.evicted.Load() || o.closed() {
+			continue
+		}
+		count[o.addr]++
+		if best == nil || count[o.addr] > count[best.addr] {
+			best = o
+		}
+	}
+	if best != nil {
+		best.evicted.Store(true)
+	}
+	return best
 }
 
 const protocolVersion = uint32(pb.ProtocolVersion_PROTOCOL_VERSION_CURRENT)
