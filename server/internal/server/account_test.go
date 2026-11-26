@@ -612,6 +612,7 @@ func TestPasskeyAddedNoticeAndSignOut(t *testing.T) {
 	if m := a.call(t, msg(&pb.SignOutOthers{})); m.GetAck() == nil {
 		t.Fatalf("sign out others: %v", m)
 	}
+	a.next(t, func(m *pb.ServerMessage) bool { return m.GetAccount() != nil && len(m.GetAccount().Passkeys) == 1 })
 	keys, err := srv.auth.Store.Passkeys(context.Background(), a.auth.UserId)
 	if err != nil || len(keys) != 1 || keys[0].Name != "Mine" {
 		t.Fatalf("passkeys left: %+v, %v", keys, err)

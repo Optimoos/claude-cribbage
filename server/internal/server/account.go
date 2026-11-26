@@ -206,6 +206,10 @@ func (s *Server) signOutOthers(c *Conn, id uint32) {
 	s.devices.dropApprovals(c.user.ID) // even this session's: it may have approved the intruder
 	s.closeUserConns(c.user.ID, c)
 	c.send(&pb.ServerMessage{RequestId: id, Body: &pb.ServerMessage_Ack{Ack: &pb.Ack{}}})
+	// Passkeys the ended sessions added are gone: show the list without them.
+	if err := s.pushAccount(ctx, c.user.ID, reply{}); err != nil {
+		s.log.Error("account", "user", c.user.ID, "err", err)
+	}
 }
 
 // closeUserConns closes every connection signed in as userID except keep,

@@ -161,29 +161,33 @@ A scoped security audit (server, protocol, transports, rate limits,
 `cmd/cribserver`, `server/web`) at `662d6e3` found one high and seven low
 findings, plus hardening notes. Its report lives outside the repo
 (`security-audit-skill/claude-cribbage/run-1/REPORT.md`). Everything below
-was fixed on the `security-audit-1` branch, each with a regression test
-that fails without the fix.
+was fixed on the `security-audit-1` branch. The eight findings each have a
+regression test, checked to fail without the fix (4.0 and 4.2 also against
+the auditors' own WebRTC harnesses); the hardening changes have tests
+where there is logic to test, not for the email key, admin socket,
+`.gitignore` or `innerHTML` escaping.
 
 | Report | Was | Fix (commit) |
 |---|---|---|
 | 4.0 high | Anonymous WebRTC connections renewed their sign-in time for ever and held the 5000-connection pool, locking out sign-in and Resume. | The extension is granted once; a full server admits a new connection by closing an anonymous one from the address holding the most (`c432996`). |
 | 4.1 | A device approval survived the approver's sign-out and admin recovery. | The claim requires the approver's session to outlive the new one; Sign out other devices and recovery drop pending approvals (`41a1081`). |
 | 4.2 | A CR-prefixed or tabbed ICE candidate passed the PublicOnly filter and the 32-candidate cap. | Filtered with pion's own SDP and candidate parsers (`2c8f9f6`). |
-| 4.3 | A few hundred addresses could fill the device sign-in table. | At most 5 waiting per address (`41a1081`). |
+| 4.3 | A few hundred addresses could fill the device sign-in table. | At most 5 waiting per address (`41a1081`). Still about 2000 addresses (IPv6 /64s) fill it, for 10 minutes; it only blocks device sign-in. |
 | 4.4 | An invite sent while the account was being deleted outlived it, and became a game after a restart. | Refused under `imu` once the account is marked deleted; Restore drops invites whose parties are gone (`0c1be46`). |
 | 4.5 | Deletion did not wait for a game being created for the user. | It waits for the user's reservations to drain (`0c1be46`). |
 | 4.6 | Logout left other connections on the same token signed in. | They are closed (`fd44ae3`). |
 | 4.7 | A join queued behind a game's end leaked a reservation. | Reserved on the game's actor (`aa9a58e`). |
-| §6 | A stolen session could add a passkey that outlived Sign out other devices; adding one raced recovery. | Passkeys record the adding session (new column, migrated on open), need it live to be added, and go when Sign out other devices ends it; the address is emailed (`abedce7`). |
+| §6 | A stolen session could add a passkey that outlived Sign out other devices; adding one raced recovery. | Passkeys record the adding session (new column, migrated on open), need it live to be added, and go when Sign out other devices ends it; the address is emailed (`abedce7`). Limits: a passkey whose adding session already ended (logged out, expired) is kept, so a thief who logs out first keeps theirs and the email is the real signal; and a passkey whose adding session is still live on another device goes too. |
 | §6 | The TCP transport allocated a claimed 1 MiB frame up front. | The buffer grows as bytes arrive (`2557695`). |
 | §6 | NAT64 addresses (`64:ff9b::/96`) were keyed by /64 and passed Public. | Treated as the IPv4 address they embed (`f881c34`). |
-| §6 | Any web page could open `/rtc` and spend its visitors' signaling slots. | With `-public-url` set, only its pages and the server's own may; apps send no Origin and still connect (`8c1f63e`). |
+| §6 | Any web page could open `/rtc` and spend its visitors' signaling slots. | With `-public-url` set, only its pages and the server's own may; apps send no Origin and still connect (checked: Godot 4.7.2's WebSocketPeer sends none) (`8c1f63e`). It takes effect on the next deploy, since `cribserver.conf` sets `public-url`; Pages preview URLs (`*.pages.dev`) are refused. |
 | §6 | An empty email key silently fell back to `<db>.email-key`; the admin socket was chmod'ed after creation; `.gitignore` missed `*.email-key` and `certs/`. | Refused; created under umask 077; added (`2c181d2`). |
 | §6 | Game commands were queued on any game ID before the seat check (woke games, revealed IDs). | Only the sender's games, or open ones to join; others are "not found" (`84a774c`). |
 | §6 | Each history first page recomputes records over every finished game. | 5, then one per 10 s per player (`e8356c0`). |
 | §6 | Server numbers went into `innerHTML` unescaped. | Escaped (`6a39566`). |
 
-Left as they are, by decision:
+Left as they are. The owner decided the first; the other two were judged
+not worth changing while fixing, and are open to reversal:
 
 - **SetEmail says when an address has stopped email** (`ErrEmailStopped`).
   It reveals only that an address opted out, and tells a player why no
