@@ -1828,6 +1828,11 @@ M44 found the bot's first card the main leak, mix it.
 - The interval does not rule out a reduction up to about 0.17 (the whole
   first-play leak), but the estimate is none, at a small cost.
 - `mixfirst` stays in the code, off by default; no level uses it.
+- **Decision (owner, 2026-11-25): proposal 9 stops here.** The bot stays
+  deterministic; the CFR blueprint is not built. The leak matters only
+  against an opponent who has modelled the bot's exact strategy, and no
+  acceptance test would show a gain from closing it. This ends the
+  proposal list: 7 and 8 stay deferred, 5 deferred (M34).
 - Times: head to head 36 and 35 minutes (estimates 45 to 60 and 35);
   exploit at 0.5% 3 h 6 min in two parts (estimate 2½ to 3 h; background
   commands stop at 2 hours, so `expert exploit -out` now resumes).
