@@ -12,13 +12,15 @@ type Level struct {
 }
 
 // Levels lists the difficulties from weakest to strongest; the last is the
-// full-strength bot, registered under BotName. Measured with the M14
-// bundle, paired against the heuristic: easy 51.0%, medium 54.8%, expert
-// 57.2%.
+// full-strength bot, registered under BotName. Measured with the bundle of
+// PLAN M41 (M14's tables, the exact keep table and the pegging policy),
+// paired against the heuristic: medium 50.5%, hard 54.4%, very hard 58.6%
+// (random, the easy level, wins 0.6%). The very hard level needs the
+// pegging policy: check a bundle with Bundle.Check before registering it.
 var Levels = []Level{
 	{"expert-easy", bots.Info{Label: "Medium", Blurb: "Looks a little ahead", Icon: "♝"}, Options{Effort: 10, NoKeepModel: true, NoPegModel: true, HeuristicDiscard: true}},
 	{"expert-medium", bots.Info{Label: "Hard", Blurb: "Searches the play", Icon: "♜"}, Options{Effort: 50, NoKeepModel: true, NoPegModel: true}},
-	{BotName, bots.Info{Label: "Very hard", Blurb: "Reads your hand and plays to win", Icon: "♛"}, Options{Effort: DefaultEffort}},
+	{BotName, bots.Info{Label: "Very hard", Blurb: "Reads your hand and plays to win", Icon: "♛"}, Options{Effort: DefaultEffort, ISSearch: true, ISLambda: 0.5, ISLambdaSet: true, CondDiscard: true}},
 }
 
 // Register makes every level of the bundle available by name. Bots created
@@ -28,7 +30,11 @@ func Register(b *Bundle) {
 	b.keepModel() // build shared state now rather than in the first game
 	for _, l := range Levels {
 		opt := l.Options
-		bots.Register(l.Name, func(uint64) bots.Bot { return NewBotWith(b, opt) })
+		bots.Register(l.Name, func(seed uint64) bots.Bot {
+			nb := NewBotWith(b, opt)
+			nb.SetSeed(seed)
+			return nb
+		})
 		bots.Describe(l.Name, l.Info)
 	}
 }

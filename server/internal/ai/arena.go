@@ -3,10 +3,12 @@ package ai
 import (
 	"context"
 	"math"
+	"math/rand/v2"
 	"sync"
 	"sync/atomic"
 
 	"cribbage/internal/bots"
+	"cribbage/internal/engine"
 )
 
 // ArenaResult summarizes a duplicate-deal match between two players, from
@@ -120,11 +122,85 @@ func DealSeed(seed uint64, i int64) uint64 {
 	return z ^ z>>31
 }
 
+// Pair is the result of one deal played twice, from A's side.
+type Pair struct {
+	Deal             int64 // index of the deal in the match
+	WinsA            int   // games A won: 0, 1 or 2
+	Margin           int   // A's final score less B's, summed over both games
+	Peg              int   // A's pegging points less B's, summed over both games
+	Hands            int   // hands dealt in both games
+	PointsA, PointsB int   // final scores summed over both games
+	PegA, PegB       int   // pegging points summed over both games
+	// Trace hashes every action in both games. Every bot here is
+	// deterministic and the deal fixes the cards, so two matches on the
+	// same deal played the same way exactly when their traces agree.
+	Trace uint64
+}
+
+// result is the pair as an ArenaResult of one pair.
+func (p Pair) result() ArenaResult {
+	return ArenaResult{
+		Pairs: 1, Games: 2, WinsA: p.WinsA,
+		PointsA: p.PointsA, PointsB: p.PointsB, PegA: p.PegA, PegB: p.PegB, Hands: p.Hands,
+		sumW2: float64(p.WinsA * p.WinsA),
+		sumD:  float64(p.Margin), sumD2: float64(p.Margin * p.Margin),
+		sumP: float64(p.Peg), sumP2: float64(p.Peg * p.Peg),
+	}
+}
+
+// reseed restarts a randomized bot's choices from a stream fixed by the
+// deal and the bot, so every deal replays exactly whichever worker plays
+// it, and changing the other bot leaves this one's stream as it was.
+func reseed(b bots.Bot, deal uint64, which uint64) {
+	for {
+		switch x := b.(type) {
+		case bots.Reseeder:
+			x.Reseed(DealSeed(deal, int64(which)))
+			return
+		case interface{ Unwrap() bots.Bot }:
+			b = x.Unwrap()
+		default:
+			return
+		}
+	}
+}
+
+// tracer passes a bot's choices through, mixing each into a shared hash.
+type tracer struct {
+	bots.Bot
+	h *uint64
+}
+
+func (t tracer) Unwrap() bots.Bot { return t.Bot }
+
+func (t tracer) Choose(o *engine.Observation, legal []engine.Action) engine.Action {
+	a := t.Bot.Choose(o, legal)
+	x := uint64(a.Kind)<<16 | uint64(a.Cards[0])<<8 | uint64(a.Cards[1])
+	*t.h = (*t.h ^ x) * 0x100000001b3
+	return a
+}
+
 // Arena plays games between bots made by newA and newB: games/2 deals
 // (rounded up), each played once with A in seat 0 and once with A in seat
 // 1. Each worker calls the constructors once, so bots need not be safe for
 // concurrent use.
 func Arena(ctx context.Context, newA, newB func(worker int) bots.Bot, games, workers int, seed uint64) (ArenaResult, error) {
+	return ArenaPairs(ctx, newA, newB, games, workers, seed, nil)
+}
+
+// ArenaPairs is Arena, also passing each pair to onPair (when not nil) as
+// it finishes. Pairs finish out of order; onPair is never called
+// concurrently. Cancelling ctx stops the match after the pairs in play.
+func ArenaPairs(ctx context.Context, newA, newB func(worker int) bots.Bot, games, workers int, seed uint64, onPair func(Pair)) (ArenaResult, error) {
+	return ArenaFrom(ctx, newA, newB, games, workers, seed, 0, 0, onPair)
+}
+
+// ArenaFrom is ArenaPairs with every game starting at a random hand: each
+// score uniform in [startMin, startMax], a random dealer and deal, all
+// fixed by the deal seed and the same for the pair's two games. A
+// startMax of 0 starts every game from 0-0 as usual. It concentrates a
+// match on the endgame, where small changes to it show.
+func ArenaFrom(ctx context.Context, newA, newB func(worker int) bots.Bot, games, workers int, seed uint64, startMin, startMax int, onPair func(Pair)) (ArenaResult, error) {
 	if workers < 1 {
 		workers = 1
 	}
@@ -138,27 +214,31 @@ func Arena(ctx context.Context, newA, newB func(worker int) bots.Bot, games, wor
 		wg.Add(1)
 		go func(w int) {
 			defer wg.Done()
-			a, b := newA(w), newB(w)
-			var local ArenaResult
-			defer func() {
-				mu.Lock()
-				total.add(local)
-				mu.Unlock()
-			}()
+			var h uint64
+			a, b := tracer{newA(w), &h}, tracer{newB(w), &h}
 			for ctx.Err() == nil {
 				i := next.Add(1) - 1
 				if i >= pairs {
 					break
 				}
 				s := DealSeed(seed, i)
-				var pr ArenaResult
-				var wins, margin, peg float64
+				pr := Pair{Deal: i}
+				var g2 float64
+				h = 0xcbf29ce484222325
 				for aSeat := 0; aSeat < 2; aSeat++ {
+					reseed(a, s, 0)
+					reseed(b, s, 1)
 					seats := [2]bots.Bot{a, b}
 					if aSeat == 1 {
 						seats = [2]bots.Bot{b, a}
 					}
-					r, err := bots.PlayGame(s, seats, nil)
+					var r bots.Result
+					var err error
+					if startMax > 0 {
+						r, err = bots.PlayFrom(startHand(s, startMin, startMax), s, seats, nil)
+					} else {
+						r, err = bots.PlayGame(s, seats, nil)
+					}
 					if err != nil {
 						mu.Lock()
 						if firstErr == nil {
@@ -167,29 +247,28 @@ func Arena(ctx context.Context, newA, newB func(worker int) bots.Bot, games, wor
 						mu.Unlock()
 						return
 					}
-					pr.Games++
 					if r.Winner == aSeat {
 						pr.WinsA++
-						wins++
 					}
 					pa, pb := r.Scores[aSeat], r.Scores[1-aSeat]
 					pr.PointsA += pa
 					pr.PointsB += pb
+					pr.Margin += pa - pb
 					pr.PegA += r.Pegged[aSeat]
 					pr.PegB += r.Pegged[1-aSeat]
+					pr.Peg += r.Pegged[aSeat] - r.Pegged[1-aSeat]
 					pr.Hands += r.Hands
-					peg += float64(r.Pegged[aSeat] - r.Pegged[1-aSeat])
-					g := float64(pa - pb)
-					margin += g
-					pr.sumG2 += g * g
+					g2 += float64((pa - pb) * (pa - pb)) // for the unpaired margin interval
 				}
-				pr.Pairs = 1
-				pr.sumW2 = wins * wins
-				pr.sumD = margin
-				pr.sumD2 = margin * margin
-				pr.sumP = peg
-				pr.sumP2 = peg * peg
-				local.add(pr)
+				pr.Trace = h
+				mu.Lock()
+				res := pr.result()
+				res.sumG2 = g2
+				total.add(res)
+				if onPair != nil {
+					onPair(pr)
+				}
+				mu.Unlock()
 			}
 		}(w)
 	}
@@ -198,4 +277,22 @@ func Arena(ctx context.Context, newA, newB func(worker int) bots.Bot, games, wor
 		firstErr = ctx.Err()
 	}
 	return total, firstErr
+}
+
+// startHand is the game a deal seed starts from in ArenaFrom. Both games
+// of a pair start from it; swapping the bots' seats gives each the other's
+// place.
+func startHand(seed uint64, lo, hi int) *engine.Game {
+	rng := rand.New(rand.NewPCG(seed, 0x57a7))
+	var deck [52]engine.Card
+	for i := range deck {
+		deck[i] = engine.Card(i)
+	}
+	rng.Shuffle(52, func(i, j int) { deck[i], deck[j] = deck[j], deck[i] })
+	var hands [2][6]engine.Card
+	copy(hands[0][:], deck[0:6])
+	copy(hands[1][:], deck[6:12])
+	scores := [2]int{lo + rng.IntN(hi-lo+1), lo + rng.IntN(hi-lo+1)}
+	dealer := rng.IntN(2)
+	return engine.NewHand(seed, dealer, scores, hands, deck[12])
 }

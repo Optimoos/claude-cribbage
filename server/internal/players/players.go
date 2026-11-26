@@ -15,7 +15,16 @@ import (
 // registered bot name, a network model file (played greedily), or an
 // expert bundle file, optionally followed by @ and comma-separated options:
 // a number (opponent hands searched per pegging decision; 0 for all),
-// nokeep, nopeg, heurdiscard, pegtemp=X.
+// nokeep, nopeg, heurdiscard, pegtemp=X, is (information-set pegging
+// search), nofixes (M14's play, without
+// proposal 6's small fixes), noexact (ignore the exact keep
+// table), keepeps=X (its mix with the softmax), nopegpol (ignore the fitted
+// pegging policy), pegmix=X (mix the softmax on points into it at weight
+// X), cond (discards conditioned on the opponent's likely
+// hands), condpeg (and their pegging, with a shape-pair table), islambda=X (information-set search, the opponent's best
+// reply at weight X against the policy), mixfirst=X (mix the first play of
+// a hand among plays within X win probability of the best), and the test oracles oracle=six
+// and oracle=hand (see expert.Oracle).
 //
 //	models-expert/expert.bin@100,nokeep
 func Resolve(spec string) (func(worker int) bots.Bot, error) {
@@ -25,30 +34,20 @@ func Resolve(spec string) (func(worker int) bots.Bot, error) {
 	path, opt := spec, expert.Options{Effort: expert.DefaultEffort}
 	if i := strings.LastIndexByte(spec, '@'); i >= 0 {
 		path = spec[:i]
-		for _, o := range strings.Split(spec[i+1:], ",") {
-			var err error
-			switch {
-			case o == "nokeep":
-				opt.NoKeepModel = true
-			case o == "nopeg":
-				opt.NoPegModel = true
-			case o == "heurdiscard":
-				opt.HeuristicDiscard = true
-			case strings.HasPrefix(o, "pegtemp="):
-				opt.PegTemp, err = strconv.ParseFloat(o[len("pegtemp="):], 64)
-			default:
-				opt.Effort, err = strconv.Atoi(o)
-				if opt.Effort < 0 {
-					err = fmt.Errorf("negative effort")
-				}
-			}
-			if err != nil {
-				return nil, fmt.Errorf("%q: bad option %q: %v", spec, o, err)
-			}
+		var err error
+		if opt, err = ParseOptions(spec[i+1:]); err != nil {
+			return nil, fmt.Errorf("%q: %v", spec, err)
 		}
 	}
 	if b, err := expert.LoadBundle(path); err == nil {
-		return func(int) bots.Bot { return expert.NewBotWith(b, opt) }, nil
+		if err := b.Check(opt); err != nil {
+			return nil, fmt.Errorf("%q: %v", spec, err)
+		}
+		return func(w int) bots.Bot {
+			nb := expert.NewBotWith(b, opt)
+			nb.SetSeed(uint64(w))
+			return nb
+		}, nil
 	} else if path != spec {
 		return nil, err
 	}
@@ -57,4 +56,71 @@ func Resolve(spec string) (func(worker int) bots.Bot, error) {
 		return nil, fmt.Errorf("%q is neither a bot (%v), a bundle nor a loadable model: %w", spec, bots.Names(), err)
 	}
 	return func(w int) bots.Bot { return ai.NewAgent(net, 0, uint64(w)) }, nil
+}
+
+// ParseOptions reads the comma-separated options after a bundle's @ (see
+// Resolve) on top of the default effort.
+func ParseOptions(s string) (expert.Options, error) {
+	opt := expert.Options{Effort: expert.DefaultEffort}
+	for _, o := range strings.Split(s, ",") {
+		var err error
+		switch {
+		case o == "nokeep":
+			opt.NoKeepModel = true
+		case o == "nopeg":
+			opt.NoPegModel = true
+		case o == "heurdiscard":
+			opt.HeuristicDiscard = true
+		case o == "is":
+			opt.ISSearch = true
+		case o == "nofixes":
+			opt.NoSmallFixes = true
+		case o == "noexact":
+			opt.NoExactKeep = true
+		case o == "cond":
+			opt.CondDiscard = true
+		case o == "condpeg":
+			opt.CondDiscard, opt.CondPeg = true, true
+		case o == "nopegpol":
+			opt.NoPegPolicy = true
+		case strings.HasPrefix(o, "pegmix="):
+			opt.PegMix, err = strconv.ParseFloat(o[len("pegmix="):], 64)
+			opt.PegMixSet = true
+		case strings.HasPrefix(o, "islambda="):
+			opt.ISLambda, err = strconv.ParseFloat(o[len("islambda="):], 64)
+			opt.ISLambdaSet, opt.ISSearch = true, true
+		case strings.HasPrefix(o, "mixfirst="):
+			opt.MixFirst, err = strconv.ParseFloat(o[len("mixfirst="):], 64)
+		case strings.HasPrefix(o, "keepeps="):
+			opt.KeepEps, err = strconv.ParseFloat(o[len("keepeps="):], 64)
+			opt.KeepEpsSet = true
+		case o == "oracle=six":
+			opt.Oracle = expert.OracleSix
+		case o == "oracle=hand":
+			opt.Oracle = expert.OracleHand
+		case strings.HasPrefix(o, "pegtemp="):
+			opt.PegTemp, err = strconv.ParseFloat(o[len("pegtemp="):], 64)
+		default:
+			opt.Effort, err = strconv.Atoi(o)
+			if opt.Effort < 0 {
+				err = fmt.Errorf("negative effort")
+			}
+		}
+		if err != nil {
+			return opt, fmt.Errorf("bad option %q: %v", o, err)
+		}
+	}
+	return opt, nil
+}
+
+// SeesHidden reports whether spec is a test oracle that sees some of the
+// opponent's hidden cards (oracle=hand or oracle=six). Its results bound
+// what better inference could be worth; they are not a measure of play.
+func SeesHidden(spec string) bool {
+	i := strings.LastIndexByte(spec, '@')
+	if i < 0 {
+		return false
+	}
+	opt, err := ParseOptions(spec[i+1:])
+	return err == nil && opt.Oracle != expert.NoOracle
 }

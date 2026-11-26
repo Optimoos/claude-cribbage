@@ -1250,6 +1250,595 @@ the key cannot open a person's account. Protocol version 2.
 
 ---
 
+# Expert bot improvements (M32 onward)
+
+Started 2026-11-23 from `docs/BOT_IMPROVEMENT_PROPOSALS.md` (ten proposals,
+four enablers E1 to E4). The goal is general strength: a change is accepted
+on its paired result head to head against the previous expert, and must not
+lose ground against the guards (`heuristic`, `heuristic2`, `models-big`).
+`models-expert/expert.bin` (M14) stays as the reference bundle. Runs and
+their pair files live in `server/runs/` (gitignored); the commands below
+regenerate them.
+
+### M32: A more sensitive test harness (E1)
+
+**Built (2026-11-23):** `cmd/gauntlet` and `internal/ai`.
+- `-save-pairs DIR` writes every deal of a match (wins, margin, pegging,
+  hands, a hash of the play) to `DIR/<opponent>.csv`. `-base DIR` plays a
+  candidate on the same deals and reports its change deal by deal. Every
+  bot is deterministic and the engine's generator is used only for dealing,
+  so a deal both played the same way differs by exactly zero; only deals
+  where the candidate deviated add variance. The random bot is reseeded per
+  deal so it couples too.
+- `-sprt LO,HI` stops a match once a GSPRT (normal approximation, variance
+  from the data) decides between the two win rates, or with `-base` the two
+  changes. Defaults: alpha 0.005 (0.05 over ten candidates), beta 0.05, no
+  decision before 2000 pairs.
+- Evaluation seeds default to 900001; seeds below 900000 are for building
+  tables, so tables are never scored on the deals they came from.
+- A/A: the expert against its own saved baseline gives exactly zero, with
+  no deviating deal, over 1000 deals; so does `heuristic2` against
+  `heuristic` and `random`.
+- For the head-to-head gate the plain paired arena already has this
+  property (a deal played identically splits one win each), so coupling
+  mainly helps the guards. There the head-to-head needs about 100k pairs to
+  resolve 0.2 points: per-pair standard deviation about 0.19 (M14 round 2).
+
+Baselines, `gauntlet -bot models-expert/expert.bin@400 -n 40000 -save-pairs
+runs/base-m14` (seed 900001, 24 workers at nice 19, other jobs running):
+
+| Expert@400 v | Win % | Margin per game | Pegging per hand |
+|---|---|---|---|
+| `heuristic` | 57.22 ± 0.32 | +1.95 ± 0.09 | +0.249 ± 0.007 |
+| `heuristic2` | 55.98 ± 0.31 | +1.36 ± 0.09 | +0.159 ± 0.007 |
+| `models-big` | 56.00 ± 0.32 | +1.97 ± 0.10 | +0.168 ± 0.007 |
+| itself `@400,nokeep` | 51.98 ± 0.26 | +0.90 ± 0.07 | +0.087 ± 0.006 |
+| itself `@400,heurdiscard` | 51.53 ± 0.28 | +0.13 ± 0.08 | +0.089 ± 0.005 |
+| itself `@25` | 51.56 ± 0.26 | +0.66 ± 0.07 | +0.069 ± 0.006 |
+| itself `@400,nopeg` | 50.07 ± 0.20 | +0.04 ± 0.05 | +0.003 ± 0.004 |
+| itself `@0` (every world) | 49.92 ± 0.15 | −0.06 ± 0.03 | −0.004 ± 0.003 |
+
+- The M14 figures reproduce on held-out seeds (57.16 and 55.85 then).
+- The keep model is worth about 2 points and the discard tables about 1.5.
+- The pegging-play likelihood is worth nothing measurable (M13 reported
+  +0.34 ± 0.28 from a run ten times smaller), so proposal 2 must bring a
+  genuinely better model to gain anything.
+- Effort 400 plays as well as searching every world: search is saturated.
+- Times: 40k games took 5.5 to 6 minutes against a guard, 11 minutes
+  expert against expert and 25 at effort 0; the whole run 83.5 minutes.
+  Games average 9.05 hands.
+
+### M33: Speed (E3, first part)
+
+**Built (2026-11-23):** `internal/expert` (`keep.go`, `search.go`).
+- The keep model is a dense table: six sorted ranks are numbered by the
+  combinatorial number system (`rank6`, 18,564 slots) instead of a map
+  key. A second layout, by kept shape and thrown pair (1.3 MB), serves the
+  search's opponent weights directly. The per-hand cache of those weights
+  is an array with generation stamps.
+- Opponent shows are scored only for the worlds searched, not for every
+  world enumerated.
+- Search nodes pass by value: a pointer to a copied node escaped to the
+  heap through the recursion, one allocation per node (15% of the time).
+- The benchmark game went from 109 to 61 ms (one thread, loaded machine).
+- Identical play: coupled against the saved M14 baseline, 5000 deals with
+  `heuristic`, none deviated.
+- The double-dummy pegging database is left for proposals 1 and 4, whose
+  needs decide its shape. Discards (2.5 ms) were not touched.
+
+Latency on the production t4g.micro (Graviton, one worker, nice 19, 200
+games against `heuristic`, `GOARCH=arm64`):
+
+| Build | Pegging mean / p99 | Discard mean / p99 |
+|---|---|---|
+| M14 | 4.4 / 33.6 ms | 2.5 / 5.9 ms |
+| M33 | 1.6 / 14.1 ms | 2.5 / 5.9 ms |
+
+Map access was dearer on ARM than on x86, so the gain there is 2.7x. The
+working budget is about 200 ms per decision on one core.
+
+### M34: Oracles that bound the headroom (E2)
+
+**Built (2026-11-23):** expert options `oracle=six` and `oracle=hand`
+(test only: `bots.Watcher` hands the bot the game), and `cmd/expert
+rollout`. `engine.NewHand` starts a game at a given deal.
+- `oracle=hand` searches only the opponent's real hand (clairvoyant
+  pegging). `oracle=six` searches the hands four of their six dealt cards
+  make, weighted by the keep model's chance of keeping each from those
+  six. Discards are unchanged.
+- `rollout` takes discard decisions from expert self-play (seed 950001),
+  and for each deals 1000 opponent sixes and starters shared by all
+  options. The opponent discards with the expert's discarder (it cannot
+  see mine), both players peg at effort 25, and the hand's end is valued
+  through the win table. Each policy's regret is the best option's value
+  less its choice's: "naive" picks the best on all samples (biased high),
+  "split" picks on one half and scores on the other (biased low).
+
+Pegging oracles, 40k games each (seed 900001):
+
+| `@400` with | v expert@400 | Pegging/hand | v `heuristic` (change, coupled) |
+|---|---|---|---|
+| `oracle=hand` | 70.38 ± 0.34 | +0.994 ± 0.006 | +18.62 ± 0.40 |
+| `oracle=six` | 69.36 ± 0.34 | +0.957 ± 0.006 | +17.95 ± 0.39 |
+
+- Hidden cards are worth about a point of pegging per hand. That is a
+  ceiling on what any inference or search change could reach, not an
+  estimate: the doc's "10 to 25% reachable" would mean 2 to 7 win points
+  from pegging alone, more than its own realistic total of 1 to 3 for all
+  proposals together. The kill rule for proposals 1, 2 and 9 (gap under
+  0.5) passes, but at this size it would pass for almost any oracle.
+- Proposal 1 corrects strategy fusion, a structural error, which no oracle
+  here measures; it has to be tested directly.
+- The six-card oracle is not a bound on proposal 3. It shows that once the
+  six cards are known the current keep model recovers nearly everything
+  (0.957 of 0.994), but proposal 3 sharpens the keep model when the six is
+  unknown, as in play. Proposal 3 is cheap, so it is judged on its own
+  test (probability of the true keep on held-out hands, then games).
+
+Rollout discards, `expert rollout -decisions 2000 -samples 1000 -out
+runs/e2-rollout.csv` (49 minutes, 24 workers). Regret per decision:
+
+| Policy | Agrees with best | Win % naive | Win % split | Points naive | Points split |
+|---|---|---|---|---|---|
+| expert | 82.8% | 0.090 ± 0.022 | 0.042 ± 0.023 | 0.078 ± 0.012 | 0.061 ± 0.012 |
+| `heuristic2` | 79.8% | 0.181 ± 0.042 | 0.132 ± 0.041 | 0.081 ± 0.011 | 0.063 ± 0.011 |
+| `heuristic` | 77.8% | 0.249 ± 0.050 | 0.200 ± 0.050 | 0.086 ± 0.011 | 0.069 ± 0.011 |
+
+- Regret in points cannot tell the expert from the heuristic, which is 1.5
+  win points worse, so the doc's kill rules in points (0.02, 0.04) are not
+  applied. Win-probability regret separates them.
+- Calibration: at 9.05 discards per player per game, the heuristic's
+  extra regret is (0.200 − 0.042) × 9.05 = 1.43 win points (naive 1.44),
+  against 1.53 ± 0.28 measured for `@400,heurdiscard`. The oracle is
+  calibrated.
+- The expert's own regret is therefore 0.4 to 0.8 win points per game:
+  the combined ceiling for proposals 4 and 5 against an expert-like
+  opponent, with playouts at effort 25.
+- `runs/e2-rollout.csv` holds every option's values, the offline test set
+  for proposal 4; the command above regenerates it.
+- Times: oracle matches 1 to 4 minutes each (an oracle searches about 30x
+  less per decision), rollouts 49 minutes; the whole run 59 minutes
+  against an estimate of 78.
+
+Kill rules, applied:
+- Proposals 1 and 2: proceed; proposal 2's ablation (`nopeg` = 0) means
+  the current likelihood gives nothing to build on.
+- Proposal 3: proceed, judged on its own test.
+- Proposal 4: proceed, with its gain capped by the 0.4 to 0.8 measured.
+- Proposal 5: defer; it would only add to what 4 leaves of that ceiling,
+  at the cost of a Python step.
+- Proposal 9: unchanged, last.
+
+### M35: A persistent corpus (E4)
+
+**Built (2026-11-23):** `expert corpus` plays games between any two player
+specs and saves every hand in full: both deals, discards, starter, plays
+in order, every scoring step, shows, crib, pegging and the winner (a
+64-byte `HandRecord`, file magic `CRIBCORP1`).
+- Game i deals from `ai.DealSeed(seed, i)`, so a corpus does not depend on
+  the number of workers. `-explore` makes a seat discard at random on a
+  share of hands (flagged), and `-start LO,HI` starts games at random
+  scores to cover the endgame (flagged synthetic).
+- `CorpusSelfPlay` turns a corpus into the `SelfPlay` the table builders
+  take, so tables can be rebuilt without replaying games; the test checks
+  it matches `Collect` exactly.
+- Size and speed: 10k games are about 90k hands and 5.8 MB, 1.5 to 3
+  minutes at `@400` on 24 workers under load.
+
+### M36: The exact keep table (proposal 3)
+
+**Built (2026-11-23):** `expert keepx` runs the bundle's own discarder on
+every six-card hand, on both sides, at 30-30, and stores the share of
+each rank shape's hands that keep each option (the `keepx` table, 3.4
+minutes on 24 workers: 18,395 rank shapes, 962,988 suit classes). The
+opponent model becomes (1-eps)·exact + eps·softmax; `noexact` and
+`keepeps=X` are the options.
+
+Probability of the real keep in held-out games (`runs/p3-keepcheck.txt`,
+mean probability and mean log probability):
+
+| Opponent | Softmax | eps 0.2 | eps 0.3 | eps 0.5 |
+|---|---|---|---|---|
+| self (expert) | 0.644 (-0.926) | 0.765 (-0.753) | 0.750 (-0.743) | 0.720 (-0.752) |
+| `heuristic` | 0.635 (-0.866) | 0.712 (-0.880) | 0.702 (-0.835) | 0.683 (-0.796) |
+| `heuristic2` | 0.634 (-0.854) | 0.705 (-0.889) | 0.696 (-0.841) | 0.678 (-0.796) |
+| `models-big` | 0.607 (-1.034) | 0.658 (-1.163) | 0.651 (-1.096) | 0.639 (-1.024) |
+
+- The pure table (eps 0) is sharpest but fatal on log-likelihood when an
+  opponent keeps something the expert would not. At eps 0.5 it beats the
+  softmax for every opponent, including bots it was not built from.
+
+Games (`@400` with the table v `@400` without, both `nofixes`):
+
+| eps | Games | Head to head | Pegging/hand |
+|---|---|---|---|
+| 0.3 | 40k | 50.11 ± 0.17 | |
+| 0.5 | 40k | 50.15 ± 0.16 | +0.004 ± 0.003 |
+| 0.5, sequential test 0 v +0.3 | 71k (stopped) | 50.11 ± 0.12 | +0.004 ± 0.002 |
+
+- The sequential test accepted +0 after 35,656 pairs. Coupled guards
+  against `runs/base-m14` were flat at both eps (eps 0.5: heuristic -0.03,
+  heuristic2 +0.12, models-big -0.04, each ± 0.17).
+- **Decision:** `DefaultKeepEps` is 0.5. The table passes its own test,
+  costs nothing at run time, and gives a small real pegging gain, but no
+  win-rate gain this size of test can see. It also feeds proposals 2 and
+  4.
+
+### M37: Proposal 6's small fixes, and endgame starts
+
+**Built (2026-11-23):**
+- Heels are scored before pegging in discard values from 90 up (a jack
+  starter can win the game for the dealer at the cut).
+- When both players can peg out in the hand, the discard values who gets
+  there first (`pegOutFirst`) instead of calling it even.
+- The pegging search's terminals add the opponent's expected nobs and
+  flushes from hidden cards (`hiddenSuits`).
+- From 90 up, the crib at pegging terminals depends on the world
+  (`worldCribs`): what they kept says what they threw.
+- `nofixes` restores M14's play exactly (0 deviations against
+  `runs/base-m14`), so a same-binary opponent can play without the fixes.
+- `gauntlet -start LO,HI` (`ai.ArenaFrom`) starts every pair at a random
+  hand with both scores in [LO, HI]; both games of a pair start from it
+  with the seats swapped.
+
+| `@400` v `@400,nofixes` | Games | Head to head | Pegging/hand |
+|---|---|---|---|
+| Normal starts | 40k | 50.15 ± 0.10 | +0.000 ± 0.002 |
+| Starts at 90-120 | 40k | 50.09 ± 0.09 | +0.003 ± 0.009 |
+
+- Coupled guards against `runs/base-m14`: heuristic -0.00, heuristic2
+  +0.02, models-big -0.08 (each ± 0.10; 42% of pairs deviated).
+- About +0.1, inside the proposal's +0.05 to +0.15. The fixes stay on.
+- Times: 8 minutes for the normal head to head, 40 seconds for the
+  endgame one (games starting at 90+ last about a hand and a half).
+
+### M38: A fitted opponent pegging policy (proposal 2)
+
+**Built (2026-11-23):** a conditional logit on each play the opponent could
+make (`pegpolicy.go`), fitted by Newton's method to corpus plays (`expert
+pegfit`) and stored as the bundle's `pegpol` table. It replaces the softmax
+on immediate points in weighting worlds; `nopegpol` turns it off.
+- Features: points scored, the expected points of the reply (over unseen
+  ranks), the count left at 5, 10, 21 or 22-30, the card's value, leads
+  (value, fives), and from the rest of the hand: a pair held (and leading
+  from one), a card making 15 with it, the share of the rest still
+  playable, and holding nothing playable. Reply risk takes its belief from
+  the public cards only, in the fit and in play alike.
+- Public features are computed once per opponent play for all 13 ranks;
+  only the five hand features are worked out per world, so weighting costs
+  no measurable time (ARM: 1.9 ms per pegging decision with or without).
+- Fitted to 1.42M decisions from 30k games (expert self-play, expert v
+  `heuristic`, expert v `models-big`, `runs/p2/`, seeds 200001-220001).
+
+Held-out log-likelihood per decision (softmax at temperature 1 is the old
+model; the best temperature for it is 1):
+
+| Decisions | Fitted | Softmax |
+|---|---|---|
+| expert self-play (new seed) | -0.734 | -0.888 |
+| `heuristic2` (not in the fit) | -0.582 | -0.833 |
+
+The proposal's own test, the share of world weight on the opponent's real
+hand (mean log, `pegcheck_test.go`, 400 games of each bot):
+
+| Opponent | Gain | Positions where the share falls below 1/e of the old one |
+|---|---|---|
+| `heuristic2` (held out) | +0.204 | 0.7% |
+| `heuristic` | +0.135 | 2.8% |
+| `models-big` | +0.067 | 5.0% |
+| `random` | -0.317 | |
+
+Games, `@400` with the policy v `@400` (both with proposal 6's fixes):
+- Head to head: **50.71 ± 0.35**, margin +0.31 ± 0.09, pegging +0.037 ±
+  0.007; the sequential test accepted +0.3 after 8,918 pairs.
+- Coupled guards (`nofixes`, against `runs/base-m14`): `heuristic` -0.13 ±
+  0.26, `heuristic2` **+0.93 ± 0.27** (pegging +0.046), `models-big` -0.31 ±
+  0.29.
+- The gain is large where the policy models the opponent well (the expert
+  itself; `heuristic2`'s leads) and absent against `heuristic`, whose plays
+  the old points-only model already described. Against the network it may
+  cost a little: a sharper model is more confidently wrong about an
+  opponent it does not fit, which matters for humans.
+- `pegmix=X` mixes the old softmax into each play's chance at weight X. At
+  0.2 the bad tail against `models-big` falls from 5.0% to 1.8% and the mean
+  gain there rises to +0.078 (heuristic2 +0.179, heuristic +0.125).
+
+With `pegmix=0.2`:
+- Head to head v `@400`: **51.17 ± 0.47**, margin +0.43 ± 0.12, pegging
+  +0.042 ± 0.010 (stopped at H1 +0.3 after 4,594 pairs).
+- Guards: `heuristic` -0.14 ± 0.25, `heuristic2` **+1.00 ± 0.25**,
+  `models-big` -0.20 ± 0.27.
+- Both head-to-head runs stopped at H1 of the sequential test, so their
+  estimates read high and their ± is not a fixed-sample interval; the
+  guards are fixed-length (40k games each).
+- **Decision:** the policy is on whenever the bundle has one, mixed at 0.2
+  (`DefaultPegMix`). No guard loses significantly; the mix costs nothing
+  measurable and protects against opponents unlike the fitted bots.
+- Times: the corpus took 9 minutes, the fit 11 seconds.
+
+### M39: Information-set pegging search (proposal 1)
+
+**Built (2026-11-23):** `is` searches the worlds together (`issearch.go`):
+a node is the public play history and the worlds still consistent with it;
+at my nodes one card is chosen for all of them by the weighted sum; at the
+opponent's nodes each world's opponent plays the card worst for me.
+Worlds are regrouped after every play by the public state that follows.
+With `islambda=X` and a pegging policy, the opponent's nodes blend best
+reply (weight X) with the policy's expectation, and the worlds below an
+opponent play are weighted by the policy's chance of that play, so my
+later choices infer from it as the root does.
+- Checked: with one world it equals minimax exactly (3,000 positions); the
+  blend matches a brute-force reference over 2-4 worlds (1,600 root plays),
+  and that test fails if the inner reweighting is dropped.
+- Scratch comes from a pooled stack buffer sized per decision, so a
+  decision allocates nothing.
+
+Latency on the production t4g.micro, one game at a time, pegging decisions:
+
+| Bot | Mean | p99 | Max |
+|---|---|---|---|
+| `@400` | 1.9 ms | 17 ms | 22 ms |
+| `@400,is` | 6.8 ms | 67 ms | 91 ms |
+| `@400,islambda=0.5` (policy computed once per node) | 12.4 ms | 134 ms | 161 ms |
+
+Games:
+
+| Bot | Opponent | Games | Head to head | Margin | Pegging/hand |
+|---|---|---|---|---|---|
+| `@400,is` | `@400` | 32k (stopped, H0 v +0.5) | 50.12 ± 0.28 | +0.15 ± 0.07 | +0.015 ± 0.006 |
+| policy `@400,is` | policy `@400` | 12k (stopped, H1 +0.3) | **51.07 ± 0.45** | +0.53 ± 0.12 | +0.053 ± 0.010 |
+| policy `@400,islambda=0.5` | policy `@400,is` | 28k (stopped, H1 +0.3) | **50.50 ± 0.27** | +0.16 ± 0.07 | +0.017 ± 0.006 |
+
+- Both runs were stopped by the sequential test, so their estimates read
+  high (a test stopped at H1 stops on a run of good luck) and the ± is not
+  a fixed-sample interval. The fixed-length check of the whole stack is
+  M41's.
+- Alone the search gains little; on top of proposal 2 it gains a point.
+  At my nodes the search averages over the worlds, so it is only as good
+  as their weights, and proposal 2 is what makes them good.
+- The blend adds about half a point more: an opponent who is not
+  clairvoyant does not always find my worst case, and planning for the
+  plays they will actually make pays. (These runs used the policy without
+  the mix.) Smaller λ is not yet tried.
+- The whole stack is measured at fixed length in M41.
+
+### M40: Discards conditioned on the opponent's hand (proposal 4)
+
+**Built (2026-11-23):**
+- `cond`: once per discard decision, every (kept four, thrown pair) the
+  opponent may hold is weighted by the ways it can be dealt from the 46
+  unseen cards and by the keep model, filling a table by starter rank,
+  their show and their pair (about 165k combinations, shared by the 15
+  options). Their show then follows exactly from their four and the
+  starter, the crib from my pair, their pair and the starter, and the
+  pone's total keeps the two joint. Ranks only, with hidden nobs at its
+  chance of a suit match; my own discarded jack's nobs is exact. Checked
+  against sampling (means within 0.01 to 0.02 points).
+- `condpeg`: a shape-pair pegging table (`expert pegpair`, every pair of
+  kept shapes played 4 times with the pegger at effort 25 from 0-0, 1 h 4
+  min, 27 MB), and each option's pegging distributions shifted by how the
+  opponent's likely shapes move its means, relative to the table's average
+  opponent.
+- `expert rollcheck` scores discarders on stored rollouts; `expert
+  rollpair` finds where two discarders disagree in self-play and plays out
+  just those two choices on shared samples.
+
+| Test | `cond` | `condpeg` |
+|---|---|---|
+| Stored rollouts (2,000 decisions): decisions changed | 93 | 120 |
+| ... change in rollout win % per decision | +0.011 ± 0.007 | +0.001 ± 0.018 |
+| ... regret | 0.069 ± 0.014 (from 0.081) | 0.080 ± 0.021 |
+| `rollpair`: disagreements in 40k decisions | 1,966 (4.9%) | |
+| ... gain where they differ, win % | **+0.153 ± 0.035** | |
+
+- `cond` is a real but small gain: 4.9% of discards change, each by 0.15
+  win points, so about +0.07 win points per game, too small for games to
+  see. It costs 25 ms per discard on the t4g.micro (2.6 ms before).
+- `condpeg` is unresolved rather than refuted: +0.001 ± 0.018 covers all
+  of `cond`'s gain. With 4 samples a pair's mean has a standard deviation
+  of about 1.2 points, which can swamp the interaction it is meant to
+  carry. A smoothed model of the interaction, or many more samples, might
+  do better; neither is pursued now.
+- **Decision:** `cond` goes into the top level; `condpeg` and its 27 MB
+  table stay out.
+- Times: rollcheck 2 to 3 minutes per set of policies; rollpair 38
+  minutes (35 of them playouts) against an estimate of 15 to 20, slowed by
+  three other jobs.
+
+### M41: The whole stack, and proposal 6's endgame parts
+
+The stack: the exact keep table (eps 0.5), the pegging policy mixed at 0.2,
+IS search at λ 0.5, `cond` discards and proposal 6's small fixes, in one
+bundle (`runs/final/expert-v1.bin`: M14's tables plus `keepx` and
+`pegpol`), spec `@400,islambda=0.5,cond`.
+
+Fixed length, 40k games (seed 950001) against M14's play
+(`expert.bin@400,nofixes`): **52.13 ± 0.27**, margin +0.94 ± 0.07 per game,
+pegging +0.096 ± 0.006 per hand. About two points, at the top of the
+proposals' own realistic range (+1 to +3).
+
+Proposal 6's endgame parts:
+- **Win table:** 100k games of the stack started at random scores in
+  60-120 (210k hands, 30 minutes) rebuilt W where both scores are 70 or
+  more (`expert wintable`). Held-out log loss on 20k more such games:
+  0.28217 for M14's table, 0.28182 rebuilt (window 500 hands; worst 10x10
+  bin |z| 3.9 to 2.9). In 40k games started at 90-120 the two tables play
+  **49.98 ± 0.05**: no difference. M14's table is already calibrated in
+  the endgame; it stays.
+- **Need-aware discard solver:** not built. On the stored rollouts the
+  expert's discard regret is 0.149 win % per decision when either score is
+  90 or more (495 decisions) against 0.058 below, so about half the
+  remaining discard regret is in the endgame. But at run time a rollout of
+  ~50 samples per option has about 7% noise per value against differences
+  of about 0.15%; it cannot resolve them within the latency budget.
+
+Guards, 20k games each, coupled against `runs/base-m14`:
+
+| Opponent | Win % | Change from M14 | Margin change | Pegging change |
+|---|---|---|---|---|
+| `heuristic` | 58.57 ± 0.46 | **+1.21 ± 0.46** | +0.48 ± 0.11 | +0.038 ± 0.009 |
+| `heuristic2` | 58.47 ± 0.45 | **+2.31 ± 0.47** | +0.93 ± 0.12 | +0.086 ± 0.009 |
+| `models-big` | 57.27 ± 0.45 | **+1.34 ± 0.49** | +0.52 ± 0.13 | +0.046 ± 0.010 |
+
+- Every guard improves, by 1.2 to 2.3 points; the stack generalizes beyond
+  the expert-like opponents its policy was fitted to.
+- Times: head to head 41 minutes, guards 31 minutes (about 16 to 37 games
+  a second under load against estimates of 2 to 2.5 hours in all).
+
+### M42: Tables rebuilt from the stack's own play (proposal 10)
+
+- 150k self-play games of the stack (`@400,is,cond`, seed 500001; 1.37M
+  hands, 1 h 44 min against an estimate of 3 to 3.5 hours as the machine's
+  other load fell) rebuilt the discard tables and keep temperatures
+  (`expert build -corpus`), keeping the win table.
+- Stored rollouts: regret 0.112 ± 0.021 against 0.081 ± 0.015 for M14's
+  tables (change -0.031 ± 0.019; with `cond` -0.026 ± 0.019). The rollouts
+  value options under the old bot's pegging, which favours the old tables,
+  so games decided.
+- Games, both `@400,cond` with neither the exact keep table nor the policy,
+  40k: rebuilt **49.59 ± 0.27**, margin -0.19 ± 0.07. The rebuilt tables are
+  worse; M14's stay.
+- The likely cause is data: 807k detailed hands against the 1.6M M14's
+  tables came from, with the same smoothing. Pooling across rounds, as the
+  proposal suggests, needs counts the old build did not keep.
+- A grouped prior for rare pegging shapes (shapes with the same counts of
+  low cards, fives, ten-cards, pairs and runs), tried on the corpora of
+  M38: held-out log-likelihood of the real pegging -3.8044 against -3.7990
+  for the flat prior (rare shapes slightly better, the rest worse).
+  Dropped.
+
+### M43: Levels on the new bundle
+
+- λ 0.25 against λ 0.5 (both on the stack): **49.93 ± 0.23**, SPRT accepted
+  H0. λ stays 0.5.
+- Each level re-measured with `runs/final/expert-v1.bin` against heuristic,
+  20k games each (`runs/final/levels.txt`):
+
+  | Player | Win % | Margin |
+  |---|---|---|
+  | stack (`@400,islambda=0.5,cond`, M41) | 58.57 | |
+  | `@400` | 57.38 ± 0.46 | +2.02 |
+  | `@50,nokeep,nopeg` | 54.41 ± 0.45 | +0.78 |
+  | heuristic2 | 52.73 ± 0.42 | +1.16 |
+  | `@10,nokeep,nopeg,heurdiscard` | 50.53 ± 0.39 | -0.31 |
+  | random | 0.58 ± 0.10 | -43.57 |
+
+- `levels.go`: `expert` is the full stack (Very hard), `expert-medium`
+  is Hard, `expert-easy` is Medium. With random as Easy that gives the four
+  tiers asked for. The steps are about 4 points each above random; the gap
+  to random is large, as it is for any curve that keeps random.
+- To ship (the user's step): deploy `runs/final/expert-v1.bin` (also copied
+  to `models-expert/expert-v1.bin`, beside the reference `expert.bin`) as
+  the server's `-expert` bundle, and set the lobby list (`-lobby` on the
+  `lobby-bots` branch) to `expert,expert-medium,expert-easy,random`.
+- `lobby-bots` (off main) now has that lineup as the `-lobby` default and
+  the labels Very hard, Hard, Medium and Easy (random). Merging it and this
+  stack into main conflicts only in `levels.go`: keep `lobby-bots`' `Info`
+  field and this branch's options and comment. A trial merge built, passed
+  every test, and served `/api/lobby` with the four tiers.
+- `cribserver` checks every level against the bundle at startup
+  (`Bundle.Check`) and refuses the old `expert.bin`, so the code cannot run
+  the very hard level at λ 1 by accident. `runs/` and `models-expert/` are
+  not in git: the bundle to ship exists only on the development machine.
+- Speed on the t4g.micro for the stack: M39/M40 (pegging 12.4 ms mean,
+  161 ms max; discard about 25 ms).
+- Not done: proposal 5 (deferred in M34: it could only add to what 4
+  leaves of the measured discard ceiling, at the cost of a Python step).
+  Proposal 9 passes M34's kill rule (clairvoyant pegging +0.99 a hand, over
+  the 0.5 threshold) and is next: first its exploitability measurement.
+
+### M44: How exploitable the bot is (proposal 9, first step)
+
+Rule set before measuring (2026-11-25): an exploiter that knows the
+bot's strategy exactly, but not its cards, plays the pegging against the
+very hard bot (`@400,islambda=0.5,cond`). If it gains under **0.1 pegging
+points a hand** over the bot's own play in its seat on the same deals,
+proposal 9 is dropped: a blueprint can only remove what such an opponent
+gains, and none of the acceptance tests (the current expert and the
+guards) exploits anything. Above 0.1, the next step is to find whether the
+gap comes from the discard (which a pegging blueprint cannot change) or
+the play.
+
+`expert exploit` (500 deals, seed 900001, scores from 0 to 80 so pegging
+cannot end the game, 50 bot hands kept per exploiter decision; results in
+`runs/p9/`):
+
+| Exploiter infers the bot's hand from | Gain, pegging points a hand |
+|---|---|
+| its discard and its plays (`full`) | **+0.296 ± 0.097** (dealing +0.32, pone +0.27) |
+| nothing (`none`, a control) | -0.196 ± 0.109 |
+
+- The control loses: searching for points against a bot that plays for
+  wins is not where the gain comes from. Reading the bot is.
+- The bot's real hand passed the filter at all 1382 decisions: the bot
+  depends only on what it sees, and the exploiter never had to fall back.
+- Above the rule's 0.1, so proposal 9 goes on to the next step.
+
+Where the gain comes from, the same 500 deals (differences paired by deal;
+the baselines matched on every deal):
+
+| Exploiter reads | Gain | Run |
+|---|---|---|
+| nothing (`none`) | -0.196 ± 0.109 | 2 min |
+| the discard (`discard`) | +0.062 ± 0.094 | 46 min on 24 cores |
+| the discard and the first play (`first`) | +0.236 ± 0.101 | 1 h 40 min on 24 cores |
+| the discard and every play (`full`) | +0.296 ± 0.097 | 2 h 16 min on 12 cores |
+
+- The plays give away **+0.234 ± 0.075** (full less discard); the bot's
+  first play of the hand (its lead, or its first reply) **+0.174 ± 0.072**
+  of it (first less discard), and the later plays +0.060 ± 0.034.
+- So the leak is mostly where proposal 9's two-ply blueprint acts: the bot
+  is deterministic, and its first card says a lot about the rest.
+- The discard alone gives the exploiter about +0.26 over no inference, but
+  most of that only pays back what its points-chasing search costs it.
+- Estimates: 1 to 1½ h for `discard` (took 46 min) and about 1 h for
+  `first` (took 1 h 40 min; the machine had other load).
+- This is a bound against a perfect exploiter. No acceptance test exploits
+  anything, so a blueprint that removes the leak need not win more of them.
+- Time: 2 h 16 min on 12 cores at nice 19 (the control took 2 min), against
+  an estimate of 1¼ to 1¾ hours: the costly run never had more than half
+  the machine.
+
+### M45: Mixing the first play among near-best plays (proposal 9, cheap form)
+
+Chosen with the owner (2026-11-25) ahead of the CFR blueprint: since
+M44 found the bot's first card the main leak, mix it.
+- `mixfirst=X`: on the bot's first play of a hand, both scores below 90,
+  play uniformly among the plays within X win probability of the best.
+  The draw hashes the bot's seed and its observation, so games replay
+  given the seed. Off, the bot plays exactly as before (`expert exploit`
+  reproduced an earlier run to the digit). `Bot.PlayDist` gives the
+  policy; the exploit tool weights worlds by it and branches on mixed
+  replies.
+- Gaps between the best and second-best first play (400 decisions of the
+  stack's own games): median 0.6% win probability; X = 0.5% mixes about
+  47% of first plays, X = 0.2% about 26%.
+
+| | X = 0.5% | X = 0.2% |
+|---|---|---|
+| Head to head against the deterministic stack, 20k games | 49.69 ± 0.32 (margin -0.23, pegging -0.027) | 49.80 ± 0.25 (margin -0.10, pegging -0.008) |
+| Exploiter's pegging difference against it, less against the deterministic bot (paired by deal) | +0.028 ± 0.098 (500 deals) | +0.060 ± 0.109 (352 deals; stopped) |
+
+- **Mixing near-best plays hides nothing measurable**: the exploiter does
+  as well against the mixed bot as against the deterministic one. Which
+  plays are near-best depends on the hand, so the mixed card still
+  reveals it. The gain over the bot's own play in that seat rose
+  (+0.36, against M44's +0.30) only because the baseline, the mixed bot
+  in that seat, is slightly weaker.
+- The interval does not rule out a reduction up to about 0.17 (the whole
+  first-play leak), but the estimate is none, at a small cost.
+- `mixfirst` stays in the code, off by default; no level uses it.
+- **Decision (owner, 2026-11-25): proposal 9 stops here.** The bot stays
+  deterministic; the CFR blueprint is not built. The leak matters only
+  against an opponent who has modelled the bot's exact strategy, and no
+  acceptance test would show a gain from closing it. This ends the
+  proposal list: 7 and 8 stay deferred, 5 deferred (M34).
+- Times: head to head 36 and 35 minutes (estimates 45 to 60 and 35);
+  exploit at 0.5% 3 h 6 min in two parts (estimate 2½ to 3 h; background
+  commands stop at 2 hours, so `expert exploit -out` now resumes).
+
+---
+
 # Roadmap: three-player games (not started)
 
 Noted 2026-11-15, to look at soon. The goal is three-handed cribbage,

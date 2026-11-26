@@ -13,12 +13,44 @@ import (
 // the option's expected hand score, its pegging edge and the crib it makes.
 type keepModel struct {
 	temp [2]float64 // by side; 0 means the model is not fitted
-	rows [2]map[uint32]keepRow
+	// The options of six-rank shape k (numbered by rank6) on a side are
+	// shapes[side][start[k]:start[k+1]], kept with probability probs.
+	start  [numShapes6 + 1]int32
+	shapes [2][]int16   // kept four-rank shapes
+	probs  [2][]float32 // probability of keeping each
+	// byKept[side][shape*numPairs+pair] is the probability of keeping the
+	// four-rank shape when holding it and the discarded pair: the same
+	// numbers as prob, laid out for the search's opponent weights.
+	byKept [2][]float32
 }
 
-type keepRow struct {
-	shapes []int16   // kept four-rank shapes
-	probs  []float32 // probability of keeping each
+// numShapes6 bounds rank6: the multisets of six of 13 ranks, counting the
+// impossible ones with five or six of a rank, which are never used.
+const numShapes6 = 18564 // C(18, 6)
+
+// binom6[n][k] is n choose k, for ranking multisets.
+var binom6 = func() (t [19][7]int32) {
+	for n := 0; n <= 18; n++ {
+		t[n][0] = 1
+		for k := 1; k <= min(n, 6); k++ {
+			t[n][k] = t[n-1][k-1]
+			if k <= n-1 {
+				t[n][k] += t[n-1][k]
+			}
+		}
+	}
+	return t
+}()
+
+// rank6 numbers six sorted ranks densely, in [0, numShapes6): the sorted
+// ranks r[i]+i are distinct, and the combinatorial number system numbers
+// sets of distinct values.
+func rank6(r [6]int8) int {
+	var k int32
+	for i, x := range r {
+		k += binom6[int(x)-1+i][i+1]
+	}
+	return int(k)
 }
 
 // handEVByShape[shape][starter rank-1] is the hand's fifteens, pairs and
@@ -47,15 +79,6 @@ func handEVTable() {
 			}
 		}
 	})
-}
-
-// key6 packs six sorted ranks.
-func key6(r [6]int8) uint32 {
-	var k uint32
-	for _, x := range r {
-		k = k<<4 | uint32(x)
-	}
-	return k
 }
 
 // keepValues caches the parts of an option's value that come from the
@@ -150,17 +173,72 @@ func softmax(values []float64, temp float64, out []float32) {
 }
 
 // newKeepModel precomputes the keep probabilities of every six-rank shape.
-func newKeepModel(t *DiscardTables, temp [2]float64) *keepModel {
+// With exact (the share of each option the real discarder keeps, laid out
+// as keepLayout), each probability is (1-eps)*exact + eps*softmax, so the
+// true hand never gets zero weight.
+func newKeepModel(t *DiscardTables, temp [2]float64, exact *[2][]float32, eps float64) *keepModel {
 	m := &keepModel{temp: temp}
 	kv := newKeepValues(t)
+	var opts [numShapes6][2]struct {
+		shapes []int16
+		probs  []float32
+	}
 	for side := 0; side < 2; side++ {
-		m.rows[side] = map[uint32]keepRow{}
 		forEachShape6(func(r [6]int8) {
 			shapes, values := kv.keepOptions(r, side)
-			row := keepRow{shapes: shapes, probs: make([]float32, len(shapes))}
-			softmax(values, temp[side], row.probs)
-			m.rows[side][key6(r)] = row
+			probs := make([]float32, len(shapes))
+			softmax(values, temp[side], probs)
+			o := &opts[rank6(r)][side]
+			o.shapes, o.probs = shapes, probs
 		})
+	}
+	if exact != nil {
+		var off int
+		for k := range opts {
+			for side := 0; side < 2; side++ {
+				for i := range opts[k][side].probs {
+					p := &opts[k][side].probs[i]
+					*p = float32((1-eps)*float64(exact[side][off+i]) + eps*float64(*p))
+				}
+			}
+			off += len(opts[k][0].shapes)
+		}
+	}
+	for side := 0; side < 2; side++ {
+		m.byKept[side] = make([]float32, numShapes*numPairs)
+	}
+	handEVTable()
+	for shape := 0; shape < numShapes; shape++ {
+		r := shapeRanks[shape]
+		k4 := [4]int{int(r[0]), int(r[1]), int(r[2]), int(r[3])}
+		var held [14]int
+		for _, x := range k4 {
+			held[x]++
+		}
+		for r1 := 1; r1 <= 13; r1++ {
+			for r2 := r1; r2 <= 13; r2++ {
+				if held[r1]+1 > 4 || held[r2]+1 > 4 || (r1 == r2 && held[r1]+2 > 4) {
+					continue // a fifth card of a rank
+				}
+				six := merge6(k4, r1, r2)
+				o := &opts[rank6(six)]
+				for side := 0; side < 2; side++ {
+					for i, sh := range o[side].shapes {
+						if int(sh) == shape {
+							m.byKept[side][shape*numPairs+int(pairIdx[r1][r2])] = o[side].probs[i]
+						}
+					}
+				}
+			}
+		}
+	}
+	for k := range opts {
+		// Both sides have the same options in the same order.
+		m.start[k+1] = m.start[k] + int32(len(opts[k][0].shapes))
+		for side := 0; side < 2; side++ {
+			m.shapes[side] = append(m.shapes[side], opts[k][side].shapes...)
+			m.probs[side] = append(m.probs[side], opts[k][side].probs...)
+		}
 	}
 	return m
 }
@@ -189,10 +267,11 @@ func forEachShape6(f func([6]int8)) {
 // prob is the probability that a player on side holding six sorted ranks
 // keeps the four-rank shape.
 func (m *keepModel) prob(side int, six [6]int8, shape int16) float64 {
-	row := m.rows[side][key6(six)]
-	for i, s := range row.shapes {
+	k := rank6(six)
+	lo, hi := m.start[k], m.start[k+1]
+	for i, s := range m.shapes[side][lo:hi] {
 		if s == shape {
-			return float64(row.probs[i])
+			return float64(m.probs[side][lo+int32(i)])
 		}
 	}
 	return 0
@@ -260,3 +339,30 @@ func FitKeepTemps(t *DiscardTables, hands []HandStat) (temps [2]float64, logLik 
 	}
 	return temps, logLik
 }
+
+// keepLayout numbers every option of every six-rank shape: the options of
+// the shape numbered k (by rank6) are shapes[start[k]:start[k+1]], in the
+// order keepOptions lists them. The keep model and the exact keep table
+// share this layout.
+var keepLayout = sync.OnceValue(func() *struct {
+	start  [numShapes6 + 1]int32
+	shapes []int16
+} {
+	handEVTable()
+	l := &struct {
+		start  [numShapes6 + 1]int32
+		shapes []int16
+	}{}
+	var per [numShapes6][]int16
+	kv := new(keepValues) // values are not needed, only the options
+	forEachShape6(func(r [6]int8) {
+		per[rank6(r)], _ = kv.keepOptions(r, 0)
+	})
+	for k := range per {
+		l.start[k+1] = l.start[k] + int32(len(per[k]))
+		l.shapes = append(l.shapes, per[k]...)
+	}
+	return l
+})
+
+func keepxShape() []int { return []int{2, len(keepLayout().shapes)} }

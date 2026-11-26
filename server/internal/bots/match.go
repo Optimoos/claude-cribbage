@@ -7,6 +7,28 @@ import (
 	"cribbage/internal/engine"
 )
 
+// Watcher is a bot that sees the whole game, hidden cards too. Only
+// test oracles, which bound what perfect information is worth, do this;
+// PlayGame shows a Watcher each game before it starts.
+type Watcher interface {
+	Watch(g *engine.Game, seat int)
+}
+
+// watcher finds a Watcher in b or the bots it wraps (those with an Unwrap
+// method), or returns nil.
+func watcher(b Bot) Watcher {
+	for {
+		if w, ok := b.(Watcher); ok {
+			return w
+		}
+		u, ok := b.(interface{ Unwrap() Bot })
+		if !ok {
+			return nil
+		}
+		b = u.Unwrap()
+	}
+}
+
 // Result summarizes a finished game.
 type Result struct {
 	Winner int
@@ -20,7 +42,17 @@ type Result struct {
 // engine directly. If trace is non-nil, a human-readable log including both
 // hands is written to it.
 func PlayGame(seed uint64, players [2]Bot, trace io.Writer) (Result, error) {
-	g := engine.NewGame(seed)
+	return PlayFrom(engine.NewGame(seed), seed, players, trace)
+}
+
+// PlayFrom plays game g, which may start part way (see engine.NewHand),
+// to the end; seed only labels errors.
+func PlayFrom(g *engine.Game, seed uint64, players [2]Bot, trace io.Writer) (Result, error) {
+	for p, b := range players {
+		if w := watcher(b); w != nil {
+			w.Watch(g, p)
+		}
+	}
 	if trace == nil {
 		g.SetQuiet(true)
 	} else {
