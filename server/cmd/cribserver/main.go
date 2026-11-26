@@ -180,15 +180,20 @@ func main() {
 		log.Warn("no -smtp: emails are written to this log instead of sent, so only someone reading it can sign in (testing only)")
 	}
 	if sq != nil {
-		key := os.Getenv("CRIBBAGE_EMAIL_KEY")
+		// A key that was given but is empty is a mistake (an empty file, an
+		// unset variable in a unit file), not a request for a local key.
+		key, given := os.LookupEnv("CRIBBAGE_EMAIL_KEY")
 		if *emailKeyFile != "" {
 			b, err := os.ReadFile(*emailKeyFile)
 			if err != nil {
 				fail("email key", err)
 			}
-			key = string(b)
+			key, given = string(b), true
 		}
-		if key == "" {
+		if given && strings.TrimSpace(key) == "" {
+			fail("email key", errors.New("the email key given (-email-key-file or CRIBBAGE_EMAIL_KEY) is empty"))
+		}
+		if !given {
 			path := *dbPath + ".email-key"
 			var err error
 			if key, err = localEmailKey(path); err != nil {

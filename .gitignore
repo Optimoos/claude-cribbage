@@ -8,3 +8,5 @@ server/*.db
 server/*.db-*
 server/web/dist/
 server/runs/
+*.email-key
+certs/
