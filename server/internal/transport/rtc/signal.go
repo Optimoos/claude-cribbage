@@ -16,6 +16,7 @@ import (
 
 	"github.com/coder/websocket"
 	"github.com/pion/ice/v4"
+	"github.com/pion/sdp/v3"
 	"github.com/pion/webrtc/v4"
 
 	"cribbage/internal/netkey"
@@ -125,15 +126,16 @@ func (r *remoteCandidates) described(pc *webrtc.PeerConnection) error {
 	return nil
 }
 
-// candidateAddress is the connection address of an ICE candidate line
+// candidateAddress is the connection address of an ICE candidate
 // ("candidate:foundation component protocol priority address port typ
-// ..."), or "" if it has none.
-func candidateAddress(line string) string {
-	line = strings.TrimPrefix(strings.TrimPrefix(line, "a="), "candidate:")
-	if f := strings.Fields(line); len(f) >= 6 {
-		return f[4]
+// ..."), or "" if it has none. It parses with pion's own parser, as
+// AddICECandidate does, so the address checked is the one pion would use.
+func candidateAddress(cand string) string {
+	c, err := ice.UnmarshalCandidate(strings.TrimPrefix(cand, "candidate:"))
+	if err != nil {
+		return ""
 	}
-	return ""
+	return c.Address()
 }
 
 // publicAddress reports whether a candidate's address is a public IP. It
@@ -144,24 +146,36 @@ func publicAddress(addr string) bool {
 	return netkey.Public(net.ParseIP(addr))
 }
 
-// filterSDP drops the candidate lines of sdp whose address keep refuses,
-// and fails if there are more than maxCandidates.
-func filterSDP(sdp string, keep func(string) bool) (string, int, error) {
-	lines := strings.SplitAfter(sdp, "\n")
-	out := lines[:0]
-	n := 0
-	for _, l := range lines {
-		if strings.HasPrefix(l, "a=candidate:") {
-			if n++; n > maxCandidates {
-				return "", n, errTooManyCandidates
-			}
-			if keep != nil && !keep(candidateAddress(strings.TrimSpace(l))) {
-				continue
-			}
-		}
-		out = append(out, l)
+// filterSDP drops the candidates in raw whose address keep refuses, and
+// fails if there are more than maxCandidates. It parses raw as pion does
+// (candidates are taken from media sections), so no line can be read one
+// way here and another way there.
+func filterSDP(raw string, keep func(string) bool) (string, int, error) {
+	var d sdp.SessionDescription
+	if err := d.UnmarshalString(raw); err != nil {
+		return "", 0, err
 	}
-	return strings.Join(out, ""), n, nil
+	n := 0
+	for _, m := range d.MediaDescriptions {
+		kept := m.Attributes[:0]
+		for _, a := range m.Attributes {
+			if a.IsICECandidate() {
+				if n++; n > maxCandidates {
+					return "", n, errTooManyCandidates
+				}
+				if keep != nil && !keep(candidateAddress(a.Value)) {
+					continue
+				}
+			}
+			kept = append(kept, a)
+		}
+		m.Attributes = kept
+	}
+	if keep == nil {
+		return raw, n, nil
+	}
+	b, err := d.Marshal()
+	return string(b), n, err
 }
 
 func readSignal(ctx context.Context, ws *websocket.Conn) (signal, error) {
