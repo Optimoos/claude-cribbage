@@ -420,7 +420,6 @@ button.card:disabled { cursor: default; }
 .show-row .tot { grid-row: 1 / span 2; grid-column: 2; font: 800 1.7rem/1 var(--display); }
 .show-row .why { grid-column: 1 / -1; font-size: .78rem; color: var(--felt-muted); }
 .show-row.enter { animation: slide-in .45s ease-out both; }
-.show-title { font-size: .7rem; font-weight: 700; text-transform: uppercase; letter-spacing: .1em; color: var(--felt-muted); }
 
 /* Effects */
 .fx { position: absolute; inset: 0; pointer-events: none; z-index: 5; }
@@ -502,11 +501,6 @@ button.card:disabled { cursor: default; }
 @keyframes fall { to { transform: translateY(110vh) rotate(720deg); } }
 
 /* ---- Account and history ----------------------------------------------- */
-.link-btn {
-  background: none; border: 0; padding: 0; margin-top: .4rem; font: inherit; font-size: .9rem; color: var(--accent);
-  text-decoration: underline; text-underline-offset: 2px; cursor: pointer;
-}
-.hint .link-btn { margin: 0; font-size: inherit; }
 .login h2 { margin: 0 0 .4rem; }
 .login > .muted { margin: 0 0 1rem; }
 .error.ok { color: var(--accent); }
@@ -550,7 +544,6 @@ button.card:disabled { cursor: default; }
 .passkey-list b { display: block; overflow-wrap: anywhere; }
 .passkey-list small { color: var(--muted); font-size: .78rem; }
 .device-code { font-size: 1.8rem; font-weight: 700; letter-spacing: .14em; text-align: center; margin: .4rem 0 .8rem; font-variant-numeric: tabular-nums; }
-.callout { margin: .8rem 0 0; padding: .6rem .75rem; border-radius: 8px; background: color-mix(in srgb, var(--accent) 16%, transparent); font-weight: 600; }
 
 /* ---- Games drawer ------------------------------------------------------ */
 /* With a game open, the lobby slides out from the left on demand and the

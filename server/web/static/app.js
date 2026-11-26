@@ -32,7 +32,7 @@ const serverURL = path => new URL(path, SERVER).href;
 // Requests that do the same thing however often they are sent (asking
 // for a code sends the same code again), so they can be sent again after
 // a connection died without answering them.
-const RETRYABLE = ['requestSignIn', 'listGames', 'getHistory', 'syncGame', 'ping'];
+const RETRYABLE = ['requestSignIn', 'listGames', 'getHistory'];
 
 class Connection {
   constructor(onMessage, onOpen, onClose) {
@@ -812,6 +812,7 @@ function onMessage(m) {
     state.me = m.authOk;
     state.account = m.authOk.account || {};
     state.history = null;
+    if (state.pane === 'history') fetchHistory(); // the list was this connection's
     state.signin = null;
     emailLink = null;
     localStorage.setItem('token', m.authOk.token);
@@ -825,8 +826,6 @@ function onMessage(m) {
   } else if (m.account) {
     state.account = m.account;
     renderAccount();
-  } else if (m.history) {
-    onHistory(m.history);
   } else if (m.error) {
     onError(m.error);
   } else if (m.gameUpdate) {
@@ -1233,9 +1232,19 @@ function gameItem(g, onClick, tag, tagCls) {
   const score = g.scores && g.status !== 'GAME_STATUS_WAITING' ? `${g.scores[g.seat]}–${g.scores[1 - g.seat]}` : '';
   li.innerHTML = `<span class="name">vs ${esc(opponent(g))}</span><span class="score">${score}</span>` +
     (tag ? `<span class="tag ${tagCls || ''}">${esc(tag)}</span>` : '');
-  li.onclick = onClick;
+  clickable(li, onClick);
   if (g.gameId === state.selected) li.classList.add('selected');
   return li;
+}
+
+// clickable makes a list row work like a button, from the keyboard too.
+function clickable(el, onClick) {
+  el.tabIndex = 0;
+  el.setAttribute('role', 'button');
+  el.onclick = onClick;
+  el.onkeydown = e => {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onClick(); }
+  };
 }
 
 function fillList(ul, items, empty) {
@@ -1260,7 +1269,7 @@ function renderLobby() {
   fillList($('open-games'), state.open.map(g => {
     const li = document.createElement('li');
     li.innerHTML = `<span class="name">${esc(g.players[0].nickname)}</span><span class="tag turn">join</span>`;
-    li.onclick = () => conn.send({ joinGame: { gameId: g.gameId } });
+    clickable(li, () => conn.send({ joinGame: { gameId: g.gameId } }));
     return li;
   }), 'Nobody is waiting');
   fillList($('recent-games'), state.recent.slice(0, 10).map(g => {
@@ -1281,7 +1290,20 @@ function openHistory() {
   // Fetch afresh each time: games may have finished since.
   state.history = null;
   renderHistory();
-  conn.send({ getHistory: {} });
+  fetchHistory();
+}
+
+// fetchHistory asks for the first page, or the page after `after`. A
+// first page starts the list afresh, and replies to older fetches (History
+// opened twice, or a reconnect between) are dropped.
+let historySeq = 0;
+function fetchHistory(after) {
+  const seq = after ? historySeq : ++historySeq;
+  request({ getHistory: after ? { after } : {} }, m => {
+    if (!m.history) return false;
+    if (seq === historySeq) onHistory(m.history, !after);
+    return true;
+  });
 }
 
 function closeHistory() {
@@ -1289,9 +1311,9 @@ function closeHistory() {
   renderTable();
 }
 
-function onHistory(h) {
-  const first = !state.history;
+function onHistory(h, first) {
   if (first) state.history = { games: [], records: h.records || [], total: h.total || {} };
+  if (!state.history) return;
   state.history.games.push(...(h.games || []));
   state.history.next = h.next || '';
   renderHistory();
@@ -1890,6 +1912,7 @@ function cardEl(c, opts = {}) {
     el.setAttribute('aria-label', cardName(c));
     if (isRed(c)) el.classList.add('red');
   }
+  if (!opts.button) el.setAttribute('role', 'img'); // so screen readers read its label
   for (const cls of opts.classes || []) if (cls) el.classList.add(cls);
   if (opts.delay) el.style.animationDelay = `${opts.delay}ms`;
   return el;
@@ -1997,6 +2020,7 @@ function renderTable(animate = false) {
       classes: [state.picked.has(c) ? 'selected' : '', fresh ? 'deal-in' : '', myPlay && playable.has(c) ? 'playable' : '', myPlay && !playable.has(c) ? 'dim' : ''],
     });
     if (discarding) {
+      el.setAttribute('aria-pressed', String(state.picked.has(c)));
       el.onclick = () => {
         if (state.picked.has(c)) state.picked.delete(c);
         else if (state.picked.size < 2) state.picked.add(c);
@@ -2171,7 +2195,7 @@ $('history-close').onclick = () => closeHistory();
 $('history-more').onclick = () => {
   if (!state.history || !state.history.next) return;
   $('history-more').disabled = true;
-  conn.send({ getHistory: { after: state.history.next } });
+  fetchHistory(state.history.next);
 };
 $('find-match').onclick = () => conn.send({ findMatch: {} });
 $('refresh').onclick = () => conn.send({ listGames: {} });
@@ -2202,7 +2226,11 @@ document.addEventListener('click', e => {
   }
 });
 document.addEventListener('keydown', e => {
-  if (e.key === 'Escape') { $('settings').hidden = true; setDrawer(false); }
+  if (e.key === 'Escape') {
+    $('settings').hidden = true;
+    $('settings-btn').setAttribute('aria-expanded', 'false');
+    setDrawer(false);
+  }
 });
 $('theme').onchange = () => { prefs.theme = $('theme').value; savePrefs(); applyPrefs(); };
 $('board-style').onchange = () => { prefs.board = $('board-style').value; savePrefs(); buildBoard(); };
