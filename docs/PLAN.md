@@ -1837,6 +1837,37 @@ M44 found the bot's first card the main leak, mix it.
   exploit at 0.5% 3 h 6 min in two parts (estimate 2½ to 3 h; background
   commands stop at 2 hours, so `expert exploit -out` now resumes).
 
+### M46: The dealer's show plus crib, uncapped (audit finding 10)
+
+The discard valuation added the dealer's show and crib into one array of
+30 cells and clamped the sum at 29, though together they reach 58. The
+array is per-decision scratch, not in the bundle, so it doubled
+(`discarder.hand`) without a rebuild; `expert-v1.bin` loads unchanged.
+`TestDealerShowPlusCribPasses29` fails with the cap. No pass rule was
+agreed beforehand; as a correctness fix it is kept unless it measures
+worse.
+
+Against heuristic, the new code paired deal by deal with the old
+(`gauntlet -save-pairs` / `-base`). The very hard level
+(`@400,islambda=0.5,cond`) values discards with `condOption`, Hard
+(`@50,nokeep,nopeg`) with `tableOption`; both were edited.
+
+| Level, games | Deals that changed | Win % change | Margin change |
+|---|---|---|---|
+| Very hard, 40k from scores 70-95 (`-start 70,95`) | 14 of 20,000 | +0.00 ± 0.01 | -0.00 ± 0.00 |
+| Very hard, 20k full games | 26 of 10,000 | +0.01 ± 0.01 | +0.00 ± 0.00 |
+| Hard, 20k full games | 45 of 10,000 | -0.01 ± 0.01 | +0.00 ± 0.01 |
+
+- Kept: the cap almost never decided a discard. Win rates on the full
+  games 58.58 ± 0.46 (very hard) and 54.39 ± 0.44 (Hard), as in M43.
+- Times, nice'd on 24 cores: endgame runs 6 and 6½ minutes, very hard
+  full runs 9½ minutes each, Hard about half a minute each. The estimate
+  for the four very hard runs was 30 minutes. The first chain was stopped
+  by the 30-minute background limit during the third run (slowed by
+  browser tests sharing the machine), and the full runs were restarted:
+  22:01 to 22:50 in all.
+- Shipping needs only a server build: no new bundle.
+
 ---
 
 # Roadmap: three-player games (not started)
