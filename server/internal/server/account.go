@@ -261,6 +261,20 @@ func (s *Server) AdminSetEmail(ctx context.Context, username, email string) (old
 	return u.Email, nil
 }
 
+// Revoke follows the "Not you?" link in a passkey notice: it removes the
+// account's passkeys, ends its sessions and disconnects it. It returns
+// auth.ErrBadToken for a link that is unknown, used or expired.
+func (s *Server) Revoke(ctx context.Context, token string) error {
+	userID, err := s.auth.Revoke(ctx, token)
+	if err != nil {
+		return err
+	}
+	s.log.Info("passkeys revoked from email link", "user", userID)
+	s.devices.dropApprovals(userID)
+	s.closeUserConns(userID, nil)
+	return nil
+}
+
 // Passkeys.
 
 func (s *Server) passkeySignInBegin(c *Conn, id uint32) {

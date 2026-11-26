@@ -214,21 +214,55 @@ func (s *Service) FinishAddPasskey(ctx context.Context, u *store.User, session s
 	return nil
 }
 
+// revokeTTL is how long the "Not you?" link in a passkey notice works.
+const revokeTTL = 7 * 24 * time.Hour
+
 // notifyPasskey tells an account's address that a passkey was added, so an
-// owner whose session was stolen finds out.
+// owner whose session was stolen finds out, with a link that undoes it
+// without signing in (the intruder may be in the account).
 func (s *Service) notifyPasskey(ctx context.Context, userID int64, name string) {
 	u, err := s.Store.UserByID(ctx, userID)
 	if err != nil || u.Email == "" || s.Mailer == nil || !s.mailAllowed(u.ID, u.Email) {
 		return
 	}
+	undo := `open Account in the game and choose "Sign out other devices", which also removes every passkey not added from the device you use.`
+	if s.RevokeURL != "" {
+		token := RandomID(tokenBytes)
+		if err := s.Store.CreateAccountToken(ctx, &store.AccountToken{
+			Token: token, UserID: u.ID, Kind: store.TokenRevoke, Expires: time.Now().Add(revokeTTL),
+		}); err == nil {
+			undo = fmt.Sprintf(`open this link within %s. It removes every passkey on the account and signs out all devices, yours too; then sign in again with an emailed code.
+
+%s?t=%s`, duration(revokeTTL), s.RevokeURL, token)
+		}
+	}
 	body := fmt.Sprintf(`Hello %s,
 
 A passkey named "%s" was added to your cribbage account "%s". It can sign in to the account.
 
-If you did not add it, open Account in the game, remove the passkey, then choose "Sign out other devices", which also removes passkeys added from those devices.
-`, u.Nickname, name, u.Username)
+If you did not add it, %s
+`, u.Nickname, name, u.Username, undo)
 	// Best effort: the passkey is added either way.
 	_ = s.send(ctx, "passkey added", u.Email, "A passkey was added to your Cribbage account", body)
+}
+
+// Revoke uses up a token from a passkey notice's link: it removes every
+// passkey of the account and ends all its sessions. It returns the user.
+func (s *Service) Revoke(ctx context.Context, token string) (int64, error) {
+	if !validToken(token) {
+		return 0, ErrBadToken
+	}
+	t, err := s.Store.TakeAccountToken(ctx, token, store.TokenRevoke)
+	if errors.Is(err, store.ErrNotFound) {
+		return 0, ErrBadToken
+	}
+	if err != nil {
+		return 0, err
+	}
+	if err := s.Store.DeleteSessions(ctx, t.UserID, ""); err != nil {
+		return 0, err
+	}
+	return t.UserID, nil // DeleteSessions with nothing kept removes every passkey
 }
 
 // RemovePasskey removes one of a user's passkeys.

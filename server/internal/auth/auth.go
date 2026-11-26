@@ -67,7 +67,10 @@ type Service struct {
 	// StopURL, if set, is the server's https address that stops email when
 	// a mail app POSTs a stop token to it (StopEmail), for one-click
 	// unsubscribe; the links in emails go to the web client either way.
-	StopURL   string
+	StopURL string
+	// RevokeURL, if set, is the server's https address for the "Not you?"
+	// link in the passkey-added notice (Revoke).
+	RevokeURL string
 	VerifyTTL time.Duration // how long an address confirmation link works; 48 hours if zero
 	DeleteTTL time.Duration // how long an account deletion link works; an hour if zero
 
@@ -386,6 +389,8 @@ func duration(d time.Duration) string {
 	switch h := int(d.Hours()); {
 	case h == 1:
 		return "an hour"
+	case h >= 48 && h%24 == 0:
+		return fmt.Sprintf("%d days", h/24)
 	case h > 1:
 		return fmt.Sprintf("%d hours", h)
 	}

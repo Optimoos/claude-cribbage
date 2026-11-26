@@ -177,7 +177,7 @@ where there is logic to test, not for the email key, admin socket,
 | 4.5 | Deletion did not wait for a game being created for the user. | It waits for the user's reservations to drain (`0c1be46`). |
 | 4.6 | Logout left other connections on the same token signed in. | They are closed (`fd44ae3`). |
 | 4.7 | A join queued behind a game's end leaked a reservation. | Reserved on the game's actor (`aa9a58e`). |
-| §6 | A stolen session could add a passkey that outlived Sign out other devices; adding one raced recovery. | Passkeys record the adding session (new column, migrated on open), need it live to be added, and go when Sign out other devices ends it; the address is emailed (`abedce7`). Limits: a passkey whose adding session already ended (logged out, expired) is kept, so a thief who logs out first keeps theirs and the email is the real signal; and a passkey whose adding session is still live on another device goes too. |
+| §6 | A stolen session could add a passkey that outlived Sign out other devices; adding one raced recovery. | Passkeys record the adding session (new column, migrated on open), need it live to be added, and go when Sign out other devices ends it; the address is emailed (`abedce7`). Then (`passkey-revoke` branch): Sign out other devices removes every passkey the kept session did not add, so one whose adding session already ended (a thief who logged out first, an expired session, or a passkey from before the column) goes too; and the notice email carries a one-use link, good for 7 days, to `/api/revoke`, which removes every passkey and ends every session without signing in. Opening the link shows a button that POSTs, since mail scanners open links. Cost: Sign out other devices also removes your own synced passkeys added on other devices; add them again. |
 | §6 | The TCP transport allocated a claimed 1 MiB frame up front. | The buffer grows as bytes arrive (`2557695`). |
 | §6 | NAT64 addresses (`64:ff9b::/96`) were keyed by /64 and passed Public. | Treated as the IPv4 address they embed (`f881c34`). |
 | §6 | Any web page could open `/rtc` and spend its visitors' signaling slots. | With `-public-url` set, only its pages and the server's own may; apps send no Origin and still connect (checked: Godot 4.7.2's WebSocketPeer sends none) (`8c1f63e`). It takes effect on the next deploy, since `cribserver.conf` sets `public-url`; Pages preview URLs (`*.pages.dev`) are refused. |
@@ -199,6 +199,8 @@ not worth changing while fixing, and are open to reversal:
 - **Per-address limits assume the server sees client addresses.** Keep the
   API record DNS only (deploy/README.md); behind Cloudflare's proxy every
   limit and `/api/stop` would key on edge addresses.
+
+Possible later: **require a fresh sign-in to add a passkey** (an emailed code, or an existing passkey, used in the last few minutes). That stops a stolen session adding one at all, where the above only cleans up after it; it needs a step in the server and in both clients' Add passkey flow, and adds friction each time a passkey is added. Not done: the notice link and the stricter sign-out were judged enough for this server.
 
 Still to check (report §5, §7):
 

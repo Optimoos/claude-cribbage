@@ -588,7 +588,7 @@ func TestDeviceSignInsPerAddress(t *testing.T) {
 }
 
 // Adding a passkey tells the account's address, and signing out other
-// devices removes the passkeys they added (a stolen session's way back in).
+// devices removes the passkeys other sessions added (a stolen session's way back in).
 func TestPasskeyAddedNoticeAndSignOut(t *testing.T) {
 	srv, addr, mails := startAccountServer(t, false)
 	a := signUp(t, addr, mails, "alice", "alice@example.com")
@@ -616,5 +616,38 @@ func TestPasskeyAddedNoticeAndSignOut(t *testing.T) {
 	keys, err := srv.auth.Store.Passkeys(context.Background(), a.auth.UserId)
 	if err != nil || len(keys) != 1 || keys[0].Name != "Mine" {
 		t.Fatalf("passkeys left: %+v, %v", keys, err)
+	}
+}
+
+// The "Not you?" link in a passkey notice removes every passkey and signs
+// the account out everywhere, once.
+func TestPasskeyNoticeRevokeLink(t *testing.T) {
+	srv, addr, mails := startAccountServer(t, false)
+	srv.auth.RevokeURL = "https://api.crib.example/api/revoke"
+	a := signUp(t, addr, mails, "alice", "alice@example.com")
+	thief := signIn(t, addr, mails, "alice", "alice@example.com")
+	dev := &passkeytest.Authenticator{Origin: "https://crib.example"}
+	cred, err := dev.Create(thief.call(t, msg(&pb.PasskeyAddBegin{})).GetPasskeyOptions().GetOptionsJson())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if thief.call(t, msg(&pb.PasskeyAddFinish{CredentialJson: cred, Name: "Theirs"})).GetAccount() == nil {
+		t.Fatal("passkey not added")
+	}
+	link := regexp.MustCompile(regexp.QuoteMeta(srv.auth.RevokeURL) + `\?t=([0-9a-f]+)`).FindStringSubmatch(mails.mail(t, "alice@example.com").body)
+	if link == nil {
+		t.Fatal("no revoke link in the notice")
+	}
+	ctx := context.Background()
+	if err := srv.Revoke(ctx, link[1]); err != nil {
+		t.Fatal(err)
+	}
+	closed(t, a)
+	closed(t, thief)
+	if keys, err := srv.auth.Store.Passkeys(ctx, a.auth.UserId); err != nil || len(keys) != 0 {
+		t.Fatalf("passkeys left: %+v, %v", keys, err)
+	}
+	if err := srv.Revoke(ctx, link[1]); !errors.Is(err, auth.ErrBadToken) {
+		t.Fatalf("link used twice: %v", err)
 	}
 }
