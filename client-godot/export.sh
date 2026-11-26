@@ -2,7 +2,7 @@
 # Exports release builds into build/linux and build/windows, and zips each
 # with a README and licences: build/Cribbage-<version>-<os>-x86_64.zip.
 # Needs the Godot 4.7.2 .NET export templates installed (ci/install-godot.sh
-# installs them, with the editor), and addons/webrtc_native
+# installs them, with the editor). It fetches addons/webrtc_native
 # (fetch-webrtc.sh). GODOT names the editor binary.
 #
 # CRIBBAGE_SERVER, the game server's https:// address as the web page
@@ -40,7 +40,7 @@ if [ -n "${CRIBBAGE_SERVER:-}" ]; then
 	export CRIBBAGE_DEFAULT_SERVER=$server # read by Cribbage.csproj
 fi
 
-[ -d addons/webrtc_native ] || ./fetch-webrtc.sh
+./fetch-webrtc.sh # afresh, so what ships is the checked download
 mkdir -p build
 touch build/.gdignore # keep exports out of the project and each other
 "$GODOT" --headless --path . --import >/dev/null 2>&1 || true

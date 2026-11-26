@@ -25,9 +25,10 @@ mkdir -p "$CACHE"
 fetch "$EDITOR.zip" "$EDITOR_SHA512"
 fetch "$TEMPLATES" "$TEMPLATES_SHA512"
 
-# The editor, unpacked beside its zip.
+# The editor, unpacked afresh from the checked zip each time, so a cache
+# cannot supply an unchecked one.
 BIN=$CACHE/$EDITOR/Godot_v${VERSION}-stable_mono_linux.x86_64
-[ -x "$BIN" ] || unzip -qo "$CACHE/$EDITOR.zip" -d "$CACHE" >&2
+unzip -qo "$CACHE/$EDITOR.zip" -d "$CACHE" >&2
 # Only the Linux and Windows x86_64 templates (export_presets.cfg).
 dest=$HOME/.local/share/godot/export_templates/${VERSION}.stable.mono
 mkdir -p "$dest"

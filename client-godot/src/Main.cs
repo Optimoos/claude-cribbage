@@ -83,6 +83,15 @@ public partial class Main : Control
         BuildUi();
         ShowLogin(false);
         Connect();
+        // A saved server that never answers would leave only a blank window:
+        // show the sign-in page, with its Server field, after a few seconds.
+        GetTree().CreateTimer(5).Timeout += () =>
+        {
+            if (me == null && conn is not { IsOpen: true })
+            {
+                ShowLogin(true);
+            }
+        };
         if (opts.Screenshot != "")
         {
             GetTree().CreateTimer(opts.After).Timeout += SaveScreenshot;
@@ -121,6 +130,7 @@ public partial class Main : Control
             // WebRTC answer and read the session token off the data channel.
             conn = null;
             SetStatus("use wss:// for a server on the internet");
+            ShowLogin(me == null); // where the Server field is
             return;
         }
         SetStatus("connecting…");
@@ -152,7 +162,11 @@ public partial class Main : Control
             }
             conn = new Connection(url, ice);
             conn.Opened += OnOpen;
-            conn.Closed += () => SetStatus("reconnecting…");
+            conn.Closed += () =>
+            {
+                SetStatus("reconnecting…");
+                FailReplies();
+            };
             conn.Received += OnMessage;
             conn.Connect();
         });
@@ -393,6 +407,7 @@ public partial class Main : Control
                     else if (gs.Update == null)
                     {
                         gs.Game = g;
+                        gs.V.Reset(g); // nothing to replay yet: the table shows the list's view
                     }
                 }
                 openGames = m.GameList.Open.ToList();
@@ -403,7 +418,11 @@ public partial class Main : Control
                 {
                     if (games.TryGetValue(g.GameId, out var old) && !old.Finished)
                     {
-                        old.Game = g;
+                        old.Game = old.V.Game = g;
+                        if (old.V.Over == null && g.Winner >= 0)
+                        {
+                            old.V.Over = (g.Winner, g.Resigned);
+                        }
                         ended = true;
                     }
                 }
@@ -1169,7 +1188,7 @@ public partial class Main : Control
             return;
         }
         var v = gs.V;
-        var g = gs.Game;
+        var g = v.Game; // as far as the replay has got, not the latest update
         var meSeat = gs.Me;
         var opp = 1 - meSeat;
         var finished = g.Status == GameStatus.Finished;

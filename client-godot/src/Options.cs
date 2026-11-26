@@ -88,11 +88,25 @@ public sealed class Settings
         set { file.SetValue("connection", "server", value); Save(); }
     }
 
+    // Token is the session for the current Server: each server keeps its
+    // own, so trying another one (--server) does not sign out of the first.
+    // (A token saved before that, under [session], is tried on whichever
+    // server comes first.)
     public string Token
     {
-        get => (string)file.GetValue("session", "token", "");
-        set { file.SetValue("session", "token", value); Save(); }
+        get => (string)file.GetValue("tokens", TokenKey, file.GetValue("session", "token", ""));
+        set
+        {
+            file.SetValue("tokens", TokenKey, value);
+            if (file.HasSectionKey("session", "token"))
+            {
+                file.EraseSectionKey("session", "token");
+            }
+            Save();
+        }
     }
+
+    string TokenKey => System.Uri.EscapeDataString(Server);
 
     public string LastUser
     {

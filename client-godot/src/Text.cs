@@ -19,7 +19,6 @@ public static class Text
     public static string Suit(uint c) => Suits[c / 13];
     public static string Card(uint c) => Rank(c) + Suit(c);
     public static bool IsRed(uint c) => c / 13 is 1 or 2;
-    public static int Value(uint c) => (int)System.Math.Min(c % 13 + 1, 10);
 
     public static string SeatName(GameSummary g, int seat)
     {
