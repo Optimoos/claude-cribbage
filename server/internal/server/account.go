@@ -211,10 +211,15 @@ func (s *Server) signOutOthers(c *Conn, id uint32) {
 // after their sessions have ended. Their clients reconnect, cannot resume,
 // and ask the player to sign in.
 func (s *Server) closeUserConns(userID int64, keep *Conn) {
+	s.closeConnsWhere(userID, func(c *Conn) bool { return c != keep })
+}
+
+// closeConnsWhere closes the connections signed in as userID that match.
+func (s *Server) closeConnsWhere(userID int64, match func(*Conn) bool) {
 	s.cmu.RLock()
 	var cs []*Conn
 	for c := range s.conns[userID] {
-		if c != keep {
+		if match(c) {
 			cs = append(cs, c)
 		}
 	}

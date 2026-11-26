@@ -496,6 +496,8 @@ func (s *Server) handle(c *Conn, m *pb.ClientMessage) {
 		}
 		c.send(&pb.ServerMessage{RequestId: id, Body: &pb.ServerMessage_Ack{Ack: &pb.Ack{}}})
 		c.drainAndClose()
+		// Other connections resumed with the same token end with it.
+		s.closeConnsWhere(c.user.ID, func(o *Conn) bool { return o != c && o.token == c.token })
 	case *pb.ClientMessage_SendInvite:
 		s.sendInvite(c, id, b.SendInvite.Username)
 	case *pb.ClientMessage_RespondInvite:

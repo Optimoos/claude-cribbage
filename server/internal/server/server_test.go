@@ -420,6 +420,11 @@ func TestResumeOnNewConnection(t *testing.T) {
 func TestLogout(t *testing.T) {
 	_, addr := startServer(t)
 	a := login(t, addr, "alice")
+	// A second connection on the same token, which logging out must end.
+	twin := connect(t, addr)
+	if _, err := twin.Resume(a.auth.Token); err != nil {
+		t.Fatal(err)
+	}
 	if a.next(t, replyTo(a.send(t, &pb.ClientMessage{Body: &pb.ClientMessage_Logout{Logout: &pb.Logout{}}}))).GetAck() == nil {
 		t.Fatal("logout not acknowledged")
 	}
@@ -430,6 +435,15 @@ func TestLogout(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("connection kept open after logout")
+	}
+	twin.startReading()
+	select {
+	case _, ok := <-twin.msgs:
+		for ok {
+			_, ok = <-twin.msgs
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("same-token connection kept open after logout")
 	}
 	var se client.ServerError
 	if _, err := connect(t, addr).Resume(a.auth.Token); !errors.As(err, &se) {
