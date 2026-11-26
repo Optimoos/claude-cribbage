@@ -28,7 +28,7 @@ func collect(t *testing.T, newA, newB func(int) bots.Bot, games int, seed uint64
 
 func TestPairFileRoundTrip(t *testing.T) {
 	random := func(w int) bots.Bot { return bots.NewRandom(uint64(w)) }
-	f := &PairFile{Bot: "heuristic", Opponent: "random", Seed: 9, Pairs: collect(t, heuristic, random, 100, 9)}
+	f := &PairFile{Bot: "heuristic", Opponent: "random", Seed: 9, Start: "90,110", Pairs: collect(t, heuristic, random, 100, 9)}
 	path := filepath.Join(t.TempDir(), "p.csv")
 	if err := f.Save(path); err != nil {
 		t.Fatal(err)

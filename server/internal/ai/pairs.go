@@ -16,6 +16,7 @@ import (
 type PairFile struct {
 	Bot, Opponent string
 	Seed          uint64
+	Start         string // "LO,HI" for games started at scores in [LO, HI]; empty for whole games
 	Pairs         []Pair // in deal order
 }
 
@@ -29,7 +30,11 @@ func (f *PairFile) Save(path string) error {
 		return err
 	}
 	w := bufio.NewWriter(out)
-	fmt.Fprintf(w, "# bot %s\n# opponent %s\n# seed %d\n%s\n", f.Bot, f.Opponent, f.Seed, pairHeader)
+	fmt.Fprintf(w, "# bot %s\n# opponent %s\n# seed %d\n", f.Bot, f.Opponent, f.Seed)
+	if f.Start != "" {
+		fmt.Fprintf(w, "# start %s\n", f.Start)
+	}
+	fmt.Fprintf(w, "%s\n", pairHeader)
 	for _, p := range f.Pairs {
 		fmt.Fprintf(w, "%d,%d,%d,%d,%d,%d,%d,%d,%d,%016x\n", p.Deal, p.WinsA, p.Margin, p.Peg, p.Hands,
 			p.PointsA, p.PointsB, p.PegA, p.PegB, p.Trace)
@@ -69,6 +74,8 @@ func readPairFile(r io.Reader) (*PairFile, error) {
 				return nil, fmt.Errorf("line %d: %v", line, err)
 			}
 			f.Seed = s
+		case strings.HasPrefix(t, "# start "):
+			f.Start = t[len("# start "):]
 		case t == pairHeader || t == "" || strings.HasPrefix(t, "#"):
 		default:
 			var p Pair

@@ -136,9 +136,29 @@ func LoadCorpus(path string) (CorpusMeta, []HandRecord, error) {
 		if err != nil {
 			return meta, nil, err
 		}
+		if !h.valid() {
+			return meta, nil, fmt.Errorf("%s: corrupt record %d", path, len(recs))
+		}
 		recs = append(recs, h)
 	}
 	return meta, recs, nil
+}
+
+// valid reports whether the record's values are in range, so a corrupt
+// file is refused rather than indexing out of bounds later. A show or crib
+// of noCrib was never scored (the game ended first).
+func (h *HandRecord) valid() bool {
+	ok := h.Dealer < 2 && (h.Winner == 0 || h.Winner == 1 || h.Winner == -1) && h.PlayN <= 8 && h.StepN <= 20 && h.Starter < 52 && (h.Crib < maxShow || h.Crib == noCrib)
+	for _, p := range h.Plays[:min(h.PlayN, 8)] {
+		ok = ok && p&0x7f < 52
+	}
+	for s := range 2 {
+		ok = ok && h.Start[s] <= engine.WinScore && h.End[s] <= engine.WinScore && (h.Show[s] < maxShow || h.Show[s] == noCrib) && h.Peg[s] <= engine.WinScore
+		for _, c := range append(h.Six[s][:], h.Discards[s][:]...) {
+			ok = ok && c < 52
+		}
+	}
+	return ok
 }
 
 // CollectCorpus plays meta.Games games between bots made by newA (seat 0)
@@ -310,8 +330,7 @@ func playCorpusGame(id uint32, seed uint64, players [2]bots.Bot, meta CorpusMeta
 
 // CorpusFilter chooses which hands of a corpus go into a SelfPlay.
 type CorpusFilter struct {
-	NoExplore   bool // drop hands where either seat discarded at random
-	NoSynthetic bool // drop hands of games that started from chosen scores
+	NoExplore bool // drop hands where either seat discarded at random
 }
 
 // SelfPlay turns corpus hands into the data the table builders take:
@@ -322,7 +341,7 @@ func CorpusSelfPlay(recs []HandRecord, f CorpusFilter) *SelfPlay {
 	games := map[uint32]bool{}
 	for i := range recs {
 		r := &recs[i]
-		if (f.NoExplore && r.Flags&(FlagExplore0|FlagExplore1) != 0) || (f.NoSynthetic && r.Flags&FlagSynthetic != 0) {
+		if f.NoExplore && r.Flags&(FlagExplore0|FlagExplore1) != 0 {
 			continue
 		}
 		games[r.Game] = true

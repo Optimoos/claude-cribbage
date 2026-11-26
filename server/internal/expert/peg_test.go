@@ -183,11 +183,10 @@ func TestPegPointsMatchesEngine(t *testing.T) {
 }
 
 func TestSampleIsSystematic(t *testing.T) {
-	s := newSearcher(&WinTable{}, 2)
 	// Total weight 8.5 in two draws: at 2.125 and 6.375, both in the
 	// heavy second world.
-	s.worlds = []world{{weight: 1}, {weight: 6, show: 7}, {weight: 1}, {weight: 0.5}}
-	got := s.sample()
+	var out []world
+	got := systematic([]world{{weight: 1}, {weight: 6, show: 7}, {weight: 1}, {weight: 0.5}}, 2, &out)
 	if len(got) != 1 || got[0].show != 7 || got[0].weight != 2 {
 		t.Fatalf("sample %+v, want the second world twice", got)
 	}

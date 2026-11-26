@@ -78,6 +78,20 @@ func Read(r io.Reader) (*Net, Meta, error) {
 	if len(s) < 2 || s[len(s)-1] != 1 {
 		return nil, meta, fmt.Errorf("nn: bad sizes %v", s)
 	}
+	// Check the shape before allocating from it: a corrupt header must not
+	// ask for gigabytes. The largest real model has about 150k weights.
+	total := 0
+	for l, v := range s {
+		if v < 1 || v > 1<<16 {
+			return nil, meta, fmt.Errorf("nn: bad sizes %v", s)
+		}
+		if l+1 < len(s) {
+			total += v*s[l+1] + s[l+1]
+		}
+	}
+	if total > 1<<24 {
+		return nil, meta, fmt.Errorf("nn: %d weights is too many", total)
+	}
 	n := &Net{}
 	buf := make([]byte, 4)
 	for l := 0; l+1 < len(s); l++ {

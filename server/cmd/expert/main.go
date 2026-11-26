@@ -213,6 +213,9 @@ func makeBundle(ctx context.Context, spec buildSpec) (*expert.Bundle, error) {
 		if b.KeepExact != nil || b.PegPair != nil {
 			fmt.Println("note: the exact keep and shape-pair tables come from -base, fitted with its discard tables; rebuild them for the new ones")
 		}
+		if !want["keep"] && b.KeepTemp != [2]float64{} {
+			fmt.Println("note: the keep temperatures come from -base, fitted with its discard tables; add -tables keep to refit them")
+		}
 	}
 	if want["keep"] {
 		if b.Discard == nil {
@@ -223,7 +226,7 @@ func makeBundle(ctx context.Context, spec buildSpec) (*expert.Bundle, error) {
 		b.Meta.Sources["keep"] = *bot
 		b.Meta.Metrics["keep_temp_dealer"], b.Meta.Metrics["keep_temp_pone"] = temps[0], temps[1]
 		b.Meta.Metrics["keep_loglik_dealer"], b.Meta.Metrics["keep_loglik_pone"] = ll[0], ll[1]
-		fmt.Printf("keep model: temperature %.3f (dealer), %.3f (pone); mean log-likelihood %.3f, %.3f\n", temps[0], temps[1], ll[0], ll[1])
+		fmt.Printf("keep model: temperature %.3f (dealer), %.3f (pone); mean log-likelihood %.3f, %.3f (from at most 50,000 hands a side)\n", temps[0], temps[1], ll[0], ll[1])
 	}
 	b.Meta.Saved = time.Now().UTC().Format(time.RFC3339)
 	b.Meta.Source, b.Meta.Games, b.Meta.Hands, b.Meta.Seed = *bot, sp.Games, sp.Hands.Len(), spec.seed

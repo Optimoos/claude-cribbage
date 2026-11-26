@@ -31,7 +31,7 @@ func rollout(ctx context.Context, args []string) error {
 	decisions := fs.Int("decisions", 2000, "discard decisions to value")
 	samples := fs.Int("samples", 1000, "opponent hands and starters per decision, shared by its options")
 	pegEffort := fs.Int("peg-effort", 25, "search effort of both players' pegging in the playouts")
-	policies := fs.String("policies", "expert,heuristic,heuristic2", "discard policies to score: expert (the bundle's discarder) or registered bot names")
+	policies := fs.String("policies", "expert,heuristic,heuristic2", "discard policies to score: expert (the bundle's discarder with default options: not cond or islambda, as the very hard level uses) or registered bot names")
 	seed := fs.Uint64("seed", 950001, "base seed for the games the decisions come from and for the samples")
 	workers := fs.Int("workers", runtime.NumCPU(), "parallel decisions")
 	out := fs.String("out", "", "write each option's values here as CSV (for testing other discarders later)")
