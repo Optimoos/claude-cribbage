@@ -333,3 +333,29 @@ func TestFullServerEvictsAnonymous(t *testing.T) {
 		t.Fatal("evicted a connection from an address with fewer anonymous ones")
 	}
 }
+
+// History's first page (with the records over every finished game) is
+// limited per player; later pages are not.
+func TestHistoryRecordsLimited(t *testing.T) {
+	addr := startRemote(t, "203.0.113.40", AuthLimits{
+		AttemptsPerIP: 100, AttemptEvery: time.Hour,
+		ConnsPerAddr: 10, Conns: 100, LoginWithin: time.Minute,
+	})
+	c := connect(t, addr)
+	c.startReading()
+	if c.next(t, replyTo(c.send(t, botLogin("alice")))).GetAuthOk() == nil {
+		t.Fatal("login failed")
+	}
+	history := func(after string) *pb.ServerMessage {
+		return c.next(t, replyTo(c.send(t, &pb.ClientMessage{Body: &pb.ClientMessage_GetHistory{GetHistory: &pb.GetHistory{After: after}}})))
+	}
+	for i := 0; i < 5; i++ {
+		if history("").GetHistory() == nil {
+			t.Fatalf("first page %d refused", i)
+		}
+	}
+	wantError(t, history(""), pb.ErrorCode_ERROR_CODE_RATE_LIMITED)
+	if history("1:x").GetHistory() == nil {
+		t.Fatal("a later page was refused")
+	}
+}

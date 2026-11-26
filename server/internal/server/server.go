@@ -169,6 +169,7 @@ type Server struct {
 	imu                    sync.Mutex
 	inv                    invites
 	invitesSent, codeTries *ratelimit.Limiter
+	records                *ratelimit.Limiter // GetHistory first pages, which total every finished game
 
 	devices devices // sign-ins waiting for approval from another device
 
@@ -230,17 +231,19 @@ func New(cfg Config) *Server {
 		// one a minute.
 		invitesSent: ratelimit.New(10, 6*time.Minute),
 		codeTries:   ratelimit.New(10, time.Minute),
-		devices:     newDevices(),
-		auth:        cfg.Auth,
-		gameStore:   cfg.Games,
-		log:         cfg.Logger,
-		outbox:      cfg.OutboxSize,
-		quit:        make(chan struct{}),
-		allConns:    map[*Conn]struct{}{},
-		games:       map[string]*game{},
-		userGames:   map[int64]map[string]*game{},
-		open:        map[string]*game{},
-		conns:       map[int64]map[*Conn]struct{}{},
+		// Five history first pages, then one every ten seconds.
+		records:   ratelimit.New(5, 10*time.Second),
+		devices:   newDevices(),
+		auth:      cfg.Auth,
+		gameStore: cfg.Games,
+		log:       cfg.Logger,
+		outbox:    cfg.OutboxSize,
+		quit:      make(chan struct{}),
+		allConns:  map[*Conn]struct{}{},
+		games:     map[string]*game{},
+		userGames: map[int64]map[string]*game{},
+		open:      map[string]*game{},
+		conns:     map[int64]map[*Conn]struct{}{},
 	}
 	go s.sweep()
 	return s

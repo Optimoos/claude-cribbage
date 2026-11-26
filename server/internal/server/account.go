@@ -330,6 +330,10 @@ func (s *Server) getHistory(c *Conn, id uint32, m *pb.GetHistory) {
 		limit = historyPage
 	}
 	limit = min(limit, historyPageMax)
+	if m.After == "" && limited(c) && !s.records.Take(c.userKey, time.Now()) {
+		c.sendError(id, pb.ErrorCode_ERROR_CODE_RATE_LIMITED, "", "too many requests; slow down")
+		return
+	}
 	var before store.Cursor
 	if m.After != "" {
 		var ok bool
