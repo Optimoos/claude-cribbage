@@ -172,6 +172,9 @@ type Server struct {
 	devices devices // sign-ins waiting for approval from another device
 
 	bg sync.WaitGroup // background requests, such as sending email
+	// readers: connections' read loops, which handle requests (and may
+	// write to the store) themselves.
+	readers sync.WaitGroup
 
 	stats struct {
 		gamesStarted, gamesFinished, actions, conns atomic.Int64
@@ -295,7 +298,9 @@ func (s *Server) ServeConn(t Transport) {
 	if c.addr != "" {
 		s.connsByAddr[c.addr]++
 	}
+	s.readers.Add(1)
 	s.cmu.Unlock()
+	defer s.readers.Done()
 	if c.addr != "" {
 		// Remote connections must sign in promptly, or soon after they
 		// start to (asking for a code, say).
@@ -872,6 +877,8 @@ func (s *Server) Shutdown() {
 				c.close()
 			}
 		}
+		// A request being handled finishes before the store can close.
+		s.readers.Wait()
 	})
 }
 

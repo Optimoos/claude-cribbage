@@ -68,6 +68,13 @@ func fakeSMTP(t *testing.T) (string, chan string) {
 					}
 				}
 				say("250 queued")
+			case "RCPT":
+				if strings.Contains(strings.ToLower(line), "reject") {
+					// Real servers echo the address, here in another case.
+					say("550 5.1.1 " + strings.ToLower(strings.TrimSpace(line[8:])) + ": Recipient address rejected")
+				} else {
+					say("250 ok")
+				}
 			case "QUIT":
 				say("221 bye")
 				got <- log.String()
@@ -109,6 +116,16 @@ func TestSMTPSend(t *testing.T) {
 	}
 	if !strings.Contains(strings.ReplaceAll(s, "=\r\n", ""), strings.ReplaceAll(link, "=", "=3D")) {
 		t.Errorf("link mangled:\n%s", s)
+	}
+}
+
+// A refused recipient's address stays out of the error, which is logged.
+func TestSMTPErrorHidesAddress(t *testing.T) {
+	addr, _ := fakeSMTP(t)
+	m := &SMTP{Addr: addr, From: "crib@example.com"}
+	err := m.Send(context.Background(), Message{To: "Reject.Me@example.com", Subject: "s", Body: "b"})
+	if err == nil || strings.Contains(strings.ToLower(err.Error()), "reject.me@example.com") || !strings.Contains(err.Error(), "550") {
+		t.Fatalf("error: %v", err)
 	}
 }
 

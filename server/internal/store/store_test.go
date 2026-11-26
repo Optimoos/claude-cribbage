@@ -571,6 +571,9 @@ func TestPasskeys(t *testing.T) {
 		if err := s.AddPasskey(ctx, &Passkey{ID: []byte("k1"), UserID: b.ID, Data: []byte("x"), Created: t0}); err == nil {
 			t.Fatal("a credential ID was stored twice")
 		}
+		if err := s.AddPasskey(ctx, &Passkey{ID: []byte("k9"), UserID: b.ID + 100, Data: []byte("x"), Created: t0}); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("passkey for a missing account: %v", err)
+		}
 		keys, err := s.Passkeys(ctx, a.ID)
 		if err != nil || len(keys) != 2 || string(keys[0].ID) != "k1" || keys[1].Name != "Laptop" || !keys[0].LastUsed.IsZero() {
 			t.Fatalf("passkeys: %+v, %v", keys, err)

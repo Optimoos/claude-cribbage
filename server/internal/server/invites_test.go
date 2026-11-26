@@ -155,6 +155,29 @@ func TestInvitesExpire(t *testing.T) {
 	}
 }
 
+// An invite past its time cannot be accepted, even before the hourly
+// sweep removes it.
+func TestExpiredInviteRefused(t *testing.T) {
+	srv, addr := startServerWith(t, loadLimits)
+	a := login(t, addr, "alice")
+	b := login(t, addr, "bob")
+	c := login(t, addr, "carol")
+	a.next(t, replyTo(a.send(t, sendInvite("bob"))))
+	in := b.next(t, pushedInvites).GetInvites().Invites[0]
+	code := a.next(t, replyTo(a.send(t, sendInvite("")))).GetInvites().Invites
+	srv.imu.Lock()
+	for _, inv := range srv.inv.byID {
+		inv.Expires = time.Now().Add(-time.Minute)
+	}
+	srv.imu.Unlock()
+	wantError(t, b.next(t, replyTo(b.send(t, respond(in.InviteId, true)))), pb.ErrorCode_ERROR_CODE_NOT_FOUND)
+	for _, inv := range code {
+		if inv.Code != "" {
+			wantError(t, c.next(t, replyTo(c.send(t, redeem(inv.Code)))), pb.ErrorCode_ERROR_CODE_NOT_FOUND)
+		}
+	}
+}
+
 // Invites survive a restart, and an offline player sees theirs on login.
 func TestInvitesPersist(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "s.db")

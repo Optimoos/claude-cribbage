@@ -16,6 +16,7 @@ import (
 	"net"
 	"net/mail"
 	"net/smtp"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -95,10 +96,23 @@ func (m *SMTP) Check() error {
 	return nil
 }
 
+// Send delivers msg. Its errors never contain the recipient's address
+// (mail servers often repeat it when they refuse one), since they are
+// logged and the log keeps no addresses.
 func (m *SMTP) Send(ctx context.Context, msg Message) error {
+	err := m.send(ctx, msg)
+	if err != nil && msg.To != "" {
+		if re, rerr := regexp.Compile(`(?i)` + regexp.QuoteMeta(msg.To)); rerr == nil && re.MatchString(err.Error()) {
+			return errors.New(re.ReplaceAllString(err.Error(), "<recipient>"))
+		}
+	}
+	return err
+}
+
+func (m *SMTP) send(ctx context.Context, msg Message) error {
 	to := msg.To
 	if !ValidAddress(to) {
-		return fmt.Errorf("bad recipient %q", to)
+		return errors.New("bad recipient address")
 	}
 	data, err := m.message(msg)
 	if err != nil {

@@ -206,7 +206,7 @@ func (s *Server) respondInvite(c *Conn, id uint32, inviteID string, accept bool)
 	s.imu.Lock()
 	inv := s.inv.byID[inviteID]
 	switch {
-	case inv == nil || (inv.From != c.user.ID && inv.To != c.user.ID):
+	case inv == nil || (inv.From != c.user.ID && inv.To != c.user.ID) || time.Now().After(inv.Expires): // the hourly sweep removes it
 		s.imu.Unlock()
 		c.sendError(id, pb.ErrorCode_ERROR_CODE_NOT_FOUND, "", "that invite has expired or been withdrawn")
 		return
@@ -236,7 +236,7 @@ func (s *Server) redeemCode(c *Conn, id uint32, code string) {
 	s.imu.Lock()
 	inv := s.inv.byCode[code]
 	switch {
-	case code == "" || inv == nil:
+	case code == "" || inv == nil || time.Now().After(inv.Expires):
 		s.imu.Unlock()
 		c.sendError(id, pb.ErrorCode_ERROR_CODE_NOT_FOUND, "", "no invite has that code; codes last 48 hours")
 		return
