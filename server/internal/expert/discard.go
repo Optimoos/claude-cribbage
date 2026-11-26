@@ -26,7 +26,7 @@ type discarder struct {
 	// Per option: distributions over the starters I cannot see.
 	pm, po  []float32                 // my and the opponent's pegging points
 	qmix    [maxShow]float64          // the opponent's show
-	hand    [maxShow]float64          // my show (dealer: my show plus my crib)
+	hand    [2 * maxShow]float64      // my show (dealer: my show plus my crib)
 	cribByH [maxShow][maxShow]float64 // pone: P(my show, their crib)
 	// pone: P(my show, their show plus their crib)
 	theirsByH [maxShow][2 * maxShow]float64
@@ -182,7 +182,7 @@ func (d *discarder) tableOption(kept [4]engine.Card, disc [2]engine.Card, held *
 			// My show and my crib are counted together, after theirs.
 			for c, p := range crib {
 				if p != 0 {
-					d.hand[min(h+heels+c, maxShow-1)] += w * float64(p)
+					d.hand[min(h+heels+c, 2*maxShow-1)] += w * float64(p)
 				}
 			}
 			continue

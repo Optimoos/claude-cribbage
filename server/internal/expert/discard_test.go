@@ -84,3 +84,29 @@ func TestDiscardAgreesWithHeuristicMostly(t *testing.T) {
 	}
 	t.Logf("agreed on %d of %d discards", agree, n)
 }
+
+// The dealer's show plus crib can pass 29: keeping 4-5-5-6 and throwing
+// 5-6 makes 24 with a 4, 5 or 6 starter, and a 5-6 crib often adds 6 more.
+func TestDealerShowPlusCribPasses29(t *testing.T) {
+	_, tabs := heuristicTables(t, 200)
+	d := newDiscarder(&WinTable{}, tabs)
+	d.iDeal = true
+	c := engine.NewCard
+	kept := [4]engine.Card{c(4, 0), c(5, 0), c(5, 1), c(6, 0)}
+	disc := [2]engine.Card{c(5, 2), c(6, 1)}
+	var held [52]bool
+	for _, x := range append(kept[:], disc[:]...) {
+		held[x] = true
+	}
+	d.tableOption(kept, disc, &held, func(engine.Card) bool { return true }, false)
+	var all, over float64
+	for i, p := range d.hand {
+		all += p
+		if i >= maxShow {
+			over += p
+		}
+	}
+	if math.Abs(all-1) > 1e-6 || over == 0 {
+		t.Errorf("show plus crib: total %v, above 29 %v", all, over)
+	}
+}
