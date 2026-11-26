@@ -34,13 +34,12 @@ const (
 	maxChallenges     = 100000 // live challenges, so they cannot exhaust memory
 )
 
-// ticket is one account's code and link, a registration's, or a new
-// account's (fresh), whose username is chosen once the code is in.
+// ticket is one account's code and link, or a new account's (fresh), whose
+// username is chosen once the code is in.
 type ticket struct {
-	userID  int64       // 0 for a registration or a fresh account
-	reg     *store.User // the account a registration creates
-	fresh   bool        // creates an account at email, named when used
-	email   string      // where it was sent
+	userID  int64  // 0 for a fresh account
+	fresh   bool   // creates an account at email, named when used
+	email   string // where it was sent
 	code    string
 	link    string
 	expires time.Time
@@ -211,7 +210,7 @@ func (s *Service) RequestSignIn(ctx context.Context, challengeID, name string) (
 		return len(users), nil
 	case len(users) == 0 && !s.regLimit.Take("", now):
 		// Only a new-account code: mail to an address nobody has shown is
-		// theirs, limited like registering.
+		// theirs, limited for everyone together (regLimit).
 		s.log().Warn("email not sent: too many new accounts from everyone lately", "kind", "new-account code")
 		return 0, nil
 	}
@@ -323,69 +322,6 @@ func (s *Service) usersNamed(ctx context.Context, name string) ([]*store.User, e
 	return out, nil
 }
 
-// Register starts creating an account: it mails a code and link to email
-// and returns the challenge. The account is created when one is used.
-func (s *Service) Register(ctx context.Context, username, nickname, email string) (string, error) {
-	email = strings.TrimSpace(email)
-	nickname = strings.TrimSpace(nickname)
-	if nickname == "" {
-		nickname = username
-	}
-	if err := validUsername(username); err != nil {
-		return "", err
-	}
-	if err := validNickname(nickname); err != nil {
-		return "", err
-	}
-	if err := s.CheckEmail(email); err != nil {
-		return "", err
-	}
-	s.init()
-	if _, err := s.Store.UserByUsername(ctx, username); err == nil {
-		return "", store.ErrUsernameTaken
-	} else if !errors.Is(err, store.ErrNotFound) {
-		return "", err
-	}
-	if err := s.stopped(ctx, "registration code", email); err != nil {
-		return "", err
-	}
-	if !s.mailAllowed(0, email) {
-		return "", ErrMailLimit
-	}
-	now := time.Now()
-	if !s.regLimit.Take("", now) {
-		s.log().Warn("email not sent: too many registrations from everyone lately", "kind", "registration code")
-		return "", ErrTooManyAccounts
-	}
-	s.mu.Lock()
-	id, c, err := s.newChallenge(now)
-	if err != nil {
-		s.mu.Unlock()
-		return "", err
-	}
-	t := s.newTicket(now, email)
-	t.reg = &store.User{Username: username, Nickname: nickname, Email: email}
-	c.tickets = append(c.tickets, t)
-	s.mu.Unlock()
-
-	body := fmt.Sprintf(`Hello %s,
-
-Your code to finish creating the cribbage account "%s" is:
-
-    %s
-
-Enter it in the game within %s. Or, to finish with the web browser on this device, open this link:
-
-%s
-
-If you did not ask for an account, ignore this email and none will be made.
-`, nickname, username, showCode(t.code), duration(s.codeTTL()), s.link("signin", t.link))
-	if err := s.send(ctx, "registration code", email, "Your Cribbage code: "+showCode(t.code), body); err != nil {
-		return "", fmt.Errorf("send registration code: %w", err)
-	}
-	return id, nil
-}
-
 // NeedsUsername is the error from a code or link that creates an account
 // (a fresh one) given without a username. The code or link stays good:
 // give it again with one.
@@ -395,7 +331,7 @@ type NeedsUsername struct {
 
 func (e *NeedsUsername) Error() string { return "choose a username for the new account" }
 
-// EnterCode signs in (or finishes registering) with a challenge and the
+// EnterCode signs in (or creates an account) with a challenge and the
 // code mailed for it. A code that creates an account needs a username (and
 // optionally a nickname): without one it returns *NeedsUsername, and the
 // code stays good, as it does if the username is taken or invalid.
@@ -491,7 +427,7 @@ func (s *Service) createFresh(ctx context.Context, t *ticket, username, nickname
 	return s.SignIn(ctx, u)
 }
 
-// UseSignInLink signs in (or finishes registering) with a link's token. A
+// UseSignInLink signs in (or creates an account) with a link's token. A
 // link that creates an account needs a username, as its code does
 // (EnterCode).
 func (s *Service) UseSignInLink(ctx context.Context, token, username, nickname string) (*Result, error) {
@@ -526,17 +462,9 @@ func (s *Service) use(t *ticket) {
 	}
 }
 
-// complete creates a registration's account, or checks that a sign-in's
-// account still has the address the code went to, and starts a session.
+// complete checks that a sign-in's account still has the address the code
+// went to, and starts a session.
 func (s *Service) complete(ctx context.Context, t *ticket) (*Result, error) {
-	if t.reg != nil {
-		u := *t.reg
-		u.Created = time.Now()
-		if err := s.Store.CreateUser(ctx, &u); err != nil {
-			return nil, err
-		}
-		return s.SignIn(ctx, &u)
-	}
 	u, err := s.Store.UserByID(ctx, t.userID)
 	if errors.Is(err, store.ErrNotFound) {
 		return nil, ErrBadToken

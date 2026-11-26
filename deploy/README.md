@@ -60,10 +60,13 @@ install -m 0755 /tmp/cribserver /opt/cribbage/
 install -m 0644 /tmp/expert.bin /opt/cribbage/
 
 # Settings, then the service. Edit cribserver.conf first (your domain and
-# mail account) and create the secrets: see "Signing in and email" below.
-# The service does not start without them.
+# mail account) and create the secrets (see "Signing in and email" below
+# for what they are): the service does not start without them.
 install -d -m 0755 /etc/cribbage
 install -m 0644 cribserver.conf /etc/cribbage/
+install -m 0600 /dev/stdin /etc/cribbage/smtp-password <<< 'the-smtp-password'
+# Once only: a new key locks the server out of the database (see below).
+[ -e /etc/cribbage/email-key ] || openssl rand -hex 32 | install -m 0600 /dev/stdin /etc/cribbage/email-key
 cp cribbage.service /etc/systemd/system/
 systemctl daemon-reload
 systemctl enable --now cribbage
@@ -191,19 +194,18 @@ shows them.
 So email must work before anyone can play. You need an SMTP account that
 may send from your domain, for example Postmark, Resend, Amazon SES, or
 your mailbox provider's SMTP login. Set up SPF and DKIM for the sender
-domain as the provider describes, or the codes land in spam. Then:
-
-```sh
-install -m 0600 /dev/stdin /etc/cribbage/smtp-password <<< 'the-smtp-password'
-openssl rand -hex 32 | install -m 0600 /dev/stdin /etc/cribbage/email-key
-```
+domain as the provider describes, or the codes land in spam. The install
+steps above create the two secrets, `/etc/cribbage/smtp-password` and
+`/etc/cribbage/email-key`.
 
 Email addresses are stored encrypted with that key (AES-256-GCM), so the
 database and its backups reveal none without it. **Back the key up
-somewhere safe, apart from the database backups.** Without it nobody can
-sign in by email until you set each account's address again (below), and
-the server refuses to start with a different key than the one the
-database was first used with.
+somewhere safe, apart from the database backups.** Without it the server
+will not start on this database or any of its backups: it refuses any key
+but the one the database was first used with ("the email key does not
+match"), and systemd restarts it every 2 seconds. A key that came from
+`CRIBBAGE_EMAIL_KEY` or the default `<db>.email-key` is not in the backup
+folder either, so keep it with the one above.
 
 Put your values in `/etc/cribbage/cribserver.conf` (`public-url`, `smtp`,
 `smtp-user`, `mail-from`), then run
@@ -259,7 +261,8 @@ username. Their finished games stay in their opponents' history as
 sudo cribserver admin -socket /run/cribbage/admin.sock delete-account <username>
 ```
 
-It asks you to type the username again (`-yes` skips that). A deleted
+It asks you to type the username again. `-yes` skips that, and goes before
+the command: `admin -socket … -yes delete-account <username>`. A deleted
 account stays in database backups until they rotate out (a week by
 default), with its address encrypted.
 
@@ -338,11 +341,17 @@ To restore:
 ```sh
 systemctl stop cribbage
 cd /var/lib/cribbage
-mv cribbage.db cribbage.db.broken; rm -f cribbage.db-wal cribbage.db-shm
+mv cribbage.db cribbage.db.broken
+mv cribbage.db-wal cribbage.db.broken-wal 2>/dev/null; rm -f cribbage.db-shm   # the WAL may hold the latest moves
 cp backups/cribbage-YYYYMMDD-HHMMSS.db cribbage.db
 chown cribbage:cribbage cribbage.db
 systemctl start cribbage
+journalctl -u cribbage -n 20   # "the email key does not match": wrong key, see above
 ```
+
+To look at the latest moves in the broken copy, copy `cribbage.db.broken`
+and `cribbage.db.broken-wal` elsewhere as `x.db` and `x.db-wal`, and open
+`x.db` with `sqlite3`.
 
 ## AWS: a Spot instance
 
@@ -396,12 +405,15 @@ aws iam add-role-to-instance-profile --instance-profile-name cribbage-server --r
 ```
 
 The server can add backups but cannot list, read or delete them. If it is
-broken into, the copies in S3 stay out of reach, and versioning keeps the
-original if someone overwrites one. New buckets block public access and
+broken into, it can still overwrite them, and versioning keeps the
+original for only a day (`NoncurrentDays`), so check S3 within a day of a
+break-in; a longer `NoncurrentDays` keeps them longer, but deleted accounts
+then stay in S3 that much longer too (change the privacy page). New buckets block public access and
 encrypt at rest by default.
 
-S3 keeps each backup for 7 days, matching what the privacy page promises
-about deleted accounts. If you keep them longer, change the sentence about
+S3 keeps each backup for 7 days, plus a day as an old version, each
+rounded up to midnight UTC and deleted some hours after that: up to about
+10 days, as the privacy page says about deleted accounts. If you keep them longer, change the sentence about
 backups in `server/web/static/privacy.html` too. A week of backups of a
 small database costs well under a cent a month.
 
@@ -514,7 +526,14 @@ journalctl -u cribbage-s3-backup        # "uploaded cribbage-....db to s3://..."
 ```
 
 The job checks hourly and uploads each new backup once. It remembers what
-it uploaded in `/var/lib/cribbage-s3-backup`. Credentials come from the
+it uploaded in `/var/lib/cribbage-s3-backup`. It fails when an upload
+fails, and when the newest backup is over 26 hours old (the server's own
+backup failing logs only `database backup failed`); `systemctl --failed`
+shows it. **Nothing tells you otherwise.** For an alert, make a check at a
+dead-man's-switch service (healthchecks.io has a free tier) with a 25-hour
+period and set `Environment=CRIBBAGE_PING_URL=https://hc-ping.com/...` in
+the .service file: the job pings it after each good run, so a failed
+backup, upload, timer or machine all stop the pings. Credentials come from the
 instance's role, so there are no keys on the machine.
 
 **Keep the email key out of S3.** Store `/etc/cribbage/email-key` in a
@@ -523,8 +542,11 @@ should not be lost together, or stolen together.
 
 ### Restoring onto a new instance
 
-Launch and install as above, with the same email key. Then copy a backup
-down from your machine (the instance's role cannot read the bucket):
+Launch and install as above, with the same email key, **but do not turn on
+the S3 job yet**: the new server's first backup is of its empty database,
+and once uploaded it is the newest file in S3. Copy a backup down from your
+machine (the instance's role cannot read the bucket; `B` is your bucket
+name):
 
 ```sh
 aws s3 ls s3://$B/backups/
@@ -532,8 +554,9 @@ aws s3 cp s3://$B/backups/cribbage-YYYYMMDD-HHMMSS.db .
 scp cribbage-YYYYMMDD-HHMMSS.db admin@SERVER:   # then sudo mv it into /var/lib/cribbage/backups/
 ```
 
-and follow "To restore" under Backups. Move the Elastic IP to the new
-instance, and DNS needs no change.
+and follow "To restore" under Backups. Then delete the empty first backup
+from `/var/lib/cribbage/backups/` and turn on the S3 job. Move the Elastic
+IP to the new instance, and DNS needs no change.
 
 ### Housekeeping
 
@@ -602,7 +625,8 @@ A server with a public IP is reachable from nearly every home network, so
 start without TURN. If players on networks that block UDP (some offices
 and schools) cannot connect, run [coturn](https://github.com/coturn/coturn)
 on this machine on port 3478 (and 5349 for TLS; 443 belongs to cribserver), open
-those ports, and pass `-ice-servers turn:api.cribbage.example.com:3478` (with
+those ports, and set `ice-servers = turn:api.cribbage.example.com:3478` in
+`cribserver.conf` (with
 credentials as coturn is configured); browsers get the list from
 `/api/config`.
 

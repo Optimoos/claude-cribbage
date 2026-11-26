@@ -49,49 +49,108 @@ Checked after the fixes: `go vet ./...` clean, `go test ./...` passes,
 `go test -race -short` passes on the engine, bots, ai, expert, players and
 protocol packages, `dotnet build` of the Godot client has no warnings,
 `node --check app.js` passes. **Not checked: the web and Godot changes
-were not run in a browser or in Godot.** See the first row below.
+were not run in a browser or in Godot.** The second pass, below, ran most of them.
+
+## Second pass (2026-11-25)
+
+On branch `audit-followup` (web tests, Register) and `crib-cap` (#10):
+
+| # | Was | Now |
+|---|---|---|
+| 7 | The web client had no tests. | `server/web/test`: Playwright in headless Chromium, against a real `cribserver` per test (own port, empty database, emails read from its log). Six tests (a seventh, History opened twice, came in the third pass): a sign-in link that creates an account, one that signs in an existing account, a delete link, Sign out with the server gone, the next user on the same tab after a session ended from another device, and a game that ended while the page was offline. Each fails on the client from before the fixes (`b86e088`) at the step its finding names, and passes now. Runs in CI as the `web` job of `server-tests.yml`. Run: `cd server/web/test && npm ci && npx playwright install chromium && npx playwright test`. |
+| 10 | The dealer's hand plus crib was capped at 29 in the discard valuation. | The array is per-decision scratch, not stored in the bundle, so it doubled without a rebuild. New test `TestDealerShowPlusCribPasses29`, checked to fail with the cap. Measured as PLAN M46 (on `crib-cap`), paired by deal against the old code: +0.00 ± 0.01 win % from scores 70-95 (14 of 20,000 deals changed), +0.01 ± 0.01 over full games (26 of 10,000); the Hard level, which takes the other edited path, -0.01 ± 0.01 (45 of 10,000). Neutral; kept as a correctness fix. Needs no new bundle. |
+| 11 | The server still served `Register`, which no client sends. | Removed: the request, `auth.Register`, the `registers` limiter and `AuthLimits.RegistersPerIP`, the ticket's `reg` branch and `ErrTooManyAccounts` (only Register returned it). Field 10 is reserved in the proto. The tests that made accounts through it now use the new-account code from `RequestSignIn`; the checks that only Register could reach moved to the mailbox (`TestStopEmail` checks no mail goes to a stopped address's +tag variant; `TestMailboxLimit` uses accounts made directly, so the new-account cap plays no part). `TestRegistrationLimit` was dropped: `TestNewAccountCodeLimit` tests the same cap through sign-in. The Godot client builds against the new proto. |
+
+Answers to two "Not checked" rows:
+- **Pri 7, the deployed page:** `origin/pages` contains `ed19136`, and the three link tests fail on its copy of `static/`, each just after the button on the link's panel is clicked. **Emailed sign-in and delete links do not work in production today.** The fix is on `main`; shipping it is a `pages` push (after the server, per deploy/README.md). This is inferred from the branch's client under test, not seen on the live site. The `pages` client never sends `Register`: run against a server without it, it still created an account by code in the tests above, so the server can ship first.
+- **Pri 10, running the clients:** the web findings 1, 2, 3 and 6 are now covered by the tests above. Finding 5 (`UPGRADE_REQUIRED`) was not run. Godot: autoplay played a full game against a local server over WebRTC, headless, and resumed a game after being killed mid-hand. Not run in Godot: findings 2, 4 (the device link opens the system browser) and 6, which need the UI driven by hand.
+
+## Third pass (2026-11-25)
+
+Also on `audit-followup`. Fixes said to have a test have one; only the
+SMTP address test, the History web test and the expert pool check were
+checked to fail (or differ) without the fix. The rest are marked "not
+run", "no test", or were checked by hand as described.
+
+| Finding | Fix |
+|---|---|
+| #15: a 284 KB discard table per awake expert game | Borrowed from a `sync.Pool` per decision. Exact: 0 of 1,000 deal pairs changed against the same code without it. |
+| Godot: the table shows the result before the replay gets there | `RenderTable` reads the view's game; the "ended while away" path updates the view too. Not run: needs the UI. |
+| Godot: a bad saved server hid the Server field | The sign-in page shows when the address is refused, or after 5 seconds without a connection. Checked by screenshot against an unreachable server. |
+| Godot: "Sending…" stayed after the connection dropped | Waiting requests are answered with "The connection dropped; try again", except during an account deletion (whose drop is expected). Not run. |
+| Godot: the session token was not tied to its server | One token per server address in the settings file. Checked with autoplay: server B never gets A's token, and A still resumes after a run against B. |
+| Web: History twice listed games twice; "more" died after a reconnect | Replies to all but the latest first-page fetch are dropped; a reconnect with History open fetches afresh. Web test for opening it twice (fails on the old client); the reconnect case is not tested. |
+| Gauntlet `-base` with another `-start` | The pair file records `-start`; a mismatch is refused. No test. |
+| `nn.Read` trusted layer sizes | Sizes and total weights checked before allocating. Test added (it cannot fail by allocating, so it checks the refusal only). |
+| Corpus and rollout readers panicked on a corrupt file | Records and lines are range-checked. The real corpora (1.37M and 42k hands) still load. Corpus test added; the rollout readers' checks have none. |
+| Shutdown: a request in flight could write after the store closed | `Shutdown` waits for connections' read loops; HTTP requests in flight get 5 seconds (`http.Server.Shutdown`). Not tested by a race test; `-race` passes. |
+| `AddPasskey` succeeded for a deleted account | Returns `ErrNotFound` when no row was added. |
+| Invites accepted up to an hour after expiry | Accept and redeem check the expiry; the sweep still cleans up. |
+| Dead code | `searcher.sample`, `CorpusFilter.NoSynthetic`, `Text.Value`, three CSS rules, two `RETRYABLE` names, and two methods `deadcode -test` found: `Adam.Steps`, `Limiter.Return` (its only callers were the password checks M31 removed; the emailed-code limit charges under the same lock it checks, so needs no refund). |
+
+From the three read-throughs of what was not checked:
+
+- **deploy/README.md** (read in full against the units, scripts and flags;
+  almost all of it was right):
+  - Fixed: a lost email key is fatal, not just an inconvenience. The server
+    will not start on that database or its backups. A restore was tried
+    locally: a backup taken after games keeps them, it starts with the
+    same key, and it refuses a wrong or missing key.
+  - Fixed: the restore steps deleted the broken database's WAL; now kept.
+  - Fixed: restoring onto a new instance with the S3 job on would upload an
+    empty backup as the newest; the steps now say to wait.
+  - Fixed: `-yes` goes before the command name.
+  - Fixed: the install block started the service before its secrets
+    existed.
+  - Fixed: `-ice-servers` belongs in the config file.
+  - **Backups:** `cribbage-s3-backup` now fails when the newest backup is
+    over 26 hours old (the server's own failure only logs). It can ping an
+    optional dead-man's switch (`CRIBBAGE_PING_URL`), the only thing that
+    would alert a person. Checked with a stub `aws`.
+  - Left: see "Found, not fixed".
+- **Web markup and Godot project:**
+  - Fixed: game rows can be opened from the keyboard (web test).
+  - Fixed: messages, prompt and banner announce themselves (`role=status`).
+  - Fixed: picked cards say so (`aria-pressed`), and face-up cards read as
+    images.
+  - Fixed: Esc updates the settings button's state.
+  - Fixed: privacy page: games after deletion, and backups up to about 10 days (S3 rounds expiry to midnight UTC and deletes later).
+  - Fixed: SMTP errors no longer carry the recipient's address into the log
+    (a test fails without it).
+  - Desktop: .NET 8 lost support in November 2026, so the client targets
+    .NET 10. The Linux and Windows exports bundle .NET 10.0.14 and each
+    played a full autoplay game (Windows under wine).
+  - Desktop: a release tag fails without `CRIBBAGE_SERVER`.
+  - Desktop: the cached Godot editor is unpacked afresh from the checked
+    zip, and `export.sh` always fetches the checked webrtc addon.
+- **Expert build code** (no silent table bug like #9; the bundle builders
+  agree with their readers):
+  - Fixed: `rollpair` halved its "per decision overall" figure when
+    disagreements passed `-max`. M40's published run was just under the
+    cap. No test, nor for the three help-text fixes below.
+  - Fixed: `rollcheck` now says its regret is biased high.
+  - Fixed: `rollout`'s help says its "expert" is the default discarder,
+    not the very hard level's.
+  - Fixed: `expert build` says when keep temperatures come from `-base`,
+    and that keep fitting uses at most 50,000 hands a side.
 
 ## Found, not fixed
 
 | Pri | # | Finding | Why it was left |
 |---|---|---|---|
-| 9 | 7 | The web client has no tests. Finding 1 shipped unnoticed. | A real test needs a headless browser, which is a new dependency and a choice of tool. Smallest useful one: open `#signin=<token>` against a local server and check it reaches the lobby. Until then, the client fixes above are verified by reading only. |
-| 6 | 10 | The dealer's hand plus crib is capped at 29 in the discard valuation (`expert/discard.go:29,185`, `conddiscard.go:257`): the array is `[maxShow]`, the pone's is `[2*maxShow]`. | It changes how the bot plays, so it needs a gauntlet run and a PLAN milestone, on its own branch, under the bot-work rules. |
 | 5 | 13 | One address asking for codes to made-up addresses every 5 minutes keeps the global new-account email limit (20, then one per 15 minutes) empty: newcomers are told "sent" and get nothing, and the bounces hurt the mail account (`auth/signin.go:212`). | A commented trade-off. A per-address limit low enough to stop it (under 4 an hour) also makes the fourth member of a family signing up from one house wait, silently. Owner's call. The Warn line "too many new accounts from everyone lately" is the signal to watch. |
-| 4 | 11 | No client sends the `Register` request, but the server still serves it (`server/account.go:106`, `auth/signin.go:326`, the `registers` limiter, the `reg` ticket branch): about 110 lines. | About ten tests in `auth_test.go`, `account_test.go` and `limit_test.go` create accounts and test the email limits through it, and its errors (`ErrEmailStopped`, `ErrTooManyAccounts`) are ones the normal sign-in path hides on purpose. Removing it means rewriting those tests, and reserving field 10 in the proto. |
-| 2 | 15 | Each awake game against the "expert" level holds a 284 KB scratch table (`expert/conddiscard.go:28`). | Only matters near 1,000 awake games. Fix when needed: a `sync.Pool`, as `search.go` does for `endCache`. |
-
-Smaller findings, not fixed (from the helper audits; **not re-read by the
-main audit unless marked**):
-
-| Pri | Finding |
-|---|---|
-| 5 | Godot: the table shows the final result before the replay reaches it (`Main.cs` `RenderTable` uses `gs.Game`, not the view's). |
-| 5 | Godot: with a bad saved server address, the Server field cannot be reached (`ShowLogin(false)` in `_Ready`). |
-| 4 | Godot: requests waiting for a reply never fail when the connection drops ("Sending…" stays). |
-| 4 | Web: History clicked twice lists every game twice; after a reconnect with History open, "more" does nothing. |
-| 3 | Godot: the session token is not tied to the server it came from; `--server` to another server erases it. |
-| 3 | Gauntlet `-base` accepts a baseline saved with a different `-start` (`cmd/gauntlet/main.go:156`, `ai/pairs.go:32`). |
-| 3 | `nn.Read` trusts layer sizes from the model file (`ai/nn/file.go:77`); same fix as `ReadBundle`. |
-| 2 | Corpus and rollout readers index with values from the file and panic on a corrupt one (`expert/corpus.go:110`, `cmd/expert/rollcheck.go:108`). Developer tools only. |
-| 2 | Server (re-read): a request in flight at shutdown can write to the store after it closes and panic. Nothing is lost; the exit is just ugly. |
-| 2 | Server (re-read): `AddPasskey` in SQLite reports success for an account deleted meanwhile; an invite can be accepted up to an hour after it expires (the sweep is hourly). |
-| 2 | Lean: `expert.Collect` repeats the corpus path (about 135 lines); shape indexing exists in both `bots/heuristic2.go` and `expert/tables.go`; `searcher.sample`, `CorpusFilter.NoSynthetic`, `Text.Value`, three unused CSS rules and two unused `RETRYABLE` names are dead. |
-| 1 | Lean, owner's call: the in-memory store (570 lines, for `-db ""` and tests), `cmd/sim` (136), `expert iterate` (92), `ai/clock_windows.go` (now that development is on Linux). All are documented features. |
+| 5 | | S3 versioning keeps an overwritten backup for only a day (`NoncurrentDays: 1`), and the server's role may overwrite. An intruder can replace every S3 backup, and the originals expire a day later. | A longer `NoncurrentDays`, or Object Lock, keeps deleted accounts in S3 longer, which changes the privacy page's promise. Owner's call. The README now says so. |
+| 2 | | Desktop: the workflow's `contents: write` applies to test runs too, and actions are pinned by tag, not SHA. The Windows exe's properties say Godot, not Cribbage. Release builds keep the `--autoplay` test mode (harmless: it needs the server's bot key). | Hardening and polish. |
+| 2 | | Expert tools: `pegpair` plays hands nobody chose (random padding), so its table may not match real games (it is not shipped). `rollout -seed` does not reproduce with several workers. The random-crib prior never counts nobs for a thrown jack (about 0.25 points, in a prior worth 20 hands). | Changing them changes future measurements, not the shipped bot; worth doing with the next table build. |
+| 2 | | Lean: `expert.Collect` repeats the corpus path (about 135 lines); shape indexing exists in both `bots/heuristic2.go` and `expert/tables.go`. | Merges, not deletions; each needs its own check that the bots play the same. |
+| 1 | | Lean, owner's call: the in-memory store (570 lines, for `-db ""` and tests), `cmd/sim` (136), `expert iterate` (92), `ai/clock_windows.go`. | Documented features. |
 
 ## Not checked
 
 | Pri | What | Why it matters |
 |---|---|---|
-| 10 | **Run the fixed clients for real.** Nothing was run in a browser or in Godot, before or after the fixes. Open a sign-in link and a delete link from an email; sleep a laptop through the end of a game; sign out while offline; sign in as a second user in the same tab; do "Sign in with browser" in the desktop app. | Findings 1 to 6 and their fixes rest on reading the code. The web page is the front door. |
-| 7 | Is the deployed Cloudflare Pages build from `ed19136` or later? If so, emailed links are broken in production now. | Decides how soon the web fix must ship. |
-| 6 | The four Godot and two web findings above that the main audit did not re-read. | They may be wrong, or worse than described. |
-| 5 | `server/web/static/index.html` lines 126-310, `style.css`, `privacy.html`. | Ids and classes were only cross-checked by script. |
-| 5 | `deploy/README.md` (639 lines) was searched, not read. The units and scripts beside it were read. | Wrong instructions there cause outages and lost backups, not code bugs. In particular, nothing alerts when a backup or the S3 copy fails. |
-| 4 | Godot project files: `Cribbage.csproj`, `export_presets.cfg`, `project.godot`, `Main.tscn`, the fetched `addons/`. | They decide what ships in the desktop zips. |
-| 4 | A restore from a backup was not tried, and nor was starting with a wrong or lost email key. | The backup is only as good as the last restore that worked. |
-| 3 | `cmd/expert`: `keep.go`, the second half of `exploit.go`, most of `rollout.go` and `rollcheck.go`. `internal/expert`: `exactkeep.go`, the build halves of `pegpair.go`, `winprob.go` and `tables.go`, `checks.go`, `FitKeepTemps`. | A bug there makes a weaker bundle, as finding 9 did, and nothing reports it. |
-| 3 | The dead-code search was a word grep, so a dead method sharing a name with a live one can hide. | Lean only. |
+| 8 | A real emailed link from a phone or desktop mail app (the tests take links from the log); `UPGRADE_REQUIRED` in the web client; the Windows export on real Windows (only wine was tried); in Godot, by hand: a game ended while away, "Sign in with browser", "Sending…" after a drop, the replay fix. | The web tests use Chromium and a local server only. |
+| 3 | `deploy/cribbage-dns` beyond a search, the ACME/TLS code, `exploit.go:1-279`, `wintable.go`, `pegfit.go`, `iterate.go`. | Read by no one. |
 | 2 | `internal/ai/train/train.go` after line 140 and `cmd/train`. | Training is finished; the bots in use are built. |
 | 2 | Most test bodies outside `internal/engine` were not read for what they assert. | They pass; whether they test the right thing was sampled only. |
 | 1 | Generated code (`protocol/pb`, `bots/h2stats.go`), model files, `runs/`, `docs/PLAN.md` beyond searches. | Generated or historical. |

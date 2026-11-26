@@ -1,10 +1,12 @@
 <Project Sdk="Godot.NET.Sdk/4.7.2">
   <PropertyGroup>
-    <TargetFramework>net8.0</TargetFramework>
+    <TargetFramework>net10.0</TargetFramework>
     <EnableDynamicLoading>true</EnableDynamicLoading>
     <RootNamespace>Cribbage</RootNamespace>
     <Nullable>enable</Nullable>
-    <!-- Run on whichever .NET runtime is installed (8 or later). -->
+    <!-- For runs from the editor or `dotnet`: any installed runtime, 10 or
+         later. Exports carry their own runtime, so keep this on a supported
+         .NET (8 lost support in November 2026). -->
     <RollForward>LatestMajor</RollForward>
   </PropertyGroup>
   <ItemGroup>

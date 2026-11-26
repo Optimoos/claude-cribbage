@@ -724,15 +724,6 @@ func (s *searcher) pegLikelihood(o *engine.Observation, w world) float64 {
 // drawn by those weights.
 const poolFactor = 4
 
-// sample returns the worlds to search: all of them, or a systematic sample
-// of s.effort drawn in proportion to weight, which is deterministic.
-func (s *searcher) sample() []world {
-	if s.effort <= 0 || len(s.worlds) <= s.effort {
-		return s.worlds
-	}
-	return systematic(s.worlds, s.effort, &s.sampled)
-}
-
 // systematic draws n of worlds in proportion to weight, deterministically,
 // into *out; a world drawn k times gets weight k.
 func systematic(worlds []world, n int, out *[]world) []world {

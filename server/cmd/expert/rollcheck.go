@@ -64,6 +64,7 @@ func rollcheck(args []string) error {
 		}
 	}
 	fmt.Printf("%d decisions from %s; win %% from the rollouts (95%% intervals)\n", len(decs), *in)
+	fmt.Println("regret is biased high: the best option is chosen and scored on the same samples; change from first is not")
 	fmt.Printf("%-50s %8s  %-20s %8s  %-20s\n", "policy", "best", "regret", "differs", "change from first")
 	for p, spec := range specs {
 		var best int
@@ -133,7 +134,11 @@ func readRollouts(path string) ([]discardDecision, []decisionValues, error) {
 		}
 		if id != last {
 			var d discardDecision
-			for i, s := range strings.Fields(line[lb+1 : rb]) {
+			six := strings.Fields(line[lb+1 : rb])
+			if len(six) != 6 {
+				return nil, nil, fmt.Errorf("%s: bad line %q", path, line)
+			}
+			for i, s := range six {
 				if d.six[i], err = engine.ParseCard(s); err != nil {
 					return nil, nil, err
 				}
@@ -149,6 +154,9 @@ func readRollouts(path string) ([]discardDecision, []decisionValues, error) {
 		}
 		v := &vals[len(vals)-1]
 		cs := strings.Fields(rest[3])
+		if len(cs) != 2 {
+			return nil, nil, fmt.Errorf("%s: bad line %q", path, line)
+		}
 		var o [2]engine.Card
 		for i := range o {
 			if o[i], err = engine.ParseCard(cs[i]); err != nil {
@@ -237,6 +245,7 @@ func rollpair(ctx context.Context, args []string) error {
 		}
 	}
 	fmt.Printf("%d of %d decisions differ (%.2f%%), in %v\n", len(diff), len(decs), 100*float64(len(diff))/float64(len(decs)), time.Since(t0).Round(time.Second))
+	rate := float64(len(diff)) / float64(len(decs)) // before -max cuts the list
 	if len(diff) > *maxDiff {
 		diff = diff[:*maxDiff]
 	}
@@ -283,7 +292,6 @@ func rollpair(ctx context.Context, args []string) error {
 	fmt.Printf("%s less %s where they differ (95%% intervals):\n", specs[1], specs[0])
 	fmt.Printf("  win %%     %s\n  points    %s\n  as dealer %s (%d)\n  as pone   %s (%d)\n", dw.fmt(100, 3), dp.fmt(1, 4),
 		dealer.fmt(100, 3), int(dealer.n), pone.fmt(100, 3), int(pone.n))
-	rate := float64(len(diff)) / float64(len(decs))
 	fmt.Printf("per decision overall: %.4f win %% (rate %.4f x mean)\n", rate*100*dw.sum/dw.n, rate)
 	return nil
 }

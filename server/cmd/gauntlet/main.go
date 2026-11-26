@@ -140,6 +140,10 @@ func run(ctx context.Context, bot string, opponents []string, n, workers int, se
 	if c.startMax > 0 {
 		fmt.Printf("every game starts at a random hand with scores in [%d, %d]\n", c.startMin, c.startMax)
 	}
+	startRange := ""
+	if c.startMax > 0 {
+		startRange = fmt.Sprintf("%d,%d", c.startMin, c.startMax)
+	}
 	for _, name := range opponents {
 		name = strings.TrimSpace(name)
 		newB, err := players.Resolve(name)
@@ -156,6 +160,9 @@ func run(ctx context.Context, bot string, opponents []string, n, workers int, se
 			if f.Seed != seed || len(f.Pairs) < (n+1)/2 {
 				return fmt.Errorf("baseline vs %s has seed %d and %d pairs; this run wants seed %d and %d", name, f.Seed, len(f.Pairs), seed, (n+1)/2)
 			}
+			if f.Start != startRange {
+				return fmt.Errorf("baseline vs %s has -start %q; this run has %q", name, f.Start, startRange)
+			}
 			base = make(map[int64]ai.Pair, len(f.Pairs))
 			for _, p := range f.Pairs {
 				base[p.Deal] = p
@@ -170,7 +177,7 @@ func run(ctx context.Context, bot string, opponents []string, n, workers int, se
 			}
 			test = &ai.SPRT{Mu0: mu + c.lo/100, Mu1: mu + c.hi/100, Alpha: c.alpha, Beta: c.beta, MinPairs: c.minPairs}
 		}
-		save := &ai.PairFile{Bot: bot, Opponent: name, Seed: seed}
+		save := &ai.PairFile{Bot: bot, Opponent: name, Seed: seed, Start: startRange}
 		mctx, cancel := context.WithCancel(ctx)
 		decision := ""
 		onPair := func(p ai.Pair) {

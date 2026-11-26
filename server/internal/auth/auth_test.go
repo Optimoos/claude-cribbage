@@ -76,31 +76,33 @@ func newService(t *testing.T) (*Service, *mailbox) {
 	return &Service{Store: store.NewMemory(), Mailer: mb, BaseURL: "https://crib.example/"}, mb
 }
 
-// register creates an account through its emailed code.
+// register creates an account through the new-account code in a sign-in
+// email: the last code, after any for accounts the address has already.
 func register(t *testing.T, s *Service, mb *mailbox, user, email string) *Result {
 	t.Helper()
 	ctx := context.Background()
-	ch, err := s.Register(ctx, user, "", email)
-	if err != nil {
+	ch, _ := s.NewChallenge()
+	if _, err := s.RequestSignIn(ctx, ch, email); err != nil {
 		t.Fatal(err)
 	}
-	res, err := s.EnterCode(ctx, ch, codes(mb.last(t).body)[0], "", "")
+	cs := codes(mb.last(t).body)
+	res, err := s.EnterCode(ctx, ch, cs[len(cs)-1], user, "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	return res
 }
 
-func TestRegisterAndSignIn(t *testing.T) {
+func TestNewAccountAndSignIn(t *testing.T) {
 	ctx := context.Background()
 	s, mb := newService(t)
-	ch, err := s.Register(ctx, "alice", "Al", "alice@example.com")
-	if err != nil {
+	ch, _ := s.NewChallenge()
+	if _, err := s.RequestSignIn(ctx, ch, "alice@example.com"); err != nil {
 		t.Fatal(err)
 	}
 	m := mb.last(t)
 	if m.to != "alice@example.com" || len(codes(m.body)) != 1 || !strings.Contains(m.subject, codes(m.body)[0][:4]) {
-		t.Fatalf("registration email: %+v", m)
+		t.Fatalf("new-account email: %+v", m)
 	}
 	// Nothing exists until the code is entered.
 	if _, err := s.Store.UserByUsername(ctx, "alice"); !errors.Is(err, store.ErrNotFound) {
@@ -109,23 +111,15 @@ func TestRegisterAndSignIn(t *testing.T) {
 	if _, err := s.EnterCode(ctx, ch, "0000 0000", "", ""); !errors.Is(err, ErrInvalidCredentials) {
 		t.Fatalf("wrong code: %v", err)
 	}
-	res, err := s.EnterCode(ctx, ch, " "+strings.ReplaceAll(codes(m.body)[0], "", "-")+" ", "", "")
+	res, err := s.EnterCode(ctx, ch, " "+strings.ReplaceAll(codes(m.body)[0], "", "-")+" ", "alice", "Al")
 	if err != nil {
 		t.Fatalf("code with dashes and spaces: %v", err)
 	}
 	if res.User.Username != "alice" || res.User.Nickname != "Al" || res.User.Email != "alice@example.com" || res.Token == "" {
 		t.Fatalf("registered: %+v", res.User)
 	}
-	if _, err := s.EnterCode(ctx, ch, codes(m.body)[0], "", ""); !errors.Is(err, ErrBadToken) {
+	if _, err := s.EnterCode(ctx, ch, codes(m.body)[0], "alice2", ""); !errors.Is(err, ErrBadToken) {
 		t.Fatalf("code used twice: %v", err)
-	}
-	if _, err := s.Register(ctx, "ALICE", "", "other@example.com"); !errors.Is(err, store.ErrUsernameTaken) {
-		t.Fatalf("taken username: %v", err)
-	}
-	for _, bad := range [][3]string{{"a", "", "x@example.com"}, {"bob", "", "not-an-address"}, {"bob", "\x01", "b@example.com"}} {
-		if _, err := s.Register(ctx, bad[0], bad[1], bad[2]); !errors.Is(err, ErrInvalidInput) {
-			t.Errorf("register %q: %v", bad, err)
-		}
 	}
 
 	// Sign in by username: a code, and a link that works instead.
@@ -636,8 +630,12 @@ func TestStopEmail(t *testing.T) {
 	if found, err := s.RequestSignIn(ctx, ch, "alice"); err != nil || found != 1 {
 		t.Fatalf("sign-in to a stopped address: %d, %v", found, err)
 	}
-	if _, err := s.Register(ctx, "alice2", "", "Alice+cribbage@example.com"); !errors.Is(err, ErrEmailStopped) {
-		t.Fatalf("register a stopped address's +tag variant: %v", err)
+	ch, _ = s.NewChallenge()
+	if found, err := s.RequestSignIn(ctx, ch, "Alice+cribbage@example.com"); err != nil || found != 0 {
+		t.Fatalf("new account at a stopped address's +tag variant: %d, %v", found, err)
+	}
+	if mb.count() != n {
+		t.Fatal("an email went to a stopped address")
 	}
 	bob := register(t, s, mb, "bob", "bob@example.com")
 	n = mb.count()
@@ -667,7 +665,8 @@ func TestStopLinkHeader(t *testing.T) {
 	rec := &recordingMailer{}
 	s.Mailer = rec
 	s.StopURL = "https://api.crib.example/api/stop"
-	if _, err := s.Register(context.Background(), "alice", "", "alice@example.com"); err != nil {
+	ch, _ := s.NewChallenge()
+	if _, err := s.RequestSignIn(context.Background(), ch, "alice@example.com"); err != nil {
 		t.Fatal(err)
 	}
 	stop := stopRE.FindStringSubmatch(rec.m.Body)
@@ -685,37 +684,18 @@ func (r *recordingMailer) Send(_ context.Context, m mail.Message) error { r.m = 
 func TestMailboxLimit(t *testing.T) {
 	ctx := context.Background()
 	s, mb := newService(t)
-	for i := 0; ; i++ {
-		_, err := s.Register(ctx, fmt.Sprintf("user%d", i), "", fmt.Sprintf("Victim+%d@example.com", i))
-		if errors.Is(err, ErrMailLimit) {
-			if i != 20 {
-				t.Fatalf("limited after %d emails, want 20", i)
-			}
-			break
-		}
-		if err != nil {
+	// Accounts made directly, so the cap on new-account emails plays no part.
+	for i := 0; i < 25; i++ {
+		u := &store.User{Username: fmt.Sprintf("user%d", i), Nickname: "v", Email: fmt.Sprintf("Victim+%d@example.com", i), Created: time.Now()}
+		if err := s.Store.CreateUser(ctx, u); err != nil {
 			t.Fatal(err)
 		}
-		if i > 30 {
-			t.Fatal("never limited")
+		ch, _ := s.NewChallenge()
+		if _, err := s.RequestSignIn(ctx, ch, u.Username); err != nil {
+			t.Fatal(err)
 		}
 	}
 	if mb.count() != 20 {
-		t.Fatalf("%d emails", mb.count())
-	}
-}
-
-// TestRegistrationLimit checks the cap on registration emails from
-// everyone, to different addresses.
-func TestRegistrationLimit(t *testing.T) {
-	ctx := context.Background()
-	s, _ := newService(t)
-	for i := 0; i < 20; i++ {
-		if _, err := s.Register(ctx, fmt.Sprintf("user%d", i), "", fmt.Sprintf("person%d@example.com", i)); err != nil {
-			t.Fatal(i, err)
-		}
-	}
-	if _, err := s.Register(ctx, "one-more", "", "another@example.com"); !errors.Is(err, ErrTooManyAccounts) {
-		t.Fatalf("21st registration: %v", err)
+		t.Fatalf("%d emails, want 20", mb.count())
 	}
 }

@@ -156,7 +156,7 @@ step:
 ## Godot desktop client (`client-godot/`)
 
 A Godot 4.7 .NET project that plays over the same WebRTC data channel as the
-browser, with binary protobuf messages. It needs the .NET SDK (8 or later) and
+browser, with binary protobuf messages. It needs the .NET SDK (10 or later) and
 the Godot 4.7 .NET editor. Desktop Godot has no built-in WebRTC, so fetch the
 [webrtc-native](https://github.com/godotengine/webrtc-native) GDExtension
 first (it is not checked in):

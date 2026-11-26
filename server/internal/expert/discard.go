@@ -51,9 +51,9 @@ func (d *discarder) choose(o *engine.Observation, legal []engine.Action) engine.
 		held[c] = true
 	}
 	if d.keep != nil {
-		if d.post == nil {
-			d.post = new(condPost)
-		}
+		// Borrowed for this decision only: an idle game holds no 284 KB table.
+		d.post = condPosts.Get().(*condPost)
+		defer func() { condPosts.Put(d.post); d.post = nil }()
 		var six [6]engine.Card
 		copy(six[:], hand)
 		oside := 0

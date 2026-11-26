@@ -10,6 +10,12 @@
 #   CRIBBAGE_S3_URL      where to put them, e.g. s3://my-bucket/backups/
 #   CRIBBAGE_BACKUP_DIR  the server's backup-dir (default /var/lib/cribbage/backups)
 #   STATE_DIRECTORY      set by systemd: remembers what was uploaded
+#   CRIBBAGE_PING_URL    optional: fetched after a good run, for a dead-man's
+#                        switch (e.g. healthchecks.io) that alerts when it
+#                        stops: a failed backup, upload, timer or machine
+#
+# It fails (and skips the ping) if the newest backup is over 26 hours old:
+# the server writes one every 24, and logs only "database backup failed".
 set -eu
 
 : "${CRIBBAGE_S3_URL:?set CRIBBAGE_S3_URL, e.g. s3://my-bucket/backups/}"
@@ -42,4 +48,12 @@ trap - EXIT
 
 if [ "$uploaded" -eq 0 ]; then
 	echo "nothing new in $dir"
+fi
+
+if [ -z "$(find "$dir" -maxdepth 1 -name 'cribbage-*.db' -mmin -1560)" ]; then
+	echo "no backup in $dir from the last 26 hours: is the server writing them? (journalctl -u cribbage | grep backup)" >&2
+	exit 1
+fi
+if [ -n "${CRIBBAGE_PING_URL:-}" ]; then
+	curl -fsS -m 10 --retry 3 -o /dev/null "$CRIBBAGE_PING_URL"
 fi

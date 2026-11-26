@@ -43,8 +43,7 @@ type Config struct {
 	Games      store.GameStore // defaults to an in-memory store
 	Logger     *slog.Logger
 	OutboxSize int // per-connection outbound queue; default 4096
-	// AuthLimits bounds sign-in and registration attempts; nil uses
-	// DefaultAuthLimits.
+	// AuthLimits bounds sign-in attempts; nil uses DefaultAuthLimits.
 	AuthLimits *AuthLimits
 	// GameLimits bounds games and invites per player and sets how long
 	// they last; nil uses DefaultGameLimits.
@@ -92,12 +91,10 @@ var DefaultGameLimits = GameLimits{
 // (a burst, then one more per interval). Connections from loopback or with
 // no address (in-process transports) are not limited.
 type AuthLimits struct {
-	AttemptsPerIP  int // sign-in attempts (codes, links, passkeys) from one address
-	AttemptEvery   time.Duration
-	RegistersPerIP int // registrations from one address
-	RegisterEvery  time.Duration
-	CodesPerIP     int // sign-in codes asked for from one address
-	CodeEvery      time.Duration
+	AttemptsPerIP int // sign-in attempts (codes, links, passkeys) from one address
+	AttemptEvery  time.Duration
+	CodesPerIP    int // sign-in codes asked for from one address
+	CodeEvery     time.Duration
 	// Connections: at most ConnsPerAddr from one address (as limited
 	// above) and Conns in all; one that has not signed in after
 	// LoginWithin is closed, or after SignInWithin if it started signing
@@ -114,15 +111,14 @@ type AuthLimits struct {
 }
 
 // DefaultAuthLimits allows 20 quick attempts per address then 10 a minute,
-// 3 registrations then 3 an hour, and 5 sign-in codes then 1 every 5
-// minutes, so one address cannot try many accounts' addresses.
+// and 5 sign-in codes then 1 every 5 minutes, so one address cannot try
+// many accounts' addresses.
 // (Each account and address also gets few emails, and few wrong codes: see
 // the auth package.) IPv6 addresses count by their /64. A player may make
 // 60 requests at once, then 10 a second: far more than anyone clicking,
 // but it bounds a script.
 var DefaultAuthLimits = AuthLimits{
 	AttemptsPerIP: 20, AttemptEvery: 6 * time.Second,
-	RegistersPerIP: 3, RegisterEvery: 20 * time.Minute,
 	CodesPerIP: 5, CodeEvery: 5 * time.Minute,
 	ConnsPerAddr: 20, Conns: 5000, LoginWithin: 30 * time.Second, SignInWithin: 20 * time.Minute,
 	ActionsPerUser: 60, ActionEvery: 100 * time.Millisecond,
@@ -153,9 +149,9 @@ type Server struct {
 	qmu   sync.Mutex
 	queue []matchRequest
 
-	attempts, registers, codes *ratelimit.Limiter
-	actions                    *ratelimit.Limiter // requests per user, once signed in
-	botMoves                   chan struct{}      // bot decisions in progress
+	attempts, codes *ratelimit.Limiter
+	actions         *ratelimit.Limiter // requests per user, once signed in
+	botMoves        chan struct{}      // bot decisions in progress
 
 	limits  GameLimits
 	authLim AuthLimits // connection limits (cmu guards connsByAddr)
@@ -176,6 +172,9 @@ type Server struct {
 	devices devices // sign-ins waiting for approval from another device
 
 	bg sync.WaitGroup // background requests, such as sending email
+	// readers: connections' read loops, which handle requests (and may
+	// write to the store) themselves.
+	readers sync.WaitGroup
 
 	stats struct {
 		gamesStarted, gamesFinished, actions, conns atomic.Int64
@@ -217,7 +216,6 @@ func New(cfg Config) *Server {
 	}
 	s := &Server{
 		attempts:    ratelimit.New(lim.AttemptsPerIP, lim.AttemptEvery),
-		registers:   ratelimit.New(lim.RegistersPerIP, lim.RegisterEvery),
 		codes:       ratelimit.New(lim.CodesPerIP, lim.CodeEvery),
 		actions:     ratelimit.New(lim.ActionsPerUser, lim.ActionEvery),
 		botMoves:    make(chan struct{}, gl.BotMoves),
@@ -300,7 +298,9 @@ func (s *Server) ServeConn(t Transport) {
 	if c.addr != "" {
 		s.connsByAddr[c.addr]++
 	}
+	s.readers.Add(1)
 	s.cmu.Unlock()
+	defer s.readers.Done()
 	if c.addr != "" {
 		// Remote connections must sign in promptly, or soon after they
 		// start to (asking for a code, say).
@@ -370,9 +370,6 @@ const maxPreLogin = 50
 func (s *Server) handle(c *Conn, m *pb.ClientMessage) {
 	id := m.RequestId
 	switch b := m.Body.(type) {
-	case *pb.ClientMessage_Register:
-		s.registerAccount(c, id, b.Register)
-		return
 	case *pb.ClientMessage_RequestSignIn:
 		s.requestSignIn(c, id, b.RequestSignIn.Name)
 		return
@@ -880,6 +877,8 @@ func (s *Server) Shutdown() {
 				c.close()
 			}
 		}
+		// A request being handled finishes before the store can close.
+		s.readers.Wait()
 	})
 }
 

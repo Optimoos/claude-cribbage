@@ -45,6 +45,22 @@ public partial class Main
     bool TakeReply(ServerMessage m) =>
         m.RequestId != 0 && replies.Remove(m.RequestId, out var h) && h(m);
 
+    // FailReplies answers every request still waiting with an error when the
+    // connection drops: its reply can no longer come, and "Sending…" would
+    // stay up for good.
+    void FailReplies()
+    {
+        if (deleting)
+        {
+            return; // the drop is expected: a session that no longer resumes confirms it
+        }
+        foreach (var (id, h) in replies.ToList())
+        {
+            replies.Remove(id);
+            h(new ServerMessage { RequestId = id, Error = new Protocol.Error { Code = ErrorCode.Internal, Message = "The connection dropped; try again." } });
+        }
+    }
+
     void CloseAccountWindows()
     {
         foreach (var w in new[] { accountWindow, historyWindow })

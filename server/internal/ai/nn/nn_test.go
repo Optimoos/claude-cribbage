@@ -2,6 +2,7 @@ package nn
 
 import (
 	"bytes"
+	"encoding/binary"
 	"math"
 	"math/rand/v2"
 	"testing"
@@ -118,6 +119,17 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 	}
 	if _, _, err := Read(bytes.NewReader(append(buf.Bytes(), 0))); err == nil {
 		t.Fatal("trailing data accepted")
+	}
+	// A header asking for billions of weights is refused before allocating.
+	for _, sizes := range []string{"[65536,65536,1]", "[100000,1]", "[0,1]"} {
+		hdr := `{"sizes":` + sizes + `}`
+		var bad bytes.Buffer
+		bad.WriteString(magic)
+		binary.Write(&bad, binary.LittleEndian, uint32(len(hdr)))
+		bad.WriteString(hdr)
+		if _, _, err := Read(&bad); err == nil {
+			t.Errorf("sizes %s accepted", sizes)
+		}
 	}
 }
 

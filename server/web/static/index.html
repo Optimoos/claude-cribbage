@@ -21,7 +21,7 @@
   <span class="spacer"></span>
   <button id="mute" class="icon-btn" aria-pressed="false" title="Mute sounds"></button>
   <div class="settings">
-    <button id="settings-btn" class="icon-btn" aria-haspopup="true" aria-expanded="false" title="Settings"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg></button>
+    <button id="settings-btn" class="icon-btn" aria-expanded="false" title="Settings"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg></button>
     <div id="settings" class="menu" hidden>
       <label class="field">Theme
         <select id="theme">
@@ -65,7 +65,7 @@
         <button class="btn btn-primary">Email me a code</button>
         <button type="button" id="passkey-signin" class="btn" hidden>Use a passkey</button>
       </div>
-      <p id="login-error" class="error"></p>
+      <p id="login-error" class="error" role="status"></p>
     </form>
     <p class="menu-links login-links"><a data-report href="https://github.com/Optimoos/claude-cribbage/issues" target="_blank" rel="noopener noreferrer">Report a bug</a><span aria-hidden="true">·</span><a href="privacy.html" target="_blank" rel="noopener">Privacy</a></p>
   </section>
@@ -79,7 +79,7 @@
         <button class="btn btn-primary">Create account</button>
         <button type="button" class="btn btn-ghost" data-to-login>Cancel</button>
       </div>
-      <p id="username-msg" class="error"></p>
+      <p id="username-msg" class="error" role="status"></p>
     </form>
   </section>
   <section id="code-panel" class="panel login" hidden>
@@ -92,7 +92,7 @@
         <button type="button" id="code-resend" class="btn">Send again</button>
         <button type="button" class="btn btn-ghost" data-to-login>Back</button>
       </div>
-      <p id="signin-code-msg" class="error"></p>
+      <p id="signin-code-msg" class="error" role="status"></p>
     </form>
     <p id="code-new" class="hint"></p>
   </section>
@@ -103,7 +103,7 @@
       <button id="link-confirm" class="btn btn-primary">Sign in</button>
       <button type="button" class="btn btn-ghost" data-to-login>Cancel</button>
     </div>
-    <p id="link-msg" class="error"></p>
+    <p id="link-msg" class="error" role="status"></p>
   </section>
   <section id="delete-panel" class="panel login" hidden>
     <h2>Delete your account?</h2>
@@ -112,7 +112,7 @@
       <button id="delete-confirm" class="btn btn-danger">Delete account</button>
       <button type="button" class="btn btn-ghost" data-to-login>Keep my account</button>
     </div>
-    <p id="delete-panel-msg" class="error"></p>
+    <p id="delete-panel-msg" class="error" role="status"></p>
   </section>
   <section id="stop-panel" class="panel login" hidden>
     <h2>Stop emails to this address?</h2>
@@ -121,7 +121,7 @@
       <button id="stop-confirm" class="btn btn-danger">Stop emails</button>
       <button type="button" id="stop-cancel" class="btn btn-ghost">Cancel</button>
     </div>
-    <p id="stop-msg" class="error"></p>
+    <p id="stop-msg" class="error" role="status"></p>
   </section>
 
 
@@ -220,14 +220,14 @@
         <div class="me-head">
           <div id="me-plate" class="plate"></div>
           <div class="actions">
-            <span id="prompt" class="prompt"></span>
+            <span id="prompt" class="prompt" role="status"></span>
             <button id="discard" class="btn btn-primary" hidden>Discard to crib</button>
           </div>
         </div>
         <div id="hand" class="cards hand"></div>
       </div>
       <div id="fx" class="fx"></div>
-      <div id="banner" class="banner" hidden></div>
+      <div id="banner" class="banner" role="status" hidden></div>
     </div>
 
     <details id="log-panel" class="log-panel" open>
@@ -248,7 +248,7 @@
     <p id="email-status" class="hint"></p>
     <label class="field">New address <input name="email" type="email" autocomplete="email" required maxlength="254"></label>
     <button class="btn btn-primary">Change address</button>
-    <p id="email-msg" class="error"></p>
+    <p id="email-msg" class="error" role="status"></p>
   </form>
   <section id="passkey-section" hidden>
     <h3>Passkeys</h3>
@@ -257,7 +257,7 @@
     <form id="passkey-form">
       <label class="field">Name <input name="name" maxlength="40" placeholder="e.g. My phone (optional)"></label>
       <button class="btn">Add a passkey</button>
-      <p id="passkey-msg" class="error"></p>
+      <p id="passkey-msg" class="error" role="status"></p>
     </form>
   </section>
   <form id="device-form">
@@ -265,20 +265,20 @@
     <p class="hint">For the desktop app: choose &ldquo;Sign in with browser&rdquo; there, then enter the code it shows. Only enter a code shown on your own screen: it signs that device in as you.</p>
     <label class="field">Code <input name="code" maxlength="12" placeholder="BCDF-GHJK" spellcheck="false" autocapitalize="characters" autocomplete="off" required></label>
     <button class="btn">Approve</button>
-    <p id="device-msg" class="error"></p>
+    <p id="device-msg" class="error" role="status"></p>
   </form>
   <div class="account-block">
     <h3>Other devices</h3>
     <p class="hint">Signed in somewhere you shouldn't be, like a shared computer? Sign out everywhere but here.</p>
     <button id="sign-out-others" class="btn">Sign out other devices</button>
-    <p id="sign-out-msg" class="error"></p>
+    <p id="sign-out-msg" class="error" role="status"></p>
   </div>
   <form id="delete-form">
     <h3>Delete account</h3>
     <p id="delete-status" class="hint"></p>
     <label class="field" id="delete-username">Type your username to confirm <input name="username" autocomplete="off" spellcheck="false"></label>
     <button class="btn btn-danger">Delete account</button>
-    <p id="delete-msg" class="error"></p>
+    <p id="delete-msg" class="error" role="status"></p>
   </form>
 </dialog>
 <dialog id="device-dialog" class="dialog" aria-labelledby="device-title">
@@ -292,7 +292,7 @@
     <button id="device-approve" class="btn btn-primary">Approve</button>
     <button id="device-cancel" class="btn btn-ghost">Don't approve</button>
   </div>
-  <p id="device-dialog-msg" class="error"></p>
+  <p id="device-dialog-msg" class="error" role="status"></p>
 </dialog>
 <div id="update" class="update-bar" role="status" hidden>
   <span>A new version of Cribbage is ready. Your games are saved.</span>

@@ -780,9 +780,15 @@ func (s *SQLite) PendingEmail(ctx context.Context, userID int64, kind int) (stri
 
 func (s *SQLite) AddPasskey(ctx context.Context, p *Passkey) error {
 	return s.write(ctx, func(tx *writeTx) error {
-		_, err := tx.Exec(`INSERT INTO passkeys (id, user_id, name, data, created) SELECT ?, id, ?, ?, ? FROM users WHERE id = ?`,
+		r, err := tx.Exec(`INSERT INTO passkeys (id, user_id, name, data, created) SELECT ?, id, ?, ?, ? FROM users WHERE id = ?`,
 			p.ID, p.Name, p.Data, p.Created.UnixMilli(), p.UserID)
-		return err
+		if err != nil {
+			return err
+		}
+		if n, _ := r.RowsAffected(); n == 0 {
+			return ErrNotFound // the account was deleted meanwhile
+		}
+		return nil
 	}, nil)
 }
 

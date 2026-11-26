@@ -232,9 +232,6 @@ func NewAdam(n *Net, lr float64) *Adam {
 	return &Adam{LR: lr, Beta1: 0.9, Beta2: 0.999, Eps: 1e-8, m: n.NewGrad(), v: n.NewGrad()}
 }
 
-// Steps returns how many updates have been applied.
-func (a *Adam) Steps() int { return a.t }
-
 // Step applies the mean of the accumulated gradient g to n.
 func (a *Adam) Step(n *Net, g *Grad) {
 	if g.N == 0 {

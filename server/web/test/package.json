@@ -1,0 +1,6 @@
+{
+  "private": true,
+  "description": "Browser tests for the web client: npm ci && npx playwright install chromium && npx playwright test",
+  "scripts": { "test": "playwright test" },
+  "devDependencies": { "@playwright/test": "1.65.1" }
+}

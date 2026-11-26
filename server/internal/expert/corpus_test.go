@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"cribbage/internal/bots"
+	"cribbage/internal/engine"
 )
 
 // A corpus of heuristic games gives exactly what Collect records from the
@@ -83,5 +84,31 @@ func TestCorpusExploreAndSynthetic(t *testing.T) {
 	}
 	if f := float64(explore) / float64(seats); f < 0.15 || f > 0.25 {
 		t.Errorf("explored %.3f of seat-hands, want about 0.2", f)
+	}
+}
+
+// A record with a value out of range is refused when the file is read,
+// not left to index out of bounds later.
+func TestCorpusRefusesCorruptRecord(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "c.corp")
+	good := HandRecord{Hand: 1, Crib: noCrib, Show: [2]uint8{noCrib, 4}}
+	for i := range 2 {
+		for j := range 6 {
+			good.Six[i][j] = engine.Card(i*6 + j)
+		}
+	}
+	bad := good
+	bad.Starter = 60
+	if err := SaveCorpus(path, CorpusMeta{}, []HandRecord{good}); err != nil {
+		t.Fatal(err)
+	}
+	if _, recs, err := LoadCorpus(path); err != nil || len(recs) != 1 {
+		t.Fatalf("good record: %d, %v", len(recs), err)
+	}
+	if err := SaveCorpus(path, CorpusMeta{}, []HandRecord{good, bad}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := LoadCorpus(path); err == nil {
+		t.Fatal("a starter of 60 was accepted")
 	}
 }

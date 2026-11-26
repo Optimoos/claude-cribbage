@@ -398,7 +398,12 @@ func main() {
 		adminLn.Close()
 	}
 	if httpSrv != nil {
-		httpSrv.Close()
+		// Let requests in flight (a stop link writes to the store) finish.
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if httpSrv.Shutdown(ctx) != nil {
+			httpSrv.Close()
+		}
+		cancel()
 	}
 	srv.Shutdown()
 	close(stopBackups)

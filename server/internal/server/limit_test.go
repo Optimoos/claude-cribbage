@@ -77,17 +77,9 @@ func botLogin(user string) *pb.ClientMessage {
 func TestAuthRateLimits(t *testing.T) {
 	addr := startRemote(t, "203.0.113.5", AuthLimits{
 		AttemptsPerIP: 100, AttemptEvery: time.Hour,
-		RegistersPerIP: 2, RegisterEvery: time.Hour,
 		CodesPerIP: 2, CodeEvery: time.Hour,
 	})
 	c := anon(t, addr)
-	// Registrations: two, then refused.
-	for _, u := range []string{"reg1", "reg2"} {
-		if m := c.call(t, msg(&pb.Register{Username: u, Email: u + "@example.com"})); m.GetSignInStarted() == nil {
-			t.Fatalf("register %s: %v", u, m)
-		}
-	}
-	wantError(t, c.call(t, msg(&pb.Register{Username: "reg3", Email: "reg3@example.com"})), pb.ErrorCode_ERROR_CODE_RATE_LIMITED)
 	// Sign-in codes: two, then refused.
 	for i := 0; i < 2; i++ {
 		if m := c.call(t, msg(&pb.RequestSignIn{Name: "someone"})); m.GetSignInStarted() == nil {
@@ -99,7 +91,6 @@ func TestAuthRateLimits(t *testing.T) {
 	// Attempts per address.
 	addr = startRemote(t, "203.0.113.6", AuthLimits{
 		AttemptsPerIP: 2, AttemptEvery: time.Hour,
-		RegistersPerIP: 10, RegisterEvery: time.Hour,
 		CodesPerIP: 10, CodeEvery: time.Hour,
 	})
 	c = anon(t, addr)
@@ -112,7 +103,6 @@ func TestAuthRateLimits(t *testing.T) {
 func TestAuthLimitsSkipLoopback(t *testing.T) {
 	addr := startRemote(t, "127.0.0.1", AuthLimits{
 		AttemptsPerIP: 1, AttemptEvery: time.Hour,
-		RegistersPerIP: 1, RegisterEvery: time.Hour,
 		CodesPerIP: 1, CodeEvery: time.Hour,
 	})
 	c := anon(t, addr)
@@ -142,7 +132,6 @@ func TestAddrKey(t *testing.T) {
 func TestSignInWaitsLonger(t *testing.T) {
 	addr := startRemote(t, "203.0.113.8", AuthLimits{
 		AttemptsPerIP: 100, AttemptEvery: time.Hour,
-		RegistersPerIP: 10, RegisterEvery: time.Hour,
 		CodesPerIP: 10, CodeEvery: time.Hour,
 		ConnsPerAddr: 10, Conns: 100, LoginWithin: 200 * time.Millisecond, SignInWithin: time.Second,
 	})
@@ -163,7 +152,6 @@ func TestSignInWaitsLonger(t *testing.T) {
 func TestConnectionLimits(t *testing.T) {
 	addr := startRemote(t, "203.0.113.9", AuthLimits{
 		AttemptsPerIP: 100, AttemptEvery: time.Hour,
-		RegistersPerIP: 10, RegisterEvery: time.Hour,
 		ConnsPerAddr: 2, Conns: 100, LoginWithin: 200 * time.Millisecond,
 	})
 	closed := func(c *tclient) bool {
@@ -203,7 +191,6 @@ func TestConnectionLimits(t *testing.T) {
 func TestActionRateLimit(t *testing.T) {
 	addr := startRemote(t, "203.0.113.20", AuthLimits{
 		AttemptsPerIP: 100, AttemptEvery: time.Hour,
-		RegistersPerIP: 10, RegisterEvery: time.Hour,
 		ActionsPerUser: 3, ActionEvery: time.Hour,
 	})
 	list := &pb.ClientMessage{Body: &pb.ClientMessage_ListGames{ListGames: &pb.ListGames{}}}
