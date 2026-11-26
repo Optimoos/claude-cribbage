@@ -82,7 +82,9 @@ ufw enable
 Point `api.cribbage.example.com` (`tls-domain` in `cribserver.conf`) at
 the server with an A record before starting it. On Cloudflare DNS, make it
 **DNS only** (grey cloud), not proxied: the server gets its own
-certificate on port 443, which a proxy would intercept. The first request
+certificate on port 443, which a proxy would intercept, and every
+per-address limit (sign-in attempts, connections, `/api/stop`) needs the
+client's own address, which a proxy would replace with its own. The first request
 to `https://api.cribbage.example.com/api/config` fetches the certificate,
 taking a few seconds; it is kept in `/var/lib/cribbage/certs` and renewed
 by itself. Then set up the web page: see "The web page on Cloudflare

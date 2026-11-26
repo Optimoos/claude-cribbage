@@ -154,3 +154,52 @@ From the three read-throughs of what was not checked:
 | 2 | `internal/ai/train/train.go` after line 140 and `cmd/train`. | Training is finished; the bots in use are built. |
 | 2 | Most test bodies outside `internal/engine` were not read for what they assert. | They pass; whether they test the right thing was sampled only. |
 | 1 | Generated code (`protocol/pb`, `bots/h2stats.go`), model files, `runs/`, `docs/PLAN.md` beyond searches. | Generated or historical. |
+
+## Security audit, run 1 (2026-11-26)
+
+A scoped security audit (server, protocol, transports, rate limits,
+`cmd/cribserver`, `server/web`) at `662d6e3` found one high and seven low
+findings, plus hardening notes. Its report lives outside the repo
+(`security-audit-skill/claude-cribbage/run-1/REPORT.md`). Everything below
+was fixed on the `security-audit-1` branch, each with a regression test
+that fails without the fix.
+
+| Report | Was | Fix (commit) |
+|---|---|---|
+| 4.0 high | Anonymous WebRTC connections renewed their sign-in time for ever and held the 5000-connection pool, locking out sign-in and Resume. | The extension is granted once; a full server admits a new connection by closing an anonymous one from the address holding the most (`c432996`). |
+| 4.1 | A device approval survived the approver's sign-out and admin recovery. | The claim requires the approver's session to outlive the new one; Sign out other devices and recovery drop pending approvals (`41a1081`). |
+| 4.2 | A CR-prefixed or tabbed ICE candidate passed the PublicOnly filter and the 32-candidate cap. | Filtered with pion's own SDP and candidate parsers (`2c8f9f6`). |
+| 4.3 | A few hundred addresses could fill the device sign-in table. | At most 5 waiting per address (`41a1081`). |
+| 4.4 | An invite sent while the account was being deleted outlived it, and became a game after a restart. | Refused under `imu` once the account is marked deleted; Restore drops invites whose parties are gone (`0c1be46`). |
+| 4.5 | Deletion did not wait for a game being created for the user. | It waits for the user's reservations to drain (`0c1be46`). |
+| 4.6 | Logout left other connections on the same token signed in. | They are closed (`fd44ae3`). |
+| 4.7 | A join queued behind a game's end leaked a reservation. | Reserved on the game's actor (`aa9a58e`). |
+| §6 | A stolen session could add a passkey that outlived Sign out other devices; adding one raced recovery. | Passkeys record the adding session (new column, migrated on open), need it live to be added, and go when Sign out other devices ends it; the address is emailed (`abedce7`). |
+| §6 | The TCP transport allocated a claimed 1 MiB frame up front. | The buffer grows as bytes arrive (`2557695`). |
+| §6 | NAT64 addresses (`64:ff9b::/96`) were keyed by /64 and passed Public. | Treated as the IPv4 address they embed (`f881c34`). |
+| §6 | Any web page could open `/rtc` and spend its visitors' signaling slots. | With `-public-url` set, only its pages and the server's own may; apps send no Origin and still connect (`8c1f63e`). |
+| §6 | An empty email key silently fell back to `<db>.email-key`; the admin socket was chmod'ed after creation; `.gitignore` missed `*.email-key` and `certs/`. | Refused; created under umask 077; added (`2c181d2`). |
+| §6 | Game commands were queued on any game ID before the seat check (woke games, revealed IDs). | Only the sender's games, or open ones to join; others are "not found" (`84a774c`). |
+| §6 | Each history first page recomputes records over every finished game. | 5, then one per 10 s per player (`e8356c0`). |
+| §6 | Server numbers went into `innerHTML` unescaped. | Escaped (`6a39566`). |
+
+Left as they are, by decision:
+
+- **SetEmail says when an address has stopped email** (`ErrEmailStopped`).
+  It reveals only that an address opted out, and tells a player why no
+  mail will come; each player's attempts are rate-limited.
+- **Rate limits are in memory, with a soft cap** (`ratelimit.maxBuckets`
+  sweeps only refilled buckets). A restart resets them; a hard cap would
+  have to forget spent buckets, which resets the limits of whoever floods
+  the most keys. Memory per key is small.
+- **Per-address limits assume the server sees client addresses.** Keep the
+  API record DNS only (deploy/README.md); behind Cloudflare's proxy every
+  limit and `/api/stop` would key on edge addresses.
+
+Still to check (report §5, §7):
+
+| Pri | What | Why it matters |
+|---|---|---|
+| 6 | Out-of-scope gaps the hunters noticed: `regLimit` (about 7 addresses can drain new-account mail for everyone; mail to unproven addresses via SetEmail/VerifyEmail is not counted), the auth challenge table (`maxChallenges`) has no per-address share, and one bad row in `LoadUnfinished` blocks every game at startup. | First units of an audit of `auth` and `store`. |
+| 4 | Whether the host is reachable over IPv6, and the memory of an idle data channel against `MemoryMax=1400M`. | They set how cheap the 4.0 attack was, and how many connections the pool can really hold. Do not test against the live server. |
+| 3 | The rest of the repo: `auth`, `store`, `mail`, `engine`, `players`, `deploy/`, `.github/`, `client-godot/`. | Not in this run's scope. |
