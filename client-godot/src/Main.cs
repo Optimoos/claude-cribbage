@@ -193,6 +193,11 @@ public partial class Main : Control
     static bool IsHttps(string? url) =>
         System.Uri.TryCreate(url, System.UriKind.Absolute, out var u) && u.Scheme == "https";
 
+    // IsWebUrl: a link safe to hand to the OS, which would open a file or
+    // network path just as readily. http is allowed for a server on this machine.
+    static bool IsWebUrl(string? url) =>
+        System.Uri.TryCreate(url, System.UriKind.Absolute, out var u) && u.Scheme is "https" or "http";
+
     // OpenReport opens the server's "Report a bug" page in the browser.
     void OpenReport() => OS.ShellOpen(IsHttps(reportUrl) ? reportUrl : DefaultReportUrl);
 
@@ -392,7 +397,21 @@ public partial class Main : Control
                 }
                 openGames = m.GameList.Open.ToList();
                 recentGames = m.GameList.Recent.ToList();
+                // A game that ended while we were away comes only in Recent.
+                var ended = false;
+                foreach (var g in recentGames)
+                {
+                    if (games.TryGetValue(g.GameId, out var old) && !old.Finished)
+                    {
+                        old.Game = g;
+                        ended = true;
+                    }
+                }
                 RenderLobby();
+                if (ended)
+                {
+                    RenderTable();
+                }
                 break;
             case ServerMessage.BodyOneofCase.MatchQueued:
                 Notice("Waiting for an opponent…");
@@ -435,6 +454,9 @@ public partial class Main : Control
                     return;
                 }
                 settings.Token = ""; // stale session; sign in again
+                games.Clear(); // whoever signs in next may be someone else
+                invites.Clear();
+                selected = null;
                 CloseAccountWindows();
                 ShowLogin(true);
                 return;

@@ -555,6 +555,7 @@ const Board = (() => {
 
 const state = {
   me: null,           // AuthOk
+  userId: null,       // of the last sign-in on this page, which the games belong to
   games: new Map(),   // gameId -> latest GameUpdate (or {game} from a list)
   views: new Map(),   // gameId -> view: what the table currently shows
   logs: new Map(),    // gameId -> [{text, cls}]
@@ -681,8 +682,9 @@ function onOpen() {
       return true;
     });
   }
-  if (emailLink && emailLink.kind === 'signin') { setMsg('link-msg', ''); show('link-panel'); return; }
-  if (emailLink && emailLink.kind === 'delete') { setMsg('delete-panel-msg', ''); show('delete-panel'); return; }
+  // These panels' buttons send requests, so the connection must be ready.
+  if (emailLink && emailLink.kind === 'signin') { conn.markReady(); setMsg('link-msg', ''); show('link-panel'); return; }
+  if (emailLink && emailLink.kind === 'delete') { conn.markReady(); setMsg('delete-panel-msg', ''); show('delete-panel'); return; }
   const token = localStorage.getItem('token');
   if (token) {
     resumeSession(token);
@@ -787,6 +789,11 @@ function toast(text) {
 }
 
 function onMessage(m) {
+  // An out-of-date page must reload whichever request found out.
+  if (m.error && m.error.code === 'ERROR_CODE_UPGRADE_REQUIRED') {
+    replies.delete(m.requestId);
+    return onError(m.error);
+  }
   const h = m.requestId && replies.get(m.requestId);
   if (h) {
     replies.delete(m.requestId);
@@ -794,6 +801,14 @@ function onMessage(m) {
   }
   if (m.authOk) {
     try { sessionStorage.removeItem('upgrade-reload'); } catch (e) { /* ignore */ }
+    if (state.userId !== m.authOk.userId) {
+      // Someone else signed in on this tab: forget the last player's games.
+      state.games.clear();
+      state.views.clear();
+      state.logs.clear();
+      state.selected = null;
+      state.userId = m.authOk.userId;
+    }
     state.me = m.authOk;
     state.account = m.authOk.account || {};
     state.history = null;
@@ -826,7 +841,18 @@ function onMessage(m) {
     }
     state.open = l.open || [];
     state.recent = l.recent || [];
+    // A game that ended while this page was away comes only in recent.
+    let ended = false;
+    for (const g of state.recent) {
+      const u = state.games.get(g.gameId);
+      if (!u || u.game.status === 'GAME_STATUS_FINISHED') continue;
+      state.games.set(g.gameId, Object.assign({}, u, { game: g }));
+      const v = state.views.get(g.gameId);
+      if (v) v.g = g;
+      ended = true;
+    }
     renderLobby();
+    if (ended) { updateTitle(); renderTable(); }
   } else if (m.matchQueued) {
     notice('Waiting for an opponent…');
   }
@@ -1569,7 +1595,7 @@ function openAccount() {
   if (!$('account-dialog').open) $('account-dialog').showModal();
 }
 
-function shortDate(ms) {
+function fullDate(ms) {
   return new Date(Number(ms)).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
 }
 
@@ -1588,8 +1614,8 @@ function renderAccount() {
   list.replaceChildren();
   for (const k of a.passkeys || []) {
     const li = document.createElement('li');
-    const used = Number(k.lastUsed) ? `last used ${shortDate(k.lastUsed)}` : 'not used yet';
-    li.innerHTML = `<span><b>${esc(k.name)}</b><small>added ${esc(shortDate(k.created))}, ${esc(used)}</small></span>`;
+    const used = Number(k.lastUsed) ? `last used ${fullDate(k.lastUsed)}` : 'not used yet';
+    li.innerHTML = `<span><b>${esc(k.name)}</b><small>added ${esc(fullDate(k.created))}, ${esc(used)}</small></span>`;
     const rm = document.createElement('button');
     rm.type = 'button';
     rm.className = 'btn btn-ghost';
@@ -2087,7 +2113,7 @@ $('logout').onclick = () => {
   // has; reload then, or after a moment if that never comes.
   const reload = () => location.reload();
   if (!conn.send({ logout: {} })) return reload();
-  conn.dc.addEventListener('close', reload);
+  if (conn.dc) conn.dc.addEventListener('close', reload);
   setTimeout(reload, 1500);
 };
 
