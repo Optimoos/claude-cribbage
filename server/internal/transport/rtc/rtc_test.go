@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -395,5 +396,33 @@ func TestPublicIPOnSharedPort(t *testing.T) {
 	}
 	if !public {
 		t.Errorf("no candidate for the public IP in:\n%s", pc.LocalDescription().SDP)
+	}
+}
+
+// With Origins set, only those pages (and apps, which send no Origin) may
+// open signaling.
+func TestOrigins(t *testing.T) {
+	a, err := NewAPI(Options{Origins: []string{"crib.example"}, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts := httptest.NewServer(a.Handler(func(c *Conn) { c.Close() }))
+	defer ts.Close()
+	url := "ws" + strings.TrimPrefix(ts.URL, "http")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	for origin, ok := range map[string]bool{"": true, "https://crib.example": true, "https://evil.example": false} {
+		h := http.Header{}
+		if origin != "" {
+			h.Set("Origin", origin)
+		}
+		c, _, err := websocket.Dial(ctx, url, &websocket.DialOptions{HTTPHeader: h})
+		if (err == nil) != ok {
+			t.Errorf("origin %q: %v", origin, err)
+		}
+		if c != nil {
+			c.CloseNow()
+		}
+		time.Sleep(20 * time.Millisecond) // let the session slot free up
 	}
 }

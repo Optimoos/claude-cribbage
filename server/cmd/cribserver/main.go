@@ -65,7 +65,7 @@ func main() {
 	lobby := flag.String("lobby", "expert,expert-medium,expert-easy,random", "comma-separated bots the clients offer in the lobby, hardest first; bots this server lacks (nn and expert need -model and -expert) are left out, and the rest stay playable by name")
 	expertPath := flag.String("expert", "", "expert bundle to offer as the \"expert\" bots (e.g. models-expert/expert.bin)")
 	adminSocket := flag.String("admin-socket", "", "listen for admin commands (cribserver admin ...) on this Unix socket, e.g. "+defaultAdminSocket+" (empty disables)")
-	publicURL := flag.String("public-url", "", "the web client's public address, for links in emails and for passkeys (e.g. https://cribbage.example.com); defaults to http://localhost:<http port>")
+	publicURL := flag.String("public-url", "", "the web client's public address, for links in emails and for passkeys (e.g. https://cribbage.example.com); defaults to http://localhost:<http port>. If set, only pages from it (or this server) may open WebRTC signaling")
 	smtpAddr := flag.String("smtp", "", "mail server host:port for sign-in codes (465 for TLS, else STARTTLS); empty writes emails to the log instead (testing only: nobody else can sign in)")
 	smtpUser := flag.String("smtp-user", "", "mail server login")
 	smtpPassFile := flag.String("smtp-password-file", "", "file holding the mail server password (or set CRIBBAGE_SMTP_PASSWORD)")
@@ -257,6 +257,7 @@ func main() {
 			PublicIPs:  splitList(*publicIPs),
 			ICEServers: splitList(*iceServers),
 			PublicOnly: *rtcPublic,
+			Origins:    originsOf(*publicURL),
 			Logger:     log,
 		})
 		if err != nil {
@@ -560,6 +561,15 @@ func localURL(httpAddr string) string {
 		host = "localhost"
 	}
 	return "http://" + net.JoinHostPort(host, port) + "/"
+}
+
+// originsOf is the web client's host, whose pages may open signaling (none
+// without -public-url: then any page may).
+func originsOf(publicURL string) []string {
+	if p, err := url.Parse(publicURL); err == nil && p.Host != "" {
+		return []string{p.Host}
+	}
+	return nil
 }
 
 func hostOf(u string) string {

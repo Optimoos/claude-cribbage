@@ -212,7 +212,13 @@ type Options struct {
 	// X-Forwarded-For entry.
 	MaxSessions        int
 	MaxSessionsPerAddr int
-	Logger             *slog.Logger
+	// Origins, if any, are the hosts ("cribbage.example.com") whose web
+	// pages may open signaling, besides the server's own; requests
+	// without an Origin (apps, not browsers) are always allowed. Empty
+	// allows any page, which lets a third-party page spend its visitors'
+	// signaling slots.
+	Origins []string
+	Logger  *slog.Logger
 }
 
 // API holds WebRTC settings shared by all connections.
@@ -222,6 +228,7 @@ type API struct {
 	log    *slog.Logger
 	mux    *ice.MultiUDPMuxDefault
 	keep   func(addr string) bool // remote candidates to use; nil for all
+	accept websocket.AcceptOptions
 
 	smu         sync.Mutex
 	sessions    int
@@ -255,6 +262,7 @@ func NewAPI(o Options) (*API, error) {
 		byAddr:      map[string]int{},
 		maxSessions: cmp.Or(o.MaxSessions, 200),
 		maxPerAddr:  cmp.Or(o.MaxSessionsPerAddr, 10),
+		accept:      websocket.AcceptOptions{OriginPatterns: o.Origins, InsecureSkipVerify: len(o.Origins) == 0},
 	}
 	if o.PublicOnly {
 		a.keep = publicAddress
@@ -327,9 +335,10 @@ func (a *API) Handler(onConn func(*Conn)) http.Handler {
 			return
 		}
 		defer a.endSession(key)
-		// Any origin may connect: signaling grants nothing by itself, and
-		// clients still authenticate over the data channel.
-		ws, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
+		// Signaling grants nothing by itself (clients still authenticate
+		// over the data channel), but each one spends a slot of the
+		// visitor's address: see Options.Origins.
+		ws, err := websocket.Accept(w, r, &a.accept)
 		if err != nil {
 			return
 		}
