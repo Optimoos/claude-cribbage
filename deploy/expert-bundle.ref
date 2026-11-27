@@ -1,0 +1,4 @@
+# The expert bundle server releases ship with (deploy/release-expert-bundle
+# writes this file; the server release workflow checks the hash).
+url=https://github.com/Optimoos/claude-cribbage/releases/download/expert-20261127-f128ddc4/expert.bin
+sha256=f128ddc4ab859b5960ea7cad8b131aa268d98b12a175ad10d25fd0d1c8fc239b
