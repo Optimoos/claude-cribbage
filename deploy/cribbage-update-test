@@ -1,0 +1,136 @@
+#!/bin/sh
+# Tests cribbage-update against real cribserver builds, a stand-in GitHub on
+# localhost and a stand-in systemctl that runs the server in the background.
+# Needs go, python3, curl and an expert bundle (server/models-expert/expert-v1.bin);
+# uses ports 18080, 17777 and 18999. Run from anywhere: deploy/cribbage-update-test
+set -eu
+
+root=$(cd "$(dirname "$0")/.." && pwd)
+bundle=$root/server/models-expert/expert-v1.bin
+[ -f "$bundle" ] || { echo "needs $bundle" >&2; exit 1; }
+T=$(mktemp -d)
+mkdir -p "$T/opt" "$T/data" "$T/state" "$T/bin" "$T/gh/repos/O/R"
+arch=$(cd "$root/server" && go env GOARCH)
+
+cleanup() {
+	[ -f "$T/pid" ] && kill "$(cat "$T/pid")" 2>/dev/null || true
+	[ -n "${gh:-}" ] && kill "$gh" 2>/dev/null || true
+	rm -rf "$T"
+}
+trap cleanup EXIT
+
+for v in 1 2 3 4 5 6; do
+	(cd "$root/server" && CGO_ENABLED=0 go build -trimpath -ldflags "-X main.version=server-v$v" -o "$T/bin/v$v" ./cmd/cribserver)
+done
+cp "$bundle" "$T/bin/good.bin"
+head -c 5000 /dev/urandom >"$T/bin/bad.bin"
+
+release() { # tag binary bundle [corrupt]: a release's files
+	d=$T/gh/dl/$1
+	mkdir -p "$d"
+	cp "$2" "$d/cribserver-linux-$arch"
+	cp "$3" "$d/expert.bin"
+	(cd "$d" && sha256sum "cribserver-linux-$arch" expert.bin >SHA256SUMS)
+	if [ -n "${4:-}" ]; then sed -i '1s/^./0/' "$d/SHA256SUMS"; fi
+}
+release server-v2 "$T/bin/v2" "$T/bin/good.bin"
+release server-v3 "$T/bin/v3" "$T/bin/bad.bin"            # the server refuses the bundle
+release server-v4 "$T/bin/v4" "$T/bin/good.bin" corrupt   # SHA256SUMS does not match
+release server-v5 "$T/bin/v3" "$T/bin/good.bin"           # the binary says server-v3
+release server-v6 "$T/bin/v6" "$T/bin/good.bin"
+
+cat >"$T/conf" <<EOF
+http = 127.0.0.1:18080
+tcp = 127.0.0.1:17777
+rtc-port = 0
+db = $T/data/cribbage.db
+expert = $T/opt/expert.bin
+EOF
+cat >"$T/systemctl" <<EOF
+#!/bin/sh
+case \$1 in
+stop) if [ -f $T/pid ]; then kill \$(cat $T/pid) 2>/dev/null; while kill -0 \$(cat $T/pid) 2>/dev/null; do sleep 0.2; done; rm -f $T/pid; fi ;;
+start) $T/opt/cribserver -config $T/conf >>$T/server.log 2>&1 & echo \$! >$T/pid ;;
+esac
+EOF
+chmod +x "$T/systemctl"
+
+(cd "$T/gh" && exec python3 -m http.server 18999 --bind 127.0.0.1 >/dev/null 2>&1) &
+gh=$!
+cp "$T/bin/v1" "$T/opt/cribserver"
+cp "$T/bin/good.bin" "$T/opt/expert.bin"
+"$T/systemctl" start
+
+export GITHUB_API=http://127.0.0.1:18999 CRIBBAGE_REPO=O/R CRIBBAGE_CONF=$T/conf \
+	CRIBBAGE_DIR=$T/opt STATE_DIRECTORY=$T/state CRIBBAGE_SYSTEMCTL=$T/systemctl HEALTH_TIMEOUT=15
+
+running() { curl -fsS -m 2 http://127.0.0.1:18080/api/version 2>/dev/null || true; }
+state() { cat "$T/state/$1" 2>/dev/null || true; }
+fail() { echo "FAIL: $*" >&2; exit 1; }
+# Lists releases (newest last, by published_at), then runs the updater.
+run() {
+	python3 -I - "$arch" "$@" >"$T/gh/repos/O/R/releases" <<'EOF'
+import json, sys
+arch, tags = sys.argv[1], sys.argv[2:]
+names = ("cribserver-linux-" + arch, "expert.bin", "SHA256SUMS")
+rel = [{"tag_name": t, "draft": False, "prerelease": False, "published_at": f"2026-01-{i + 1:02d}T00:00:00Z",
+        "assets": [{"name": n, "browser_download_url": f"http://127.0.0.1:18999/dl/{t}/{n}"} for n in names]}
+       for i, t in enumerate(tags)]
+rel.append({"tag_name": "client-v9", "draft": False, "prerelease": False, "published_at": "2027-01-01T00:00:00Z", "assets": []})
+print(json.dumps(rel[::-1]))
+EOF
+	"$root/deploy/cribbage-update" && echo 0 >"$T/rc" || echo $? >"$T/rc"
+}
+expect() { # running deployed failed exit
+	[ "$(running)" = "$1" ] || fail "running $(running), want $1"
+	[ "$(state deployed-tag)" = "$2" ] || fail "deployed $(state deployed-tag), want $2"
+	[ "$(state failed-tag)" = "$3" ] || fail "failed $(state failed-tag), want $3"
+	[ "$(cat "$T/rc")" = "$4" ] || fail "exit $(cat "$T/rc"), want $4"
+	echo "ok: running $1, deployed '$2', failed '$3', exit $4"
+}
+
+sleep 1.5
+[ "$(running)" = server-v1 ] || fail "the first server did not start"
+
+echo "== the check fails before anything is stopped: nothing changes"
+CRIBBAGE_HEALTH_URL=http://127.0.0.1:1/api/version run server-v2
+expect server-v1 "" "" 1
+[ ! -e "$T/opt/cribserver.prev" ] || fail "it swapped files"
+
+echo "== a good release is installed"
+run server-v2
+expect server-v2 server-v2 "" 0
+cmp -s "$T/opt/cribserver.prev" "$T/bin/v1" || fail "cribserver.prev is not the old binary"
+[ -f "$T/data/pre-update/cribbage.db" ] || fail "no database copy"
+
+echo "== nothing new: nothing happens"
+run server-v2
+expect server-v2 server-v2 "" 0
+
+echo "== a server that does not start is replaced by the old one"
+run server-v2 server-v3
+expect server-v2 server-v2 server-v3 1
+cmp -s "$T/opt/cribserver" "$T/bin/v2" || fail "cribserver is not v2 again"
+
+echo "== a failed release is not tried again"
+run server-v2 server-v3
+expect server-v2 server-v2 server-v3 0
+
+echo "== files that do not match SHA256SUMS are refused before stopping"
+run server-v3 server-v4
+expect server-v2 server-v2 server-v4 1
+
+echo "== a binary that is not the release's version is refused"
+run server-v4 server-v5
+expect server-v2 server-v2 server-v5 1
+
+echo "== the database copy fails: the current release keeps running, older .prev files stay"
+rm -rf "$T/data/pre-update"
+touch "$T/data/pre-update" # a file where the copy's directory goes
+prev=$(cat "$T/opt/cribserver.prev" 2>/dev/null | sha256sum)
+run server-v5 server-v6
+expect server-v2 server-v2 server-v6 1
+cmp -s "$T/opt/cribserver" "$T/bin/v2" || fail "cribserver changed"
+[ "$(cat "$T/opt/cribserver.prev" 2>/dev/null | sha256sum)" = "$prev" ] || fail "cribserver.prev changed"
+
+echo "PASS"

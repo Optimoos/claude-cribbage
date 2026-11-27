@@ -36,6 +36,10 @@ Spot instance" below.
 | `cribbage-s3-backup.service`, `.timer` | `/etc/systemd/system/` (with the above) |
 | `cribbage-dns` | `/opt/cribbage/cribbage-dns` (optional: keeps the DNS record on the address, with Cloudflare) |
 | `cribbage-dns.service`, `.timer` | `/etc/systemd/system/` (with the above) |
+| `cribbage-update` | `/opt/cribbage/cribbage-update` (optional: installs new releases by itself; see "Updating") |
+| `cribbage-update.service`, `.timer` | `/etc/systemd/system/` (with the above) |
+| `cribbage-update-test` | stays in the repository: tests `cribbage-update` against local builds (run it after changing either) |
+| `expert-bundle.ref`, `release-expert-bundle` | stay in the repository: which expert bundle releases ship, and the script that publishes one |
 
 ## First install
 
@@ -290,21 +294,80 @@ Godot builds must be replaced. Bump
 Games survive restarts: every move is committed before anyone sees it, and
 clients reconnect and resume by themselves within a few seconds.
 
+### Releases (the usual way)
+
+GitHub builds the server; the server installs it:
+
 ```sh
-scp cribserver root@SERVER:/tmp/
-ssh root@SERVER 'install -m 0755 /tmp/cribserver /opt/cribbage/ && systemctl restart cribbage'
+git tag server-v0.8.0 && git push origin server-v0.8.0
+# within ~5 minutes the server runs it:
+curl https://api.cribbage.example.com/api/version     # server-v0.8.0
 git push origin main:pages      # then the web page (Pages builds it in a minute or so)
 ```
 
-Pages deploys only what is pushed to `pages`, so commits on `main` reach
-players when you deploy, not before.
+The tag runs `.github/workflows/server-release.yml`: the server's tests,
+then Linux builds for arm64 and amd64 stamped with the tag, published with
+the expert bundle and a `SHA256SUMS` as a GitHub release (not marked
+"latest": the desktop clients send players to the latest release). Pages
+deploys only what is pushed to `pages`, so commits on `main` reach players
+when you deploy, not before; wait for `/api/version` before pushing `pages`
+when the protocol version changed.
 
-When the expert bundle changes, copy it with the binary
+On the server, `cribbage-update` (every 5 minutes, by its timer) installs
+the newest `server-v*` release. It checks the files against `SHA256SUMS`
+and the binary's `-version`, stops the server, copies the database to
+`/var/lib/cribbage/pre-update/`, keeps the old binary and bundle as
+`cribserver.prev` and `expert.bin.prev`, and starts the new one. If
+`/api/version` does not give the new tag within 90 seconds it puts the old
+binary, bundle and database back and restarts that, and does not try that
+tag again (a newer one is tried). `journalctl -u cribbage-update` says what
+it did; `/var/lib/cribbage-update/` holds the installed and failed tags.
+
+To turn it on (once, as root, from a checkout of `deploy/`):
+
+```sh
+apt install curl python3    # usually there already; it checks the server with curl
+install -m 0755 cribbage-update /opt/cribbage/
+cp cribbage-update.service cribbage-update.timer /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable --now cribbage-update.timer
+systemctl start cribbage-update && journalctl -u cribbage-update   # once now, to check it
+```
+
+Its first run installs the newest release even when the same code is
+already running, since it does not yet know what is installed.
+
+To go back by hand: `systemctl stop cribbage`, move the `.prev` files over
+the current ones, copy `pre-update/*` back over the database if the new
+release changed it, and start the server. Then push a newer tag, or the
+updater installs the release you left again on its next run unless it is
+recorded in `/var/lib/cribbage-update/failed-tag` (write the tag there).
+
+**The expert bundle** is not in git. Releases ship the one named in
+`deploy/expert-bundle.ref`, whose hash the workflow checks. When a new
+bundle is trained, publish it and commit the reference before tagging:
+
+```sh
+deploy/release-expert-bundle          # server/models-expert/expert-v1.bin by default
+git commit deploy/expert-bundle.ref -m "expert bundle: ..."
+```
+
+The server refuses to start with a bundle that lacks what a level needs
+(from PLAN M43 on, the very hard level needs the pegging policy in
+`expert-v1.bin`), and the updater then puts the old release back.
+
+### By hand
+
+Without the updater, build as in "First install" and:
+
+```sh
+scp cribserver root@SERVER:/tmp/
+ssh root@SERVER 'install -m 0755 /tmp/cribserver /opt/cribbage/ && systemctl restart cribbage'
+```
+
+When the bundle changes, copy it with the binary
 (`scp models-expert/expert-v1.bin root@SERVER:/tmp/expert.bin`, then
-`install -m 0644 /tmp/expert.bin /opt/cribbage/` before the restart). The
-server refuses to start with a bundle that lacks what a level needs: from
-PLAN M43 on, the very hard level needs the pegging policy in
-`expert-v1.bin`, which the old `expert.bin` does not have.
+`install -m 0644 /tmp/expert.bin /opt/cribbage/` before the restart).
 
 Pages left open notice a new page (each build writes its commit to
 `version.json`; open pages check it every 10 minutes, when shown again,

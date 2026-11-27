@@ -42,7 +42,15 @@ import (
 	"golang.org/x/crypto/acme/autocert"
 )
 
+// version is set at build time (-ldflags "-X main.version=server-v0.8.0")
+// by the release workflow; deploy/cribbage-update checks it after a restart.
+var version = "dev"
+
 func main() {
+	if len(os.Args) == 2 && (os.Args[1] == "-version" || os.Args[1] == "--version") {
+		fmt.Println(version)
+		return
+	}
 	if len(os.Args) > 1 && os.Args[1] == "admin" {
 		adminMain(os.Args[2:])
 		return
@@ -297,6 +305,11 @@ func main() {
 			cfg["reportUrl"] = *reportURL
 			cfg["passkeys"] = authSvc.WebAuthn != nil
 			json.NewEncoder(w).Encode(cfg)
+		})
+		mux.HandleFunc("/api/version", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+			w.Header().Set("Access-Control-Allow-Origin", "*")
+			fmt.Fprintln(w, version)
 		})
 		mux.HandleFunc("/api/bots", func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")

@@ -1,0 +1,45 @@
+#!/bin/sh
+# Publishes an expert bundle as its own GitHub release and points
+# deploy/expert-bundle.ref at it, so the bundle stays out of git while each
+# server release still says which bundle it ships with. Run from anywhere
+# in the repository, then commit the .ref file:
+#
+#   deploy/release-expert-bundle [bundle]   # default server/models-expert/expert-v1.bin
+#   git commit deploy/expert-bundle.ref -m "expert bundle: <what changed>"
+#
+# The server release workflow downloads the bundle from the URL, refuses it
+# if the hash differs, and ships it next to the binary. Needs gh, signed in
+# with permission to create releases.
+set -eu
+
+root=$(git rev-parse --show-toplevel)
+bundle=${1:-$root/server/models-expert/expert-v1.bin}
+ref=$root/deploy/expert-bundle.ref
+[ -f "$bundle" ] || { echo "no bundle at $bundle" >&2; exit 1; }
+
+sha=$(sha256sum "$bundle" | cut -d' ' -f1)
+if [ -f "$ref" ] && grep -qx "sha256=$sha" "$ref"; then
+	echo "$ref already points at this bundle"
+	exit 0
+fi
+
+# The date says when, the hash prefix tells two bundles of one day apart.
+tag=expert-$(date -u +%Y%m%d)-$(echo "$sha" | cut -c1-8)
+repo=$(gh repo view --json nameWithOwner -q .nameWithOwner)
+# The asset is always named expert.bin, the name the server is configured with.
+asset=$(mktemp -d)
+trap 'rm -rf "$asset"' EXIT
+cp "$bundle" "$asset/expert.bin"
+
+# --latest=false: the desktop clients link players to releases/latest.
+gh release create "$tag" "$asset/expert.bin" --repo "$repo" --latest=false \
+	--title "Expert bundle $tag" \
+	--notes "Expert bot bundle for the game server (from ${bundle#"$root"/}, sha256 $sha). Server releases include it; this release keeps it downloadable."
+
+cat >"$ref" <<EOF
+# The expert bundle server releases ship with (deploy/release-expert-bundle
+# writes this file; the server release workflow checks the hash).
+url=https://github.com/$repo/releases/download/$tag/expert.bin
+sha256=$sha
+EOF
+echo "published $tag; now commit $ref"
