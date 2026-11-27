@@ -1,0 +1,38 @@
+# Installs new server releases from GitHub (cribbage-update; see README.md,
+# "Updating"). Install as /etc/systemd/system/cribbage-update.service, with
+# cribbage-update.timer, which runs it every 5 minutes.
+[Unit]
+Description=Install a new cribbage server release, if there is one
+Wants=network-online.target
+After=network-online.target cribbage-dns.service
+
+[Service]
+Type=oneshot
+Environment=CRIBBAGE_REPO=Optimoos/claude-cribbage
+Environment=CRIBBAGE_CONF=/etc/cribbage/cribserver.conf
+# Remembers the installed and failed tags in /var/lib/cribbage-update.
+StateDirectory=cribbage-update
+ExecStart=/opt/cribbage/cribbage-update
+# Downloads, the server's restart and up to 90 s waiting for it, twice if
+# it has to put the old one back.
+TimeoutStartSec=10min
+
+# Hardening: it runs as root (systemctl, and the database copy keeps the
+# cribbage user as owner), downloads from GitHub, and writes only the
+# install and data directories.
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/opt/cribbage /var/lib/cribbage
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+LockPersonality=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+SystemCallArchitectures=native
+UMask=0022

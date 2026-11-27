@@ -1,0 +1,12 @@
+# Runs cribbage-update.service every 5 minutes. Install as
+# /etc/systemd/system/cribbage-update.timer.
+[Unit]
+Description=Check for a new cribbage server release every 5 minutes
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=5min
+RandomizedDelaySec=30s
+
+[Install]
+WantedBy=timers.target

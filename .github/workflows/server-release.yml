@@ -1,0 +1,74 @@
+# Builds the game server and publishes it, with the expert bundle, as a
+# GitHub release, which servers running deploy/cribbage-update install by
+# themselves within a few minutes.
+#
+#   Release: push a tag named server-v<version>, e.g.
+#     git tag server-v0.8.0 && git push origin server-v0.8.0
+#   Try a build without releasing: Actions > Server release > Run workflow;
+#   the files are kept as the run's artifacts for a week.
+#
+# The bundle comes from deploy/expert-bundle.ref (written by
+# deploy/release-expert-bundle), not from git.
+name: Server release
+
+on:
+  push:
+    tags: ["server-v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write # to create the release
+
+concurrency:
+  group: server-release-${{ github.ref }}
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: server
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: server/go.mod
+
+      # Server tests skip tag pushes (their paths filter), so check here.
+      - run: go vet ./...
+      - run: go test ./...
+
+      - name: Expert bundle
+        run: |
+          mkdir -p dist
+          url=$(sed -n 's/^url=//p' ../deploy/expert-bundle.ref)
+          sha=$(sed -n 's/^sha256=//p' ../deploy/expert-bundle.ref)
+          [ -n "$url" ] && [ -n "$sha" ] || { echo "::error::deploy/expert-bundle.ref needs url= and sha256="; exit 1; }
+          curl -fsSL --retry 3 -o dist/expert.bin "$url"
+          echo "$sha  dist/expert.bin" | sha256sum -c
+
+      - name: Build
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = push ]; then v=$GITHUB_REF_NAME; else v=test-${GITHUB_SHA::7}; fi
+          for arch in arm64 amd64; do
+            CGO_ENABLED=0 GOOS=linux GOARCH=$arch go build -trimpath \
+              -ldflags "-X main.version=$v" -o dist/cribserver-linux-$arch ./cmd/cribserver
+          done
+          cd dist && sha256sum cribserver-linux-* expert.bin > SHA256SUMS && cat SHA256SUMS
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cribserver
+          path: server/dist/
+          retention-days: 7
+
+      - name: Release
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        # --latest=false: the desktop clients link players to releases/latest.
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* --latest=false \
+            --title "Server $GITHUB_REF_NAME" --generate-notes \
+            --notes "Game server for Linux (arm64, amd64) and its expert bundle. Servers running deploy/cribbage-update install it by themselves; see deploy/README.md."

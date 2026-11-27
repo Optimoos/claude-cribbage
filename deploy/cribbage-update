@@ -1,0 +1,296 @@
+#!/usr/bin/python3 -I
+"""Installs new server releases from GitHub, and puts the old one back if
+the new one does not come up.
+
+Run by cribbage-update.service, every few minutes from cribbage-update.timer
+(see README.md, "Updating"). It finds the newest release tagged server-v*
+(the server release workflow makes them), and if that is not the one
+installed:
+
+  * downloads the binary for this machine and the expert bundle, and checks
+    them against the release's SHA256SUMS and the binary's -version;
+  * stops the server, copies the database (with its -wal and -shm files)
+    to <db dir>/pre-update/, keeps the current binary and bundle as .prev,
+    installs the new ones and starts the server;
+  * waits for the server's /api/version to give the new tag. If it does not
+    within HEALTH_TIMEOUT seconds, it stops the server, puts back the .prev
+    files and the database copy, starts the server again, and remembers the
+    tag as failed so it is not tried again (a newer tag is).
+
+The release is public, so this needs no GitHub credentials, and GitHub's
+limit for anonymous use (60 requests an hour) is far above what it uses.
+
+Settings (environment): CRIBBAGE_REPO (owner/name), CRIBBAGE_CONF (the
+server's config file: tls-domain, http, db and expert come from it),
+CRIBBAGE_DIR (where the binary lives), CRIBBAGE_SERVICE (the systemd unit),
+STATE_DIRECTORY (set by systemd: remembers the installed and failed tags).
+For testing: GITHUB_API, CRIBBAGE_SYSTEMCTL (a command used in place of
+systemctl), CRIBBAGE_HEALTH_URL, HEALTH_TIMEOUT.
+"""
+
+import hashlib
+import json
+import os
+import platform
+import shlex
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+import urllib.request
+
+REPO = os.environ.get("CRIBBAGE_REPO", "Optimoos/claude-cribbage")
+API = os.environ.get("GITHUB_API", "https://api.github.com")
+CONF = os.environ.get("CRIBBAGE_CONF", "/etc/cribbage/cribserver.conf")
+DIR = os.environ.get("CRIBBAGE_DIR", "/opt/cribbage")
+SERVICE = os.environ.get("CRIBBAGE_SERVICE", "cribbage")
+STATE = os.environ.get("STATE_DIRECTORY", "/var/lib/cribbage-update")
+SYSTEMCTL = shlex.split(os.environ.get("CRIBBAGE_SYSTEMCTL", "systemctl"))
+HEALTH_TIMEOUT = float(os.environ.get("HEALTH_TIMEOUT", "90"))
+ARCH = {"aarch64": "arm64", "arm64": "arm64", "x86_64": "amd64", "amd64": "amd64"}
+
+
+def log(msg):
+    print(msg, flush=True)
+
+
+class Unusable(Exception):
+    """The release itself is bad (wrong checksum, binary, missing file):
+    remembered as failed, unlike a network error, which is retried."""
+
+
+def fetch(url, timeout=60):
+    req = urllib.request.Request(url, headers={"User-Agent": "cribbage-update", "Accept": "application/vnd.github+json"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return r.read()
+
+
+def read_conf(path):
+    """The server's settings: name = value lines, as cribserver reads them
+    (only plain values matter here)."""
+    conf = {}
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            v = v.strip()
+            if len(v) >= 2 and v[0] == v[-1] == '"':
+                v = v[1:-1]
+            else:
+                v = v.split(" #", 1)[0].strip()
+            conf[k.strip()] = v
+    return conf
+
+
+def read_state(name):
+    try:
+        with open(os.path.join(STATE, name)) as f:
+            return f.read().strip()
+    except FileNotFoundError:
+        return ""
+
+
+def write_state(name, value):
+    path = os.path.join(STATE, name)
+    with open(path + ".tmp", "w") as f:
+        f.write(value + "\n")
+    os.replace(path + ".tmp", path)
+
+
+def systemctl(*args):
+    subprocess.run(SYSTEMCTL + list(args), check=True)
+
+
+def server_version(conf):
+    """What the running server's /api/version says, or "" if it does not
+    answer. It serves TLS only for tls-domain, so ask for that name at
+    this machine's own address."""
+    url = os.environ.get("CRIBBAGE_HEALTH_URL")
+    cmd = ["curl", "-fsS", "-m", "5"]
+    if not url:
+        host, _, port = conf.get("http", "127.0.0.1:8080").rpartition(":")
+        domain = conf.get("tls-domain", "")
+        if domain:
+            url = f"https://{domain}:{port}/api/version"
+            cmd += ["--resolve", f"{domain}:{port}:127.0.0.1"]
+        else:
+            url = f"http://{host if host not in ('', '0.0.0.0', '[::]') else '127.0.0.1'}:{port}/api/version"
+    try:
+        r = subprocess.run(cmd + [url], capture_output=True, text=True)
+    except OSError:  # no curl
+        return ""
+    return r.stdout.strip() if r.returncode == 0 else ""
+
+
+def binary_version(path):
+    """What a cribserver binary says it is: its tag, "dev" for a hand-made
+    build, "" if it does not run here or is older than -version."""
+    try:
+        return subprocess.run([path, "-version"], capture_output=True, text=True, timeout=10).stdout.strip()
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+
+
+def wait_for(conf, tag):
+    deadline = time.monotonic() + HEALTH_TIMEOUT
+    while time.monotonic() < deadline:
+        if server_version(conf) == tag:
+            return True
+        time.sleep(2)
+    return False
+
+
+def db_files(db):
+    return [db + s for s in ("", "-wal", "-shm")]
+
+
+def snapshot(db, snap):
+    shutil.rmtree(snap, ignore_errors=True)
+    os.makedirs(snap, mode=0o700)
+    for f in db_files(db):
+        if os.path.exists(f):
+            shutil.copy2(f, snap)
+            st = os.stat(f)
+            os.chown(os.path.join(snap, os.path.basename(f)), st.st_uid, st.st_gid)
+
+
+def restore(db, snap):
+    for f in db_files(db):
+        if os.path.exists(f):
+            os.remove(f)
+    for f in db_files(db):
+        saved = os.path.join(snap, os.path.basename(f))
+        if os.path.exists(saved):
+            shutil.copy2(saved, f)
+            st = os.stat(saved)
+            os.chown(f, st.st_uid, st.st_gid)
+
+
+def newest_release():
+    releases = json.loads(fetch(f"{API}/repos/{REPO}/releases?per_page=50"))
+    ours = [r for r in releases if r["tag_name"].startswith("server-v") and not r["draft"] and not r["prerelease"]]
+    # The last published, not the newest commit: a tag on an older commit is
+    # how to go back to it.
+    return max(ours, key=lambda r: r["published_at"], default=None)
+
+
+def download(release, tmp):
+    arch = ARCH.get(platform.machine())
+    if not arch:
+        raise Unusable(f"no build for this machine ({platform.machine()})")
+    assets = {a["name"]: a["browser_download_url"] for a in release["assets"]}
+    files = {"cribserver": f"cribserver-linux-{arch}", "expert.bin": "expert.bin", "SHA256SUMS": "SHA256SUMS"}
+    for local, name in files.items():
+        if name not in assets:
+            raise Unusable(f"the release has no {name}")
+        with open(os.path.join(tmp, local), "wb") as f:
+            f.write(fetch(assets[name], timeout=300))
+    sums = {}
+    with open(os.path.join(tmp, "SHA256SUMS")) as f:
+        for line in f:
+            h, _, name = line.strip().partition("  ")
+            sums[name] = h
+    for local, name in files.items():
+        if local == "SHA256SUMS":
+            continue
+        with open(os.path.join(tmp, local), "rb") as f:
+            if hashlib.sha256(f.read()).hexdigest() != sums.get(name):
+                raise Unusable(f"{name} does not match SHA256SUMS")
+    binary = os.path.join(tmp, "cribserver")
+    os.chmod(binary, 0o755)
+    os.chmod(os.path.join(tmp, "expert.bin"), 0o644)
+    v = binary_version(binary)
+    if v != release["tag_name"]:
+        raise Unusable(f"the binary says it is {v!r}, not {release['tag_name']}")
+
+
+def install(release, conf, tmp):
+    tag = release["tag_name"]
+    db = conf.get("db", "/var/lib/cribbage/cribbage.db")
+    snap = os.path.join(os.path.dirname(db), "pre-update")
+    targets = {"cribserver": os.path.join(DIR, "cribserver"), "expert.bin": conf.get("expert") or os.path.join(DIR, "expert.bin")}
+
+    # What the old server answers once put back. The check below decides
+    # whether a new release is thrown away with its database changes, so it
+    # must work before anything is stopped.
+    old = binary_version(targets["cribserver"])
+    if old and server_version(conf) != old:
+        raise RuntimeError(f"the running server does not answer /api/version with {old!r}: is it running, and is curl installed? Nothing changed")
+
+    moved = []  # only what this run moved: older .prev files stay put
+
+    def put_back(snapped):
+        systemctl("stop", SERVICE)
+        for dest in moved:
+            if os.path.exists(dest + ".prev"):
+                os.replace(dest + ".prev", dest)
+        if snapped:  # a half-made copy must not replace the database
+            restore(db, snap)
+        systemctl("start", SERVICE)
+        if old and wait_for(conf, old):
+            log(f"{old} is running again")
+        else:
+            log(f"the old server did not answer either: check it now (systemctl status {SERVICE})")
+
+    systemctl("stop", SERVICE)
+    snapped = False
+    try:
+        snapshot(db, snap)
+        snapped = True
+        for local, dest in targets.items():
+            if os.path.exists(dest):
+                os.replace(dest, dest + ".prev")
+                moved.append(dest)
+            shutil.move(os.path.join(tmp, local), dest)
+        systemctl("start", SERVICE)
+    except Exception:
+        write_state("failed-tag", tag)
+        log(f"installing {tag} failed; putting the old one back")
+        put_back(snapped)
+        raise
+    if wait_for(conf, tag):
+        write_state("deployed-tag", tag)
+        log(f"installed {tag}; the old binary and bundle are .prev, the database before it is in {snap}")
+        return True
+
+    log(f"{tag} did not answer on /api/version within {HEALTH_TIMEOUT:.0f}s (journalctl -u {SERVICE}); putting the old one back")
+    write_state("failed-tag", tag)
+    put_back(True)
+    return False
+
+
+def main():
+    os.makedirs(STATE, exist_ok=True)
+    release = newest_release()
+    if not release:
+        log("no server-v* release yet")
+        return 0
+    tag = release["tag_name"]
+    if tag == read_state("deployed-tag"):
+        return 0
+    if tag == read_state("failed-tag"):
+        log(f"{tag} failed before; waiting for a newer release")
+        return 0
+    log(f"installing {tag} (was {read_state('deployed-tag') or 'unknown'})")
+    conf = read_conf(CONF)
+    tmp = tempfile.mkdtemp(prefix=".update-", dir=DIR)
+    try:
+        try:
+            download(release, tmp)
+        except Unusable as e:
+            write_state("failed-tag", tag)
+            log(f"not installing {tag}: {e}")
+            return 1
+        return 0 if install(release, conf, tmp) else 1
+    except RuntimeError as e:
+        log(str(e))
+        return 1
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
